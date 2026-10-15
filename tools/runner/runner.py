@@ -210,14 +210,12 @@ def main():
             cmd = step.get("run")
             if not cmd:
                 record(name, "setup", 1, 0.0, "step missing required 'run' command")
-                if step.get("hard", True):
+                if step.get("hard"):
                     hard_setup_failed = True
                     break
                 continue
             cwd = repo_dir if step.get("cwd") == "repo" else (step.get("cwd") or None)
-            timeout = step.get("timeout")
-            timeout_s = timeout if isinstance(timeout, (int, float)) and timeout > 0 else 600
-            code, dur, out = run_cmd(cmd, timeout_s, cwd=cwd)
+            code, dur, out = run_cmd(cmd, step.get("timeout", 600), cwd=cwd)
             record(name, "setup", code, dur, out)
             if code != 0 and step.get("hard"):
                 hard_setup_failed = True
@@ -236,9 +234,7 @@ def main():
                 break
             continue
         cwd = repo_dir if step.get("cwd") == "repo" else (step.get("cwd") or None)
-        timeout = step.get("timeout")
-        timeout_s = timeout if isinstance(timeout, (int, float)) and timeout > 0 else 600
-        code, dur, out = run_cmd(cmd, timeout_s, cwd=cwd)
+        code, dur, out = run_cmd(cmd, step.get("timeout", 600), cwd=cwd)
         record(name, "cmd", code, dur, out)
         if code != 0 and step.get("hard"):
             break
