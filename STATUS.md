@@ -1,4 +1,5 @@
 # STATUS (for the human — 15 lines max)
+- Contributor runner fix: required result files now affect job success; reproduced a false green on unchanged main, with offline regressions. Pending upstream CI/review, no bounty award assumed.
 
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — the conveyor ran hot again: **14 PRs processed this session (11 merged, 3 duplicate-credited closes) + 2 zombie closes + wave-wide triage comments on all 40+ open PRs**, and the **CI-down P0 was found and fixed**
 - **P0 fixed — repo CI had been dead since 96f0bc4**: a mangled conflict resolution left an unindented duplicate py_compile line (ci.yml unparseable — every Actions run died with 0 jobs) and a Makefile recipe TAB loss; PR #172's deletion merged (8b9e1d6), #199's Makefile half integrated (cb53ead), push-run GREEN on our side; the corrupted `branches: ain]` push filter is a **known issue** (CI empirically fails open and runs; byte-level fix attempts keep losing to an environment quirk — fix scripts staged in /scripts, do it via the GitHub Contents API next session)
