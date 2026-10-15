@@ -92,6 +92,11 @@ if ! fetch "$BASE_URL/$ASSET.sha256" "$TMP/$ASSET.sha256"; then
     echo "install.sh: could not download $ASSET.sha256 — aborting before installation; retry when the checksum asset is available" >&2
     exit 1
 fi
+CHECKSUM_HEX="$(sed -n 's/^[[:space:]]*\([0-9a-fA-F]\{64\}\).*/\1/p' "$TMP/$ASSET.sha256" 2>/dev/null | head -1)"
+if [ -z "$CHECKSUM_HEX" ]; then
+    echo "install.sh: invalid or empty checksum file $ASSET.sha256 — aborting" >&2
+    exit 1
+fi
 ( cd "$TMP" && sha256sum -c "$ASSET.sha256" >/dev/null 2>&1 ) \
     || ( cd "$TMP" && shasum -a 256 -c "$ASSET.sha256" >/dev/null 2>&1 ) \
     || { echo "install.sh: sha256 MISMATCH — aborting (do not use the download)" >&2; exit 1; }

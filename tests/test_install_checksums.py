@@ -127,6 +127,14 @@ class InstallerChecksumTests(unittest.TestCase):
         self.checksum.write_text("", encoding="utf-8")
         self.assert_rejected_without_installing(self.run_installer())
 
+    def test_whitespace_checksum_aborts(self):
+        self.checksum.write_text("   \n\t\n  ", encoding="utf-8")
+        self.assert_rejected_without_installing(self.run_installer())
+
+    def test_corrupt_format_checksum_aborts(self):
+        self.checksum.write_text("not_a_valid_hex_hash_at_all  " + self.asset + "\n", encoding="utf-8")
+        self.assert_rejected_without_installing(self.run_installer())
+
     def test_archive_download_failure_aborts(self):
         self.assert_rejected_without_installing(self.run_installer(HYB_TEST_FAIL_ARCHIVE="1"))
 
