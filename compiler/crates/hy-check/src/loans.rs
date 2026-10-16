@@ -1227,17 +1227,15 @@ impl<'a> Checker<'a> {
                         if let Some(body) = &f.body {
                             let mut returned_params = HashSet::new();
                             Self::collect_block_return_slot_param_names(body, slot_idx, &mut returned_params);
-                            if !returned_params.is_empty() {
-                                let mut roots = Vec::new();
-                                for (p_idx, p) in f.params.iter().enumerate() {
-                                    if returned_params.contains(&p.name) {
-                                        if let Some(arg) = args.get(p_idx) {
-                                            collect_ref_roots(&arg.value, &mut roots);
-                                        }
+                            let mut roots = Vec::new();
+                            for (p_idx, p) in f.params.iter().enumerate() {
+                                if returned_params.contains(&p.name) {
+                                    if let Some(arg) = args.get(p_idx) {
+                                        collect_ref_roots(&arg.value, &mut roots);
                                     }
                                 }
-                                return roots;
                             }
+                            return roots;
                         }
                     }
                 }

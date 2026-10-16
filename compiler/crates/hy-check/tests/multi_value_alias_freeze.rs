@@ -429,6 +429,38 @@ fn multi_return_fresh_and_alias_fresh_slot_unfrozen_when_param_moved() {
     );
 }
 
+const MULTI_RETURN_DIRECT_LITERAL_FRESH_AND_ALIAS: &str = "\
+fn fresh_and_alias(a map[string]int) (map[string]int, map[string]int) {
+    return map[string]int{\"f\": 0}, a
+}
+
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+
+fn main() {
+    a := map[string]int{\"a\": 1}
+    x, y := fresh_and_alias(a)
+    _ = y
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    x[\"f\"] = 10
+    <-done
+}
+";
+
+#[test]
+fn multi_return_direct_literal_fresh_and_alias_accepts() {
+    let r = check(MULTI_RETURN_DIRECT_LITERAL_FRESH_AND_ALIAS);
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "direct literal return in slot 0 must not falsely inherit caller param roots from fallback: {:?}",
+        r.diagnostics
+    );
+}
+
 const LEXICAL_DUPLICATE_LEFT_STORE_ORDER_ACCEPTS_FIRST_MOVED: &str = "\
 fn worker(m map[string]int, done chan<- bool) {
     m[\"k\"] = 1
