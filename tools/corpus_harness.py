@@ -35,7 +35,7 @@ DEFAULT_CORPUS = os.path.join(REPO_ROOT, "tests", "checker-corpus")
 DEFAULT_BIN = os.path.join(os.environ.get("CARGO_TARGET_DIR", "/home/z/go-hybrid-target"), "debug", "hyb")
 
 VERDICT_RE = re.compile(
-    r"^//[ \t]*EXPECTED-VERDICT:[ \t]*([^\r\n]*)", re.M
+    r"^[ 	]*//[ \t]*EXPECTED-VERDICT:[ \t]*([^\r\n]*)", re.M
 )
 DIAGNOSTIC_HEADER_RE = re.compile(
     r"^[ \t]*//[ \t]*EXPECTED-DIAGNOSTIC\b[^\n]*$", re.M
