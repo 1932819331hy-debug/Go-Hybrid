@@ -25,7 +25,7 @@ use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{AssignOp, Block, Expr, FnDecl, LocalDecl, LocalKind, Place, PlaceKind, Stmt};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Read-only call targets that can never mutate a map argument — the A3
 /// callee scan fails closed on everything else (#111).
@@ -1147,30 +1147,111 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn resolve_expr_param_roots(
+        expr: &Expr,
+        param_names: &HashSet<String>,
+        local_roots: &HashMap<String, HashSet<String>>,
+    ) -> HashSet<String> {
+        let mut raw = Vec::new();
+        collect_ref_roots(expr, &mut raw);
+        let mut resolved = HashSet::new();
+        for r in raw {
+            if param_names.contains(&r) {
+                resolved.insert(r);
+            } else if let Some(roots) = local_roots.get(&r) {
+                resolved.extend(roots.iter().cloned());
+            }
+        }
+        resolved
+    }
+
     fn collect_stmt_return_slot_param_names(
         stmt: &Stmt,
         slot_idx: usize,
+        param_names: &HashSet<String>,
+        local_roots: &mut HashMap<String, HashSet<String>>,
         out: &mut HashSet<String>,
     ) {
         match stmt {
             Stmt::Return { values, .. } => {
                 if let Some(val) = values.get(slot_idx) {
-                    let mut roots = Vec::new();
-                    collect_ref_roots(val, &mut roots);
+                    let roots = Self::resolve_expr_param_roots(val, param_names, local_roots);
                     out.extend(roots);
                 }
             }
-            Stmt::If { then, otherwise, .. } => {
-                Self::collect_block_return_slot_param_names(then, slot_idx, out);
-                if let Some(other) = otherwise {
-                    Self::collect_stmt_return_slot_param_names(other, slot_idx, out);
+            Stmt::Local(l) => {
+                if l.names.len() == l.values.len() {
+                    for (name, val) in l.names.iter().zip(&l.values) {
+                        let roots = Self::resolve_expr_param_roots(val, param_names, local_roots);
+                        local_roots.insert(name.clone(), roots);
+                    }
+                } else if l.values.len() == 1 {
+                    let roots = Self::resolve_expr_param_roots(&l.values[0], param_names, local_roots);
+                    for name in &l.names {
+                        local_roots.insert(name.clone(), roots.clone());
+                    }
                 }
             }
-            Stmt::For { body, .. } => {
-                Self::collect_block_return_slot_param_names(body, slot_idx, out);
+            Stmt::Assign { targets, values, .. } => {
+                if targets.len() == values.len() {
+                    let updates: Vec<(String, HashSet<String>)> = targets
+                        .iter()
+                        .zip(values)
+                        .filter_map(|(target, val)| {
+                            if let PlaceKind::Ident(name) = &target.kind {
+                                Some((
+                                    name.clone(),
+                                    Self::resolve_expr_param_roots(val, param_names, local_roots),
+                                ))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    for (name, roots) in updates {
+                        local_roots.insert(name, roots);
+                    }
+                } else if values.len() == 1 {
+                    let roots = Self::resolve_expr_param_roots(&values[0], param_names, local_roots);
+                    for target in targets {
+                        if let PlaceKind::Ident(name) = &target.kind {
+                            local_roots.insert(name.clone(), roots.clone());
+                        }
+                    }
+                }
             }
-            Stmt::Block { block, .. } => {
-                Self::collect_block_return_slot_param_names(block, slot_idx, out);
+            Stmt::If { init, then, otherwise, .. } => {
+                if let Some(init_stmt) = init {
+                    Self::collect_stmt_return_slot_param_names(init_stmt, slot_idx, param_names, local_roots, out);
+                }
+                let mut then_roots = local_roots.clone();
+                Self::collect_block_return_slot_param_names(then, slot_idx, param_names, &mut then_roots, out);
+                let mut else_roots = local_roots.clone();
+                if let Some(other) = otherwise {
+                    Self::collect_stmt_return_slot_param_names(other, slot_idx, param_names, &mut else_roots, out);
+                }
+                for (k, v) in then_roots {
+                    local_roots.entry(k).or_default().extend(v);
+                }
+                for (k, v) in else_roots {
+                    local_roots.entry(k).or_default().extend(v);
+                }
+            }
+            Stmt::For { body, .. } | Stmt::Block { block: body, .. } => {
+                let mut inner_roots = local_roots.clone();
+                Self::collect_block_return_slot_param_names(body, slot_idx, param_names, &mut inner_roots, out);
+                for (k, v) in inner_roots {
+                    local_roots.entry(k).or_default().extend(v);
+                }
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    let mut arm_roots = local_roots.clone();
+                    Self::collect_block_return_slot_param_names(&arm.body, slot_idx, param_names, &mut arm_roots, out);
+                    for (k, v) in arm_roots {
+                        local_roots.entry(k).or_default().extend(v);
+                    }
+                }
             }
             _ => {}
         }
@@ -1179,10 +1260,12 @@ impl<'a> Checker<'a> {
     fn collect_block_return_slot_param_names(
         block: &Block,
         slot_idx: usize,
+        param_names: &HashSet<String>,
+        local_roots: &mut HashMap<String, HashSet<String>>,
         out: &mut HashSet<String>,
     ) {
         for stmt in &block.stmts {
-            Self::collect_stmt_return_slot_param_names(stmt, slot_idx, out);
+            Self::collect_stmt_return_slot_param_names(stmt, slot_idx, param_names, local_roots, out);
         }
     }
 
@@ -1225,8 +1308,17 @@ impl<'a> Checker<'a> {
                 if self.lookup_binding(st, name).is_none() {
                     if let Some(f) = self.fns.get(name.as_str()) {
                         if let Some(body) = &f.body {
+                            let param_names: HashSet<String> =
+                                f.params.iter().map(|p| p.name.clone()).collect();
+                            let mut local_roots = HashMap::new();
                             let mut returned_params = HashSet::new();
-                            Self::collect_block_return_slot_param_names(body, slot_idx, &mut returned_params);
+                            Self::collect_block_return_slot_param_names(
+                                body,
+                                slot_idx,
+                                &param_names,
+                                &mut local_roots,
+                                &mut returned_params,
+                            );
                             let mut roots = Vec::new();
                             for (p_idx, p) in f.params.iter().enumerate() {
                                 if returned_params.contains(&p.name) {

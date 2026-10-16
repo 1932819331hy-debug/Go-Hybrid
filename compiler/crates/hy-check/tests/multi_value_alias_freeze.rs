@@ -461,6 +461,146 @@ fn multi_return_direct_literal_fresh_and_alias_accepts() {
     );
 }
 
+const MULTI_RETURN_LOCAL_ALIAS_RELAY: &str = "\
+fn relay(a map[string]int) (map[string]int, int) {
+    x := a
+    return x, 0
+}
+
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+
+fn main() {
+    a := map[string]int{\"k\": 0}
+    x, n := relay(a)
+    _ = n
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    x[\"k\"] = 2
+    <-done
+}
+";
+
+#[test]
+fn multi_return_local_alias_relay_preserves_provenance_rejects_e3003() {
+    let r = check(MULTI_RETURN_LOCAL_ALIAS_RELAY);
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for write through `x` which aliases moved `a` via callee local `x := a`, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+const MULTI_RETURN_LOCAL_ALIAS_CHAIN: &str = "\
+fn relay_chain(a map[string]int) (map[string]int, int) {
+    x := a
+    y := x
+    return y, 0
+}
+
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+
+fn main() {
+    a := map[string]int{\"k\": 0}
+    x, n := relay_chain(a)
+    _ = n
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    x[\"k\"] = 2
+    <-done
+}
+";
+
+#[test]
+fn multi_return_local_alias_chain_preserves_provenance_rejects_e3003() {
+    let r = check(MULTI_RETURN_LOCAL_ALIAS_CHAIN);
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for write through `x` which aliases moved `a` via chain `x := a; y := x; return y`, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+const MULTI_RETURN_LOCAL_ALIAS_REBIND_FRESH: &str = "\
+fn rebind_fresh(a map[string]int) (map[string]int, int) {
+    x := a
+    x = map[string]int{\"fresh\": 1}
+    return x, 0
+}
+
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+
+fn main() {
+    a := map[string]int{\"k\": 0}
+    x, n := rebind_fresh(a)
+    _ = n
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    x[\"fresh\"] = 2
+    <-done
+}
+";
+
+#[test]
+fn multi_return_local_alias_rebind_fresh_accepts() {
+    let r = check(MULTI_RETURN_LOCAL_ALIAS_REBIND_FRESH);
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "strong update `x = fresh` must disconnect `x` from `a`: {:?}",
+        r.diagnostics
+    );
+}
+
+const MULTI_RETURN_BRANCH_UNION: &str = "\
+fn maybe_alias(a map[string]int, flag bool) (map[string]int, int) {
+    if flag {
+        x := a
+        return x, 0
+    }
+    return map[string]int{\"fresh\": 1}, 0
+}
+
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+
+fn main() {
+    a := map[string]int{\"k\": 0}
+    x, n := maybe_alias(a, true)
+    _ = n
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    x[\"k\"] = 2
+    <-done
+}
+";
+
+#[test]
+fn multi_return_branch_union_preserves_provenance_rejects_e3003() {
+    let r = check(MULTI_RETURN_BRANCH_UNION);
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for write through `x` when branch may return alias of `a`, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
 const LEXICAL_DUPLICATE_LEFT_STORE_ORDER_ACCEPTS_FIRST_MOVED: &str = "\
 fn worker(m map[string]int, done chan<- bool) {
     m[\"k\"] = 1
