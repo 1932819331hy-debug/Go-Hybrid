@@ -25,6 +25,7 @@ Strategies (deterministic seed → reproducible job):
 Stdlib only (runner discipline). Exit 0 iff all invariants held for all cases.
 """
 import argparse
+import math
 import os
 import random
 import subprocess
@@ -141,7 +142,7 @@ def main():
         raise SystemExit(f"hyfuzz: --corpus directory not found: {args.corpus}")
     if args.cases <= 0:
         raise SystemExit("hyfuzz: --cases must be positive")
-    if args.timeout <= 0:
+    if not (math.isfinite(args.timeout) and args.timeout > 0):
         raise SystemExit("hyfuzz: --timeout must be positive")
     corpus = load_corpus(args.corpus)
     if not corpus:

@@ -141,13 +141,22 @@ class FuzzInputValidationTests(unittest.TestCase):
     def test_non_positive_timeout_fails_closed(self):
         with tempfile.TemporaryDirectory() as corpus:
             Path(corpus, "case.hy").write_text("fn main() {}", encoding="utf-8")
-            for timeout in ("0", "-1.0"):
+            for timeout in ("0", "-1.0", "nan", "inf", "-inf"):
                 with self.subTest(timeout=timeout):
                     with patch.object(sys, "argv", [
                         "hyfuzz.py", "--hyb", sys.executable, "--corpus", corpus, "--cases", "1", "--timeout", timeout,
                     ]), self.assertRaises(SystemExit) as failure:
                         hyfuzz.main()
                     self.assertTrue(bool(failure.exception.code))
+
+    def test_finite_positive_timeout_accepted(self):
+        with tempfile.TemporaryDirectory() as corpus:
+            Path(corpus, "case.hy").write_text("fn main() {}", encoding="utf-8")
+            with patch.object(sys, "argv", [
+                "hyfuzz.py", "--hyb", sys.executable, "--corpus", corpus, "--cases", "1", "--timeout", "2.5",
+            ]), patch.object(hyfuzz, "check_one", return_value=(None, True)):
+                # Returns cleanly without exiting with error
+                hyfuzz.main()
 
 
 if __name__ == "__main__":
