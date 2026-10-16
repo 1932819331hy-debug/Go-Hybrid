@@ -14,6 +14,7 @@ the git remote URL of this repo (never printed, never written to files).
 Kaggle kernel slug: from worker/kernel-metadata.json (id field).
 """
 import json
+import math
 import os
 import re
 import subprocess
@@ -233,7 +234,7 @@ def main():
     elif tier == "kaggle" and action == "wait" and len(sys.argv) in (4, 5):
         try:
             minutes = float(sys.argv[3])
-            if minutes <= 0:
+            if not (math.isfinite(minutes) and minutes > 0):
                 raise ValueError
         except ValueError:
             print("kaggle wait requires a positive number of minutes", file=sys.stderr)

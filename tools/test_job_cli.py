@@ -173,12 +173,25 @@ class KaggleArgumentTests(unittest.TestCase):
         self.assertNotIn("Traceback", result.stdout + result.stderr)
 
     def test_wait_nonpositive_minutes_fails_closed(self):
-        for minutes in ("0", "-5"):
+        for minutes in ("0", "-5", "nan", "inf", "-inf"):
             with self.subTest(minutes=minutes):
                 result = self.call_kaggle("wait", minutes)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("positive number of minutes", result.stderr)
                 self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_wait_valid_minutes_passes(self):
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("job_module", ENTRY)
+        job_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(job_mod)
+        with mock.patch.object(sys, "argv", ["job.py", "kaggle", "wait", "10.5", "test-slug"]), \
+             mock.patch.object(job_mod, "kaggle_wait", return_value=0) as mock_wait:
+            with self.assertRaises(SystemExit) as ctx:
+                job_mod.main()
+            self.assertEqual(ctx.exception.code, 0)
+            mock_wait.assert_called_once_with(10.5, "test-slug")
 
     def test_status_extra_arguments_reports_usage(self):
         result = self.call_kaggle("status", "slug", "extra")
