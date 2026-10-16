@@ -1,6 +1,9 @@
 """Regression tests for fail-closed CLI argument validation (no network)."""
+import json
+import shlex
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -82,6 +85,34 @@ class ActionsWatchArgumentTests(unittest.TestCase):
              mock.patch.object(job_mod, "actions_watch") as mock_watch:
             job_mod.main()
             mock_watch.assert_called_once_with(42)
+
+    def test_watch_without_run_id_lists_runs(self):
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("job_module", ENTRY)
+        job_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(job_mod)
+        with mock.patch.object(sys, "argv", ["job.py", "actions", "watch"]), \
+             mock.patch.object(job_mod, "gh_api", return_value={"workflow_runs": []}) as api:
+            job_mod.main()
+            api.assert_called_once_with(
+                "/repos/limitlessprojects/Go-Hybrid/actions/runs?per_page=5")
+
+    def test_make_actions_watch_invokes_documented_cli(self):
+        # Record the real recipe's arguments instead of calling GitHub.
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = Path(tmp) / "record arguments.py"
+            recorder.write_text("import json, sys; print(json.dumps(sys.argv[1:]))\n")
+            python = "{} {}".format(shlex.quote(sys.executable), shlex.quote(str(recorder)))
+            result = subprocess.run(
+                ["make", "-s", "--no-print-directory", "actions-watch", "PY=" + python],
+                cwd=ENTRY.resolve().parents[1],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout), ["tools/job.py", "actions", "watch"])
 
 
 class ActionsFetchArgumentTests(unittest.TestCase):
