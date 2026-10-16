@@ -187,6 +187,79 @@ class ManagedGateTests(unittest.TestCase):
                     else:
                         self.assertEqual(baseline.read_bytes(), original)
 
+    def test_missing_arguments_fail_closed(self):
+        cases = [
+            ['managed_gate.py'],
+            ['managed_gate.py', 'hyb'],
+            ['managed_gate.py', 'hyb', 'baseline.json'],
+            ['managed_gate.py', '--rebaseline'],
+            ['managed_gate.py', '--rebaseline', 'hyb'],
+            ['managed_gate.py', '--rebaseline', 'hyb', 'baseline.json'],
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                output = io.StringIO()
+                with patch.object(gate.sys, 'argv', argv), \
+                     patch.object(gate.sys, 'exit', side_effect=SystemExit) as mock_exit, \
+                     contextlib.redirect_stdout(output):
+                    with self.assertRaises(SystemExit):
+                        gate.main()
+                self.assertIn('GATE ERROR: missing required arguments', output.getvalue())
+
+    def test_malformed_baseline_json_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prog = pathlib.Path(directory) / 'test.hy'
+            prog.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            for bad_content in ('', '{not json}', '{"version": 1, '):
+                with self.subTest(bad_content=bad_content):
+                    baseline.write_text(bad_content, encoding='utf-8')
+                    argv = ['managed_gate.py', 'hyb', str(baseline), str(prog)]
+                    output = io.StringIO()
+                    with patch.object(gate.sys, 'argv', argv), \
+                         patch.object(gate.sys, 'exit', side_effect=SystemExit), \
+                         contextlib.redirect_stdout(output):
+                        with self.assertRaises(SystemExit):
+                            gate.main()
+                    self.assertIn('GATE ERROR', output.getvalue())
+                    self.assertIn('malformed baseline JSON', output.getvalue())
+
+    def test_non_object_baseline_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prog = pathlib.Path(directory) / 'test.hy'
+            prog.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            for bad_val in ([], 'string', 123):
+                with self.subTest(bad_val=bad_val):
+                    baseline.write_text(json.dumps(bad_val), encoding='utf-8')
+                    argv = ['managed_gate.py', 'hyb', str(baseline), str(prog)]
+                    output = io.StringIO()
+                    with patch.object(gate.sys, 'argv', argv), \
+                         patch.object(gate.sys, 'exit', side_effect=SystemExit), \
+                         contextlib.redirect_stdout(output):
+                        with self.assertRaises(SystemExit):
+                            gate.main()
+                    self.assertIn('GATE ERROR', output.getvalue())
+                    self.assertIn('baseline must be a JSON object', output.getvalue())
+
+    def test_non_object_baseline_blocks_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prog = pathlib.Path(directory) / 'test.hy'
+            prog.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            for bad_blocks in ([], 'invalid', 42):
+                with self.subTest(bad_blocks=bad_blocks):
+                    baseline.write_text(json.dumps({'version': 1, 'blocks': bad_blocks}), encoding='utf-8')
+                    argv = ['managed_gate.py', 'hyb', str(baseline), str(prog)]
+                    output = io.StringIO()
+                    with patch.object(gate.sys, 'argv', argv), \
+                         patch.object(gate.sys, 'exit', side_effect=SystemExit), \
+                         contextlib.redirect_stdout(output):
+                        with self.assertRaises(SystemExit):
+                            gate.main()
+                    self.assertIn('GATE ERROR', output.getvalue())
+                    self.assertIn('baseline blocks must be a JSON object', output.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main()
