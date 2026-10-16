@@ -153,12 +153,6 @@ def main():
     if args and args[0] == "--rebaseline":
         rebaseline = True
         args = args[1:]
-    if len(args) < 3:
-        usage = (
-            "python3 tools/managed_gate.py [--rebaseline] <hyb> <baseline.json> <prog.hy> [more.hy ...]"
-        )
-        print(f"GATE ERROR: missing required arguments\nUsage: {usage}")
-        sys.exit(2)
     hyb, baseline_path, progs = args[0], args[1], args[2:]
 
     try:
@@ -174,11 +168,8 @@ def main():
         print(f"GATE ERROR: {baseline_path}: baseline must be a JSON object, got {type(baseline).__name__}")
         sys.exit(2)
 
-    base = baseline.get("blocks")
-    if base is None:
-        base = {}
-        baseline["blocks"] = base
-    elif not isinstance(base, dict):
+    base = baseline.setdefault("blocks", {})
+    if not isinstance(base, dict):
         print(f"GATE ERROR: {baseline_path}: baseline blocks must be a JSON object, got {type(base).__name__}")
         sys.exit(2)
 

@@ -9,3 +9,4 @@
 - Remaining open PRs (~37, all triaged with written notes + queue order): slot-loan/backedge stack #214→#218 + #222 · const-composite pair #190/#192 · match pair #173/#210 · big fail-closed trio #185/#224/#227 · closure family #207/#213/#220/#226/#229 · defer pair #223/#99 · #197 (#120) · #191 · #198 (harness refactor) · #106 (own design slot) · old queue #132/#159/#153/#115/#113/#97/#91/#96/#88/#93/#84/#99/#8 · drafts #189/#219 · #124 (tests-half wanted)
 - Standing work: the triaged queue (same conveyor discipline) · wildcard ledger's first entries · release republish when the conveyor quiets · ci.yml filter fix
 - Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
+- Contributor branch (2026-10-16): PR #269 narrowed to baseline JSON/shape validation; earlier #113 owns missing-source CLI handling. Managed tests 17/17 and normal-clone Python tools 108/108; upstream CI/review pending.
