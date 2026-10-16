@@ -41,6 +41,15 @@ impl<'a> Checker<'a> {
     }
 
     fn named_shape(&self, name: &str) -> TypeShape {
+        // Issue #326: A package-level struct declaration shadowing a predeclared
+        // identifier (e.g. `struct rune { m map[...] }` or `struct string { ... }`)
+        // must take precedence over primitive/string classifications. Otherwise,
+        // parameters and ascriptions of that type classify as sendable Primitive/Str,
+        // allowing mutable container fields to cross concurrency boundaries with
+        // zero diagnostics and causing data races at runtime.
+        if self.structs.contains_key(name) {
+            return TypeShape::Struct(Some(name.to_string()));
+        }
         match name {
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
@@ -50,8 +59,6 @@ impl<'a> Checker<'a> {
             _ => {
                 if let Some(shape) = foreign::foreign_named_type(name) {
                     shape
-                } else if self.structs.contains_key(name) {
-                    TypeShape::Struct(Some(name.to_string()))
                 } else {
                     TypeShape::Unknown
                 }
