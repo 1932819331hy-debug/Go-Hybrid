@@ -659,3 +659,400 @@ fn lexical_duplicate_left_store_order_rejects_second_moved() {
     );
     assert_eq!(r.verdict, Verdict::Reject);
 }
+
+// =========================================================================
+// Independent Acceptance Probes (16-Probe Matrix)
+// =========================================================================
+
+const PROBE_PARALLEL_DUPLICATE_SOURCE: &str = "\
+fn worker(m map[string]int, done chan<- bool) {
+    for i in 0..10000 { m[\"k\"] = i }
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    b := map[string]int{\"k\": 1}
+    a, b = a, a
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    for i in 0..10000 { b[\"k\"] = i }
+    <-done
+}
+";
+
+#[test]
+fn probe_parallel_duplicate_source_rejects_e3003() {
+    let r = check(PROBE_PARALLEL_DUPLICATE_SOURCE);
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for write through `b` which aliases `a` via `a, b = a, a`, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+const PROBE_PARAM_REBIND: &str = "\
+fn relay(a map[string]int, b map[string]int) (map[string]int, int) {
+    a = b
+    return a, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    for i in 0..10000 { m[\"k\"] = i }
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    b := map[string]int{\"k\": 0}
+    x, n := relay(a, b)
+    _ = n
+    _ = b
+    done := make(chan bool, 1)
+    task worker(move b, done)
+    for i in 0..10000 { x[\"k\"] = i }
+    <-done
+}
+";
+
+#[test]
+fn probe_param_rebind_rejects_e3003() {
+    let r = check(PROBE_PARAM_REBIND);
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for write through `x` which aliases `b` via `a = b; return a`, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+const PROBE_LOOP_TWO_ITERATIONS: &str = "\
+fn relay(a map[string]int) (map[string]int, int) {
+    x := map[string]int{\"fresh\": 1}
+    y := map[string]int{\"fresh\": 2}
+    for i in 0..2 {
+        _ = i
+        x = y
+        y = a
+    }
+    return x, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    for i in 0..10000 { m[\"k\"] = i }
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    b := map[string]int{\"k\": 0}
+    x, n := relay(a)
+    _ = n
+    _ = b
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    for i in 0..10000 { x[\"k\"] = i }
+    <-done
+}
+";
+
+#[test]
+fn probe_loop_two_iterations_rejects_e3003() {
+    let r = check(PROBE_LOOP_TWO_ITERATIONS);
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for write through `x` which aliases `a` after 2 loop iterations, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+const PROBE_PARALLEL_LOCAL_UNSAFE: &str = "\
+fn relay(a map[string]int) (map[string]int, int) {
+    x := a
+    x, y := map[string]int{\"fresh\": 1}, x
+    _ = x
+    return y, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    for i in 0..10000 { m[\"k\"] = i }
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    b := map[string]int{\"k\": 0}
+    x, n := relay(a)
+    _ = n
+    _ = b
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    for i in 0..10000 { x[\"k\"] = i }
+    <-done
+}
+";
+
+#[test]
+fn probe_parallel_local_unsafe_rejects_e3003() {
+    let r = check(PROBE_PARALLEL_LOCAL_UNSAFE);
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for write through `x` returning `y` from `x, y := fresh, x`, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+const PROBE_CLOSURE_CAPTURE: &str = "\
+fn relay(a map[string]int) (map[string]int, int) {
+    get := fn() map[string]int { return a }
+    x := get()
+    return x, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    for i in 0..10000 { m[\"k\"] = i }
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    b := map[string]int{\"k\": 0}
+    x, n := relay(a)
+    _ = n
+    _ = b
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    for i in 0..10000 { x[\"k\"] = i }
+    <-done
+}
+";
+
+#[test]
+fn probe_closure_capture_rejects_e3003() {
+    let r = check(PROBE_CLOSURE_CAPTURE);
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for write through `x` returned from closure capturing `a`, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+const PROBE_BRANCH_BOTH_FRESH: &str = "\
+fn relay(a map[string]int, flag bool) (map[string]int, int) {
+    x := a
+    if flag {
+        x = map[string]int{\"fresh\": 1}
+    } else {
+        x = map[string]int{\"fresh\": 2}
+    }
+    return x, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    for i in 0..10000 { m[\"k\"] = i }
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    b := map[string]int{\"k\": 0}
+    x, n := relay(a, true)
+    _ = n
+    _ = b
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    for i in 0..10000 { x[\"k\"] = i }
+    <-done
+}
+";
+
+#[test]
+fn probe_branch_both_fresh_accepts() {
+    let r = check(PROBE_BRANCH_BOTH_FRESH);
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "both branches rebind `x` to fresh literals; `x` must not retain parameter root `a`: {:?}",
+        r.diagnostics
+    );
+}
+
+const PROBE_BLOCK_SHADOW_FRESH: &str = "\
+fn relay(a map[string]int) (map[string]int, int) {
+    x := map[string]int{\"fresh\": 1}
+    {
+        x := a
+        _ = x
+    }
+    return x, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    for i in 0..10000 { m[\"k\"] = i }
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    b := map[string]int{\"k\": 0}
+    x, n := relay(a)
+    _ = n
+    _ = b
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    for i in 0..10000 { x[\"k\"] = i }
+    <-done
+}
+";
+
+#[test]
+fn probe_block_shadow_fresh_accepts() {
+    let r = check(PROBE_BLOCK_SHADOW_FRESH);
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "inner block shadows `x := a`; outer `x` remains fresh literal: {:?}",
+        r.diagnostics
+    );
+}
+
+const PROBE_BLOCK_REBIND_FRESH: &str = "\
+fn relay(a map[string]int) (map[string]int, int) {
+    x := (a)
+    {
+        x = map[string]int{\"fresh\": 1}
+    }
+    return x, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    for i in 0..10000 { m[\"k\"] = i }
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    b := map[string]int{\"k\": 0}
+    x, n := relay(a)
+    _ = n
+    _ = b
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    for i in 0..10000 { x[\"k\"] = i }
+    <-done
+}
+";
+
+#[test]
+fn probe_block_rebind_fresh_accepts() {
+    let r = check(PROBE_BLOCK_REBIND_FRESH);
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "unconditional inner block strongly updates `x = fresh`: {:?}",
+        r.diagnostics
+    );
+}
+
+const PROBE_PARALLEL_LOCAL_SAFE: &str = "\
+fn relay(a map[string]int) (map[string]int, int) {
+    x := map[string]int{\"fresh\": 1}
+    x, y := a, x
+    _ = x
+    return y, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    for i in 0..10000 { m[\"k\"] = i }
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    b := map[string]int{\"k\": 0}
+    x, n := relay(a)
+    _ = n
+    _ = b
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    for i in 0..10000 { x[\"k\"] = i }
+    <-done
+}
+";
+
+#[test]
+fn probe_parallel_local_safe_accepts() {
+    let r = check(PROBE_PARALLEL_LOCAL_SAFE);
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "`x, y := a, x` evaluates in pre-state; `y` gets old fresh `x`: {:?}",
+        r.diagnostics
+    );
+}
+
+const PROBE_LOCAL_MULTIRETURN_SLOT: &str = "\
+fn pair(a map[string]int, b map[string]int) (map[string]int, map[string]int) {
+    return a, b
+}
+fn relay(a map[string]int, b map[string]int) (map[string]int, int) {
+    x, y := pair(a, b)
+    _ = y
+    return x, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    for i in 0..10000 { m[\"k\"] = i }
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    b := map[string]int{\"k\": 0}
+    x, n := relay(a, b)
+    _ = n
+    _ = b
+    done := make(chan bool, 1)
+    task worker(move b, done)
+    for i in 0..10000 { x[\"k\"] = i }
+    <-done
+}
+";
+
+#[test]
+fn probe_local_multireturn_slot_accepts() {
+    let r = check(PROBE_LOCAL_MULTIRETURN_SLOT);
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "`x, y := pair(a, b)` maintains slot precision; moving `b` leaves `x` unfrozen: {:?}",
+        r.diagnostics
+    );
+}
+
+const PROBE_LOCAL_FRESH_CALL: &str = "\
+fn fresh(a map[string]int) (map[string]int, int) {
+    return map[string]int{\"fresh\": 1}, 0
+}
+fn relay(a map[string]int) (map[string]int, int) {
+    x, n := fresh(a)
+    _ = n
+    return x, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    for i in 0..10000 { m[\"k\"] = i }
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    b := map[string]int{\"k\": 0}
+    x, n := relay(a)
+    _ = n
+    _ = b
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    for i in 0..10000 { x[\"k\"] = i }
+    <-done
+}
+";
+
+#[test]
+fn probe_local_fresh_call_accepts() {
+    let r = check(PROBE_LOCAL_FRESH_CALL);
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "`x, n := fresh(a)` has known empty return slot 0; `x` must not inherit `a`: {:?}",
+        r.diagnostics
+    );
+}

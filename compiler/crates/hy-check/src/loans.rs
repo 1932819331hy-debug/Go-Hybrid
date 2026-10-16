@@ -102,6 +102,12 @@ enum Resolved {
     None,
 }
 
+struct ReturnSlotCtx<'c> {
+    slot_idx: usize,
+    param_names: &'c HashSet<String>,
+    visited_fns: &'c mut HashSet<String>,
+}
+
 impl<'a> Checker<'a> {
     fn resolve_call(&self, st: &FnState, cr: &CallRef) -> Resolved {
         match cr.callee {
@@ -1148,47 +1154,161 @@ impl<'a> Checker<'a> {
     }
 
     fn resolve_expr_param_roots(
+        &self,
         expr: &Expr,
         param_names: &HashSet<String>,
         local_roots: &HashMap<String, HashSet<String>>,
     ) -> HashSet<String> {
         let mut raw = Vec::new();
         collect_ref_roots(expr, &mut raw);
+        if let Expr::Call { callee, .. } = unwrap_parens(expr) {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if !raw.contains(name) {
+                    raw.push(name.clone());
+                }
+            }
+        }
+        if let Expr::FnLit { params, body, .. } = unwrap_parens(expr) {
+            let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+            let mut captures = Vec::new();
+            collect_capture_idents_block(body, &mut bound, &mut captures);
+            raw.extend(captures);
+        }
+
         let mut resolved = HashSet::new();
         for r in raw {
-            if param_names.contains(&r) {
-                resolved.insert(r);
-            } else if let Some(roots) = local_roots.get(&r) {
+            if let Some(roots) = local_roots.get(&r) {
                 resolved.extend(roots.iter().cloned());
+            } else if param_names.contains(&r) {
+                resolved.insert(r);
             }
         }
         resolved
     }
 
-    fn collect_stmt_return_slot_param_names(
-        stmt: &Stmt,
-        slot_idx: usize,
+    fn resolve_multi_value_expr_slots(
+        &self,
+        val: &Expr,
+        n_slots: usize,
         param_names: &HashSet<String>,
+        local_roots: &HashMap<String, HashSet<String>>,
+        visited_fns: &mut HashSet<String>,
+    ) -> Vec<HashSet<String>> {
+        let v = unwrap_parens(val);
+        if n_slots == 2 {
+            if let Expr::Index { base, .. } = v {
+                let slot0 = self.resolve_expr_param_roots(base, param_names, local_roots);
+                return vec![slot0, HashSet::new()];
+            }
+            if let Expr::Receive { chan, .. } = v {
+                let slot0 = self.resolve_expr_param_roots(chan, param_names, local_roots);
+                return vec![slot0, HashSet::new()];
+            }
+        }
+        let (call_expr, _is_try) = match v {
+            Expr::Try { operand, .. } => (unwrap_parens(operand), true),
+            other => (other, false),
+        };
+        if let Expr::Call { callee, args, .. } = call_expr {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if let Some(f) = self.fns.get(name.as_str()) {
+                    if let Some(body) = &f.body {
+                        if !visited_fns.contains(name.as_str()) {
+                            visited_fns.insert(name.clone());
+                            let callee_param_names: HashSet<String> =
+                                f.params.iter().map(|p| p.name.clone()).collect();
+                            let mut slots = Vec::with_capacity(n_slots);
+                            for slot_i in 0..n_slots {
+                                let mut callee_local_roots = HashMap::new();
+                                let mut callee_declared = HashSet::new();
+                                let mut returned_params = HashSet::new();
+                                let mut ctx = ReturnSlotCtx {
+                                    slot_idx: slot_i,
+                                    param_names: &callee_param_names,
+                                    visited_fns,
+                                };
+                                self.collect_block_return_slot_param_names(
+                                    body,
+                                    &mut ctx,
+                                    &mut callee_local_roots,
+                                    &mut callee_declared,
+                                    &mut returned_params,
+                                );
+                                let mut slot_roots = HashSet::new();
+                                for (p_idx, p) in f.params.iter().enumerate() {
+                                    if returned_params.contains(&p.name) {
+                                        if let Some(arg) = args.get(p_idx) {
+                                            let arg_roots = self.resolve_expr_param_roots(
+                                                &arg.value,
+                                                param_names,
+                                                local_roots,
+                                            );
+                                            slot_roots.extend(arg_roots);
+                                        }
+                                    }
+                                }
+                                slots.push(slot_roots);
+                            }
+                            visited_fns.remove(name.as_str());
+                            return slots;
+                        }
+                    }
+                }
+            }
+        }
+        let whole = self.resolve_expr_param_roots(val, param_names, local_roots);
+        vec![whole; n_slots]
+    }
+
+    fn collect_stmt_return_slot_param_names(
+        &self,
+        stmt: &Stmt,
+        ctx: &mut ReturnSlotCtx<'_>,
         local_roots: &mut HashMap<String, HashSet<String>>,
+        declared_in_scope: &mut HashSet<String>,
         out: &mut HashSet<String>,
     ) {
         match stmt {
             Stmt::Return { values, .. } => {
-                if let Some(val) = values.get(slot_idx) {
-                    let roots = Self::resolve_expr_param_roots(val, param_names, local_roots);
+                if let Some(val) = values.get(ctx.slot_idx) {
+                    let roots = self.resolve_expr_param_roots(val, ctx.param_names, local_roots);
                     out.extend(roots);
                 }
             }
             Stmt::Local(l) => {
-                if l.names.len() == l.values.len() {
-                    for (name, val) in l.names.iter().zip(&l.values) {
-                        let roots = Self::resolve_expr_param_roots(val, param_names, local_roots);
-                        local_roots.insert(name.clone(), roots);
+                for name in &l.names {
+                    if name != "_" {
+                        declared_in_scope.insert(name.clone());
                     }
-                } else if l.values.len() == 1 {
-                    let roots = Self::resolve_expr_param_roots(&l.values[0], param_names, local_roots);
-                    for name in &l.names {
-                        local_roots.insert(name.clone(), roots.clone());
+                }
+                if l.names.len() == l.values.len() {
+                    let updates: Vec<(String, HashSet<String>)> = l
+                        .names
+                        .iter()
+                        .zip(&l.values)
+                        .filter(|(name, _)| name.as_str() != "_")
+                        .map(|(name, val)| {
+                            (
+                                name.clone(),
+                                self.resolve_expr_param_roots(val, ctx.param_names, local_roots),
+                            )
+                        })
+                        .collect();
+                    for (name, roots) in updates {
+                        local_roots.insert(name, roots);
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let slot_updates = self.resolve_multi_value_expr_slots(
+                        &l.values[0],
+                        l.names.len(),
+                        ctx.param_names,
+                        local_roots,
+                        ctx.visited_fns,
+                    );
+                    for (name, roots) in l.names.iter().zip(slot_updates) {
+                        if name != "_" {
+                            local_roots.insert(name.clone(), roots);
+                        }
                     }
                 }
             }
@@ -1199,73 +1319,283 @@ impl<'a> Checker<'a> {
                         .zip(values)
                         .filter_map(|(target, val)| {
                             if let PlaceKind::Ident(name) = &target.kind {
-                                Some((
-                                    name.clone(),
-                                    Self::resolve_expr_param_roots(val, param_names, local_roots),
-                                ))
-                            } else {
-                                None
+                                if name != "_" {
+                                    return Some((
+                                        name.clone(),
+                                        self.resolve_expr_param_roots(
+                                            val,
+                                            ctx.param_names,
+                                            local_roots,
+                                        ),
+                                    ));
+                                }
                             }
+                            None
                         })
                         .collect();
                     for (name, roots) in updates {
                         local_roots.insert(name, roots);
                     }
-                } else if values.len() == 1 {
-                    let roots = Self::resolve_expr_param_roots(&values[0], param_names, local_roots);
-                    for target in targets {
+                } else if values.len() == 1 && targets.len() > 1 {
+                    let slot_updates = self.resolve_multi_value_expr_slots(
+                        &values[0],
+                        targets.len(),
+                        ctx.param_names,
+                        local_roots,
+                        ctx.visited_fns,
+                    );
+                    for (target, roots) in targets.iter().zip(slot_updates) {
                         if let PlaceKind::Ident(name) = &target.kind {
-                            local_roots.insert(name.clone(), roots.clone());
+                            if name != "_" {
+                                local_roots.insert(name.clone(), roots);
+                            }
                         }
                     }
                 }
             }
-            Stmt::If { init, then, otherwise, .. } => {
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
                 if let Some(init_stmt) = init {
-                    Self::collect_stmt_return_slot_param_names(init_stmt, slot_idx, param_names, local_roots, out);
+                    let mut init_declared = HashSet::new();
+                    self.collect_stmt_return_slot_param_names(
+                        init_stmt,
+                        ctx,
+                        local_roots,
+                        &mut init_declared,
+                        out,
+                    );
                 }
-                let mut then_roots = local_roots.clone();
-                Self::collect_block_return_slot_param_names(then, slot_idx, param_names, &mut then_roots, out);
-                let mut else_roots = local_roots.clone();
+                let pre_if_roots = local_roots.clone();
+
+                let mut then_roots = pre_if_roots.clone();
+                let mut then_declared = HashSet::new();
+                self.collect_block_return_slot_param_names(
+                    then,
+                    ctx,
+                    &mut then_roots,
+                    &mut then_declared,
+                    out,
+                );
+                for k in then_declared {
+                    if let Some(orig) = pre_if_roots.get(&k) {
+                        then_roots.insert(k, orig.clone());
+                    } else {
+                        then_roots.remove(&k);
+                    }
+                }
+
                 if let Some(other) = otherwise {
-                    Self::collect_stmt_return_slot_param_names(other, slot_idx, param_names, &mut else_roots, out);
-                }
-                for (k, v) in then_roots {
-                    local_roots.entry(k).or_default().extend(v);
-                }
-                for (k, v) in else_roots {
-                    local_roots.entry(k).or_default().extend(v);
+                    let mut else_roots = pre_if_roots.clone();
+                    let mut else_declared = HashSet::new();
+                    self.collect_stmt_return_slot_param_names(
+                        other,
+                        ctx,
+                        &mut else_roots,
+                        &mut else_declared,
+                        out,
+                    );
+                    for k in else_declared {
+                        if let Some(orig) = pre_if_roots.get(&k) {
+                            else_roots.insert(k, orig.clone());
+                        } else {
+                            else_roots.remove(&k);
+                        }
+                    }
+
+                    let all_keys: HashSet<String> = pre_if_roots
+                        .keys()
+                        .chain(then_roots.keys())
+                        .chain(else_roots.keys())
+                        .cloned()
+                        .collect();
+                    let mut merged = pre_if_roots.clone();
+                    for k in all_keys {
+                        let pre_v = pre_if_roots.get(&k);
+                        let then_v = then_roots.get(&k);
+                        let else_v = else_roots.get(&k);
+
+                        match (then_v, else_v) {
+                            (Some(tv), Some(ev)) => {
+                                let modified_in_then = pre_v != Some(tv);
+                                let modified_in_else = pre_v != Some(ev);
+                                if modified_in_then && modified_in_else {
+                                    let mut u = tv.clone();
+                                    u.extend(ev.iter().cloned());
+                                    merged.insert(k, u);
+                                } else {
+                                    let mut u = tv.clone();
+                                    u.extend(ev.iter().cloned());
+                                    if let Some(pv) = pre_v {
+                                        u.extend(pv.iter().cloned());
+                                    }
+                                    merged.insert(k, u);
+                                }
+                            }
+                            (Some(tv), None) => {
+                                let mut u = tv.clone();
+                                if let Some(pv) = pre_v {
+                                    u.extend(pv.iter().cloned());
+                                }
+                                merged.insert(k, u);
+                            }
+                            (None, Some(ev)) => {
+                                let mut u = ev.clone();
+                                if let Some(pv) = pre_v {
+                                    u.extend(pv.iter().cloned());
+                                }
+                                merged.insert(k, u);
+                            }
+                            (None, None) => {
+                                merged.remove(&k);
+                            }
+                        }
+                    }
+                    *local_roots = merged;
+                } else {
+                    let mut merged = pre_if_roots.clone();
+                    for (k, tv) in then_roots {
+                        merged.entry(k).or_default().extend(tv);
+                    }
+                    *local_roots = merged;
                 }
             }
-            Stmt::For { body, .. } | Stmt::Block { block: body, .. } => {
-                let mut inner_roots = local_roots.clone();
-                Self::collect_block_return_slot_param_names(body, slot_idx, param_names, &mut inner_roots, out);
-                for (k, v) in inner_roots {
-                    local_roots.entry(k).or_default().extend(v);
+            Stmt::For { body, .. } => {
+                let pre_for = local_roots.clone();
+                let mut current_roots = local_roots.clone();
+                for _iter in 0..4 {
+                    let prev = current_roots.clone();
+                    let mut inner_declared = HashSet::new();
+                    self.collect_block_return_slot_param_names(
+                        body,
+                        ctx,
+                        &mut current_roots,
+                        &mut inner_declared,
+                        out,
+                    );
+                    for k in inner_declared {
+                        if let Some(orig) = pre_for.get(&k) {
+                            current_roots.insert(k, orig.clone());
+                        } else {
+                            current_roots.remove(&k);
+                        }
+                    }
+                    for (k, v) in &prev {
+                        current_roots
+                            .entry(k.clone())
+                            .or_default()
+                            .extend(v.iter().cloned());
+                    }
+                    if current_roots == prev {
+                        break;
+                    }
+                }
+                for (k, v) in pre_for {
+                    current_roots.entry(k).or_default().extend(v);
+                }
+                *local_roots = current_roots;
+            }
+            Stmt::Block { block: body, .. } => {
+                let pre_block_roots = local_roots.clone();
+                let mut inner_declared = HashSet::new();
+                self.collect_block_return_slot_param_names(
+                    body,
+                    ctx,
+                    local_roots,
+                    &mut inner_declared,
+                    out,
+                );
+                for k in inner_declared {
+                    if let Some(orig) = pre_block_roots.get(&k) {
+                        local_roots.insert(k, orig.clone());
+                    } else {
+                        local_roots.remove(&k);
+                    }
                 }
             }
             Stmt::Match { arms, .. } => {
+                let pre_match = local_roots.clone();
+                let mut arm_results = Vec::new();
                 for arm in arms {
-                    let mut arm_roots = local_roots.clone();
-                    Self::collect_block_return_slot_param_names(&arm.body, slot_idx, param_names, &mut arm_roots, out);
-                    for (k, v) in arm_roots {
-                        local_roots.entry(k).or_default().extend(v);
+                    let mut arm_roots = pre_match.clone();
+                    let mut arm_declared = HashSet::new();
+                    self.collect_block_return_slot_param_names(
+                        &arm.body,
+                        ctx,
+                        &mut arm_roots,
+                        &mut arm_declared,
+                        out,
+                    );
+                    for k in arm_declared {
+                        if let Some(orig) = pre_match.get(&k) {
+                            arm_roots.insert(k, orig.clone());
+                        } else {
+                            arm_roots.remove(&k);
+                        }
+                    }
+                    arm_results.push(arm_roots);
+                }
+                let mut merged = pre_match.clone();
+                for r in arm_results {
+                    for (k, v) in r {
+                        merged.entry(k).or_default().extend(v);
                     }
                 }
+                *local_roots = merged;
+            }
+            Stmt::Select { arms, .. } => {
+                let pre_select = local_roots.clone();
+                let mut arm_results = Vec::new();
+                for arm in arms {
+                    let mut arm_roots = pre_select.clone();
+                    let mut arm_declared = HashSet::new();
+                    self.collect_block_return_slot_param_names(
+                        &arm.body,
+                        ctx,
+                        &mut arm_roots,
+                        &mut arm_declared,
+                        out,
+                    );
+                    for k in arm_declared {
+                        if let Some(orig) = pre_select.get(&k) {
+                            arm_roots.insert(k, orig.clone());
+                        } else {
+                            arm_roots.remove(&k);
+                        }
+                    }
+                    arm_results.push(arm_roots);
+                }
+                let mut merged = pre_select.clone();
+                for r in arm_results {
+                    for (k, v) in r {
+                        merged.entry(k).or_default().extend(v);
+                    }
+                }
+                *local_roots = merged;
             }
             _ => {}
         }
     }
 
     fn collect_block_return_slot_param_names(
+        &self,
         block: &Block,
-        slot_idx: usize,
-        param_names: &HashSet<String>,
+        ctx: &mut ReturnSlotCtx<'_>,
         local_roots: &mut HashMap<String, HashSet<String>>,
+        declared_in_scope: &mut HashSet<String>,
         out: &mut HashSet<String>,
     ) {
         for stmt in &block.stmts {
-            Self::collect_stmt_return_slot_param_names(stmt, slot_idx, param_names, local_roots, out);
+            self.collect_stmt_return_slot_param_names(
+                stmt,
+                ctx,
+                local_roots,
+                declared_in_scope,
+                out,
+            );
         }
     }
 
@@ -1312,11 +1642,19 @@ impl<'a> Checker<'a> {
                                 f.params.iter().map(|p| p.name.clone()).collect();
                             let mut local_roots = HashMap::new();
                             let mut returned_params = HashSet::new();
-                            Self::collect_block_return_slot_param_names(
-                                body,
+                            let mut declared = HashSet::new();
+                            let mut visited_fns = HashSet::new();
+                            visited_fns.insert(name.clone());
+                            let mut ctx = ReturnSlotCtx {
                                 slot_idx,
-                                &param_names,
+                                param_names: &param_names,
+                                visited_fns: &mut visited_fns,
+                            };
+                            self.collect_block_return_slot_param_names(
+                                body,
+                                &mut ctx,
                                 &mut local_roots,
+                                &mut declared,
                                 &mut returned_params,
                             );
                             let mut roots = Vec::new();
@@ -1840,6 +2178,7 @@ impl<'a> Checker<'a> {
             shares_to_install: Vec<String>,
             is_const: bool,
             closure_expr: Option<Expr>,
+            pre_roots: Vec<String>,
         }
 
         let multi_shapes = if is_multi_unpack {
@@ -2027,7 +2366,44 @@ impl<'a> Checker<'a> {
                 shares_to_install,
                 is_const,
                 closure_expr: Some(v.clone()),
+                pre_roots: slot_roots,
             });
+        }
+
+        // Identify inter-target sharing established in the pre-state.
+        // If two targets receive values whose pre-state roots are identical, or
+        // whose pre-state roots were in the same share group or aliased each other,
+        // they must share storage in the post-state.
+        let mut pre_shared_pairs: Vec<(usize, usize, bool)> = Vec::new();
+        for idx_a in 0..plans.len() {
+            for idx_b in (idx_a + 1)..plans.len() {
+                if plans[idx_a].is_const || plans[idx_b].is_const {
+                    continue;
+                }
+                let mut shared = false;
+                let mut identical = false;
+                for ra in &plans[idx_a].pre_roots {
+                    for rb in &plans[idx_b].pre_roots {
+                        if ra == rb {
+                            shared = true;
+                            identical = true;
+                            break;
+                        }
+                        if st.share_group(ra).contains(rb)
+                            || st.aliases.get(ra) == Some(rb)
+                            || st.aliases.get(rb) == Some(ra)
+                        {
+                            shared = true;
+                        }
+                    }
+                    if identical {
+                        break;
+                    }
+                }
+                if shared {
+                    pre_shared_pairs.push((idx_a, idx_b, identical));
+                }
+            }
         }
 
         // Phase 2: Graph Transition Phase
@@ -2083,19 +2459,19 @@ impl<'a> Checker<'a> {
         }
 
         // Step 2.3: Batch Rebuild
-        for plan in plans {
+        for plan in &plans {
             if plan.is_const {
                 continue;
             }
             if let Some(b) = st.env_lookup_mut(&plan.name) {
                 if !matches!(plan.shape, TypeShape::Unknown) || b.ty.is_none() {
-                    b.shape = plan.shape;
+                    b.shape = plan.shape.clone();
                 }
                 if plan.ty.is_some() || b.ty.is_none() {
-                    b.ty = plan.ty;
+                    b.ty = plan.ty.clone();
                 }
                 b.moved = None;
-                b.non_owned_origin = plan.non_owned;
+                b.non_owned_origin = plan.non_owned.clone();
             }
             // For lexical store, clear previous edges on `plan.name` if it was already
             // stored in an earlier LHS of this statement (e.g. `a, a = x, y`).
@@ -2104,34 +2480,65 @@ impl<'a> Checker<'a> {
             st.closure_mutates.remove(&plan.name);
 
             if plan.reads_self {
-                if let Some(pa) = plan.prior_alias {
-                    if &pa != &plan.name {
-                        st.aliases.insert(plan.name.clone(), pa);
+                if let Some(pa) = &plan.prior_alias {
+                    if pa != &plan.name {
+                        st.aliases.insert(plan.name.clone(), pa.clone());
                     }
                 }
-                for peer in plan.prior_shares {
-                    st.share_edge(&plan.name, &peer);
+                for peer in &plan.prior_shares {
+                    st.share_edge(&plan.name, peer);
                 }
             }
-            if let Some(alias) = plan.alias_to_install {
-                if &alias != &plan.name {
-                    st.aliases.insert(plan.name.clone(), alias);
+            if let Some(alias) = &plan.alias_to_install {
+                if alias != &plan.name {
+                    st.aliases.insert(plan.name.clone(), alias.clone());
                 }
             }
-            for peer in plan.shares_to_install {
-                if &peer != &plan.name {
-                    st.share_edge(&plan.name, &peer);
+            for peer in &plan.shares_to_install {
+                if peer != &plan.name {
+                    st.share_edge(&plan.name, peer);
                 }
             }
-            if let Some(origin) = plan.shadowed_origin {
+            if let Some(origin) = &plan.shadowed_origin {
                 if let Some(b) = st.env_lookup_mut(&plan.name) {
                     if b.non_owned_origin.is_none() {
-                        b.non_owned_origin = Some(origin);
+                        b.non_owned_origin = Some(origin.clone());
                     }
                 }
             }
-            if let Some(expr) = plan.closure_expr {
-                self.record_closure_mutations(st, &plan.name, &expr);
+            if let Some(expr) = &plan.closure_expr {
+                self.record_closure_mutations(st, &plan.name, expr);
+            }
+        }
+
+        // Step 2.4: Inter-target alias and share links for surviving targets
+        let mut last_plan_for_name: HashMap<&str, usize> = HashMap::new();
+        for (idx, plan) in plans.iter().enumerate() {
+            if !plan.is_const && plan.name != "_" {
+                last_plan_for_name.insert(plan.name.as_str(), idx);
+            }
+        }
+        for (idx_a, idx_b, identical) in pre_shared_pairs {
+            let name_a = &plans[idx_a].name;
+            let name_b = &plans[idx_b].name;
+            if name_a == name_b {
+                continue;
+            }
+            if last_plan_for_name.get(name_a.as_str()) != Some(&idx_a)
+                || last_plan_for_name.get(name_b.as_str()) != Some(&idx_b)
+            {
+                continue;
+            }
+            st.share_edge(name_a, name_b);
+            if identical
+                && (plans[idx_b].shape.is_reference_alias()
+                    || plans[idx_a].shape.is_reference_alias())
+            {
+                if !st.aliases.contains_key(name_b) {
+                    st.aliases.insert(name_b.clone(), name_a.clone());
+                } else if !st.aliases.contains_key(name_a) {
+                    st.aliases.insert(name_a.clone(), name_b.clone());
+                }
             }
         }
     }
