@@ -192,6 +192,12 @@ class VerdictMetadataCliTests(unittest.TestCase):
         self.assertNotIn("verdict agreement:", run.stdout)
         self.assertNotIn("Traceback", run.stderr)
 
+    def test_indented_malformed_marker_is_not_silently_skipped(self):
+        self.assert_bad_metadata(
+            "    // EXPECTED-VERDICT: REJET A1\nfn main() {}\n",
+            "invalid EXPECTED-VERDICT",
+        )
+
     def test_unknown_verdict_is_not_silently_skipped(self):
         self.assert_bad_metadata(
             "// EXPECTED-VERDICT: REJET A1\nfn main() {}\n", "invalid EXPECTED-VERDICT"
