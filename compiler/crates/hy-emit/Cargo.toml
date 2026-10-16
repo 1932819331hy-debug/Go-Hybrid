@@ -7,3 +7,6 @@ authors.workspace = true
 
 [dependencies]
 hy-syntax = { path = "../hy-syntax" }
+
+[dev-dependencies]
+hy-diag = { path = "../hy-diag" }
