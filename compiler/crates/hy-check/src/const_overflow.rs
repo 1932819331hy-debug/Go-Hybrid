@@ -61,10 +61,10 @@ impl<'a> Checker<'a> {
 
     /// When a variable declaration has no explicit type (`:=`, `let`, or `var`
     /// without ascription, issue #228 Family D), Go assigns the default type
-    /// `int` (64-bit on targeted platforms). If `value` is an integer constant
-    /// outside `int`'s range, emit HYB-E6002.
+    /// `int` (64-bit on all targeted LP64/LLP64 platforms). If `value` is an integer
+    /// constant outside `int`'s range, emit HYB-E6002.
     pub(crate) fn check_default_int_overflow(&mut self, name: &str, value: &Expr) {
-        let (lo, hi) = (i64::MIN as i128, i64::MAX as i128);
+        let (lo, hi) = target_int_range();
         let Some(v) = const_int_value(value) else {
             return;
         };
@@ -98,6 +98,35 @@ fn span_hint(span: Span) -> String {
     format!("{}:{}", span.start.line, span.start.col)
 }
 
+/// Target word size configuration for platform-dependent integer types
+/// (`int`, `uint`, `uintptr`, `isize`, `usize`).
+///
+/// Current Hybrid compiler and runtime architecture:
+/// - Hybrid's runtime (`hybridge`) and assembly trampolines (`call_amd64.s`, `call_arm64.s`,
+///   `call_win64.s`) exclusively target 64-bit platforms (amd64, arm64).
+/// - Go on all targeted platforms defines `int` as 64-bit (`int64`).
+/// - Should 32-bit compilation targets (e.g. 32-bit ARM or x86) be introduced in the future,
+///   the target word size can be parameterized here via target triple/target configuration.
+pub(crate) const TARGET_INT_WIDTH_BITS: u32 = 64;
+
+#[inline]
+pub(crate) fn target_int_range() -> (i128, i128) {
+    match TARGET_INT_WIDTH_BITS {
+        32 => (i32::MIN as i128, i32::MAX as i128),
+        64 => (i64::MIN as i128, i64::MAX as i128),
+        _ => (i64::MIN as i128, i64::MAX as i128),
+    }
+}
+
+#[inline]
+pub(crate) fn target_uint_range() -> (i128, i128) {
+    match TARGET_INT_WIDTH_BITS {
+        32 => (0, u32::MAX as i128),
+        64 => (0, u64::MAX as i128),
+        _ => (0, u64::MAX as i128),
+    }
+}
+
 /// Inclusive representable range for a Hybrid fixed-width integer type
 /// name (SPEC-LANGUAGE §11 / Go's typed-constant assignment rule).
 /// Platform-word `int`/`uint`/`isize`/`usize` use the 64-bit LP64 ranges
@@ -110,8 +139,10 @@ fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
         "u16" | "uint16" => (0, u16::MAX as i128),
         "i32" | "int32" | "rune" => (i32::MIN as i128, i32::MAX as i128),
         "u32" | "uint32" => (0, u32::MAX as i128),
-        "i64" | "int64" | "int" | "isize" => (i64::MIN as i128, i64::MAX as i128),
-        "u64" | "uint64" | "uint" | "usize" | "uintptr" => (0, u64::MAX as i128),
+        "i64" | "int64" => (i64::MIN as i128, i64::MAX as i128),
+        "int" | "isize" => target_int_range(),
+        "u64" | "uint64" => (0, u64::MAX as i128),
+        "uint" | "usize" | "uintptr" => target_uint_range(),
         _ => return None,
     })
 }
@@ -233,5 +264,16 @@ mod unit {
         assert!(!i64_underflow.fits_in_range(lo, hi));
         assert!(!pos_overflow.fits_in_range(lo, hi));
         assert!(!neg_overflow.fits_in_range(lo, hi));
+    }
+
+    #[test]
+    fn target_architecture_word_size_and_ranges() {
+        assert_eq!(TARGET_INT_WIDTH_BITS, 64);
+        assert_eq!(target_int_range(), (i64::MIN as i128, i64::MAX as i128));
+        assert_eq!(target_uint_range(), (0, u64::MAX as i128));
+        assert_eq!(fixed_width_int_range("int"), Some(target_int_range()));
+        assert_eq!(fixed_width_int_range("uint"), Some(target_uint_range()));
+        assert_eq!(fixed_width_int_range("isize"), Some(target_int_range()));
+        assert_eq!(fixed_width_int_range("usize"), Some(target_uint_range()));
     }
 }
