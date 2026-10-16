@@ -118,8 +118,9 @@ direction: a primitive-element slice copies by value and shares nothing.
 | 43 | 43-copy-ref-element-alias-freeze | REJECT | A1b | `copy(dst, src)` on a `[]map[...]` makes `dst[i]` and `src[i]` the same map; `task worker(move dst, done)` did not freeze `src`, so the later write through `src` was use-after-move (issue #178; the root cause is a missing `copy` arm in `process_call`, plus `make([]T, n)` dropping its element shape) |
 | 44 | 44-copy-primitive-element-control | ACCEPT | — | the FALSE-POSITIVE GUARD for 43: `copy(dst, src)` on `[]int` copies by value and shares no GC storage, so no may-share edge may be recorded |
 | 45 | 45-composite-literal-embeds-shared-map | REJECT | A1c | O4.6 deep sendability: a fresh `[]T{shared}` composite literal embedding a live shared map at a spawn is not laundered by the wrap (PR #176, maintainer-integrated as #45) |
+| 46 | 46-atomic-pointer-fail-closed-reject | REJECT | FC | GUARANTEES row 11 fail-closed sendability: `atomic.pointer[T]` holds arbitrary mutable GC objects; crossing a task boundary without linear store/swap discipline or proven pointee sendability is rejected under rule FC with `HYB-E3005` |
 
-**Distribution: ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 30 — 45 programs.**
+**Distribution: ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 31 — 46 programs.**
 
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
 BEFORE any checker existed; see the pre-registration statement. 21, 22, 23
