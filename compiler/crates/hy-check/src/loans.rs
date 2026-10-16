@@ -800,8 +800,12 @@ impl<'a> Checker<'a> {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
                 // Issue #148: constant initializer outside a fixed-width
                 // declared type → HYB-E6002 (Go would refuse to build).
+                // Issue #228 Family D: untyped variable declarations default
+                // to `int` in Go; constants overflowing `int` fail build.
                 if let Some(t) = &l.ty {
                     self.check_const_overflow_init(name, t, value);
+                } else if l.kind != LocalKind::Const {
+                    self.check_default_int_overflow(name, value);
                 }
                 // N1: a bare `nil` initializer under a non-nilable
                 // ascription is a compile error (HYB-E4001) — the SPEC's own

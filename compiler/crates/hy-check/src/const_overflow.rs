@@ -30,7 +30,7 @@ impl<'a> Checker<'a> {
         let Some(v) = const_int_value(value) else {
             return;
         };
-        if v >= lo && v <= hi {
+        if v.fits_in_range(lo, hi) {
             return;
         }
         let span = value.span();
@@ -52,6 +52,40 @@ impl<'a> Checker<'a> {
             format!(
                 "note: the declared type was written here ({})",
                 span_hint(*ty_span)
+            ),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    /// When a variable declaration has no explicit type (`:=`, `let`, or `var`
+    /// without ascription, issue #228 Family D), Go assigns the default type
+    /// `int` (64-bit on targeted platforms). If `value` is an integer constant
+    /// outside `int`'s range, emit HYB-E6002.
+    pub(crate) fn check_default_int_overflow(&mut self, name: &str, value: &Expr) {
+        let (lo, hi) = (i64::MIN as i128, i64::MAX as i128);
+        let Some(v) = const_int_value(value) else {
+            return;
+        };
+        if v.fits_in_range(lo, hi) {
+            return;
+        }
+        let span = value.span();
+        let msg = format!(
+            "constant `{}` overflows default type `int` of `{}` (HYB-E6002)",
+            value.render(),
+            name
+        );
+        let notes = vec![
+            "why: Go assigns default type `int` to untyped integer constants in variable declarations and rejects values outside `int`'s range (`cannot use … as int value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #148, #228)"
+                .to_string(),
+            format!(
+                "fix: declare an explicit wider type (`var {} u64 = {}`), use an untyped constant (`const {} = {}`), or convert from a variable if intentional",
+                name,
+                value.render(),
+                name,
+                value.render()
             ),
         ];
         self.diags.push(
@@ -82,11 +116,27 @@ fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConstInt {
+    Value(i128),
+    PosOverflow,
+    NegOverflow,
+}
+
+impl ConstInt {
+    pub(crate) fn fits_in_range(&self, lo: i128, hi: i128) -> bool {
+        match *self {
+            ConstInt::Value(v) => v >= lo && v <= hi,
+            ConstInt::PosOverflow | ConstInt::NegOverflow => false,
+        }
+    }
+}
+
 /// Evaluate a pure integer constant expression the checker can see without
 /// a full constant folder: int literals (any base the lexer keeps),
 /// unary `-`, and parentheses. Anything else (idents, calls, binary ops)
 /// is out of scope for HYB-E6002.
-fn const_int_value(e: &Expr) -> Option<i128> {
+fn const_int_value(e: &Expr) -> Option<ConstInt> {
     match unwrap_parens(e) {
         Expr::Lit {
             kind: LitKind::Int(s),
@@ -98,26 +148,43 @@ fn const_int_value(e: &Expr) -> Option<i128> {
             ..
         } => {
             let v = const_int_value(operand)?;
-            v.checked_neg()
+            match v {
+                ConstInt::Value(v) => match v.checked_neg() {
+                    Some(neg) => Some(ConstInt::Value(neg)),
+                    None => Some(ConstInt::PosOverflow),
+                },
+                ConstInt::PosOverflow => Some(ConstInt::NegOverflow),
+                ConstInt::NegOverflow => Some(ConstInt::PosOverflow),
+            }
         }
         _ => None,
     }
 }
 
-fn parse_int_lit(s: &str) -> Option<i128> {
-    let s = s.as_bytes();
+fn parse_int_lit(raw: &str) -> Option<ConstInt> {
+    let s: String = raw.chars().filter(|c| *c != '_').collect();
     if s.is_empty() {
         return None;
     }
-    if s.len() >= 2 && s[0] == b'0' {
-        match s[1].to_ascii_lowercase() {
-            b'x' => return i128::from_str_radix(std::str::from_utf8(&s[2..]).ok()?, 16).ok(),
-            b'b' => return i128::from_str_radix(std::str::from_utf8(&s[2..]).ok()?, 2).ok(),
-            b'o' => return i128::from_str_radix(std::str::from_utf8(&s[2..]).ok()?, 8).ok(),
-            _ => {}
+    let bytes = s.as_bytes();
+    let (radix, slice) = if bytes.len() >= 2 && bytes[0] == b'0' {
+        match bytes[1].to_ascii_lowercase() {
+            b'x' => (16, &s[2..]),
+            b'b' => (2, &s[2..]),
+            b'o' => (8, &s[2..]),
+            _ => (10, s.as_str()),
         }
+    } else {
+        (10, s.as_str())
+    };
+    match i128::from_str_radix(slice, radix) {
+        Ok(v) => Some(ConstInt::Value(v)),
+        Err(e) => match e.kind() {
+            std::num::IntErrorKind::PosOverflow => Some(ConstInt::PosOverflow),
+            std::num::IntErrorKind::NegOverflow => Some(ConstInt::NegOverflow),
+            _ => None,
+        },
     }
-    i128::from_str_radix(std::str::from_utf8(s).ok()?, 10).ok()
 }
 
 #[cfg(test)]
@@ -135,9 +202,36 @@ mod unit {
 
     #[test]
     fn parse_bases() {
-        assert_eq!(parse_int_lit("300"), Some(300));
-        assert_eq!(parse_int_lit("0x12C"), Some(300));
-        assert_eq!(parse_int_lit("0b101"), Some(5));
-        assert_eq!(parse_int_lit("0o10"), Some(8));
+        assert_eq!(parse_int_lit("300"), Some(ConstInt::Value(300)));
+        assert_eq!(parse_int_lit("0x12C"), Some(ConstInt::Value(300)));
+        assert_eq!(parse_int_lit("0b101"), Some(ConstInt::Value(5)));
+        assert_eq!(parse_int_lit("0o10"), Some(ConstInt::Value(8)));
+    }
+
+    #[test]
+    fn parse_overflow_and_ranges() {
+        assert_eq!(
+            parse_int_lit("999999999999999999999999999999999999999999999"),
+            Some(ConstInt::PosOverflow)
+        );
+        assert_eq!(
+            parse_int_lit("0x100000000000000000000000000000000"),
+            Some(ConstInt::PosOverflow)
+        );
+
+        let i64_max = ConstInt::Value(9223372036854775807);
+        let i64_overflow = ConstInt::Value(9223372036854775808);
+        let i64_min = ConstInt::Value(-9223372036854775808);
+        let i64_underflow = ConstInt::Value(-9223372036854775809);
+        let pos_overflow = ConstInt::PosOverflow;
+        let neg_overflow = ConstInt::NegOverflow;
+
+        let (lo, hi) = (i64::MIN as i128, i64::MAX as i128);
+        assert!(i64_max.fits_in_range(lo, hi));
+        assert!(i64_min.fits_in_range(lo, hi));
+        assert!(!i64_overflow.fits_in_range(lo, hi));
+        assert!(!i64_underflow.fits_in_range(lo, hi));
+        assert!(!pos_overflow.fits_in_range(lo, hi));
+        assert!(!neg_overflow.fits_in_range(lo, hi));
     }
 }
