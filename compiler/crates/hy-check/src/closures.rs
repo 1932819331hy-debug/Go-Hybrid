@@ -232,8 +232,13 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                         vec![None; l.names.len()],
                     ),
                 };
-                for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                for (idx, ((name, shape), ty)) in l.names.iter().zip(shapes).zip(tys).enumerate() {
                     ck.define_binding(st, name, shape, ty, immutable, managed);
+                    if let Some(v) = l.values.first() {
+                        if name != "_" {
+                            ck.record_multi_value_slot_edges(st, name, v, idx, l.names.len());
+                        }
+                    }
                 }
             }
         }
