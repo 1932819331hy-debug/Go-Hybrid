@@ -1573,13 +1573,6 @@ impl Parser {
                     span,
                 })
             }
-            Expr::AddrOf { operand, .. } => {
-                let base = Box::new(self.place_of(*operand)?);
-                Ok(Place {
-                    kind: PlaceKind::AddrOf { base },
-                    span,
-                })
-            }
             _ => self.err(format!("`{}` is not assignable", e.render())),
         }
     }
@@ -3835,6 +3828,19 @@ fn main() {
             "wrapped send value must stay one send, got {:?}",
             stmt
         );
+    }
+
+    #[test]
+    fn addrof_assignment_target_rejected() {
+        let err = parse_file("test.hy", "fn main() { &x = 10 }").unwrap_err();
+        assert!(
+            err[0].message.contains("`&x` is not assignable"),
+            "expected non-assignable diagnostic, got: {}",
+            err[0].message
+        );
+        assert!(parse_file("test.hy", "fn main() { &x += 1 }").is_err());
+        assert!(parse_file("test.hy", "fn main() { &x++ }").is_err());
+        assert!(parse_file("test.hy", "fn main() { &s.field = 2 }").is_err());
     }
 
 }

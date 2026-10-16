@@ -1077,7 +1077,10 @@ impl Emitter {
             }
             PlaceKind::AddrOf { base } => {
                 let b = self.emit_place(base)?;
-                Ok(format!("&{}", b))
+                return Err(EmitError::unsupported(format!(
+                    "cannot assign to address-of expression `&{}` (unaddressable operand)",
+                    b
+                )));
             }
         }
     }

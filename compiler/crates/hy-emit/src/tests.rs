@@ -1543,3 +1543,24 @@ fn e3_hoist_preserves_preceding_operand_evaluation_order() {
         go
     );
 }
+
+#[test]
+fn addrof_place_in_emit_fails_closed() {
+    let dummy = hy_diag::Span::point(hy_diag::Pos::new(1, 1));
+    let place = hy_syntax::Place {
+        kind: hy_syntax::PlaceKind::AddrOf {
+            base: Box::new(hy_syntax::Place {
+                kind: hy_syntax::PlaceKind::Ident("x".to_string()),
+                span: dummy,
+            }),
+        },
+        span: dummy,
+    };
+    let mut emitter = crate::Emitter::new();
+    let res = emitter.emit_place(&place);
+    assert!(res.is_err(), "expected EmitError for PlaceKind::AddrOf");
+    assert!(
+        res.unwrap_err().message.contains("cannot assign to address-of expression `&x`"),
+        "error message should explain non-assignability"
+    );
+}
