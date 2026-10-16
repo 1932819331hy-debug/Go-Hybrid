@@ -812,6 +812,35 @@ fn single_var_iterate_over_chan_binds_value() {
 }
 
 #[test]
+fn make_slice_single_var_iterate_binds_element_value() {
+    // Slices allocated via make([]T, n) must lower single-variable iteration
+    // `for x in xs` with `_, x := range xs` to bind element values, not indices.
+    let go = emit("fn f() {\n    xs := make([]int, 3)\n    for x in xs {\n        _ = x\n    }\n}\n");
+    assert!(
+        go.contains("for _, x := range xs {"),
+        "make slice single-var range binds element value:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for x := range xs {"),
+        "make slice must not be lowered as chan range:\n{}",
+        go
+    );
+}
+
+#[test]
+fn make_chan_single_var_iterate_binds_received_value() {
+    // Channels allocated via make(chan T, n) bind received values directly (`v := range ch`).
+    let go = emit("fn f() {\n    ch := make(chan int, 3)\n    for v in ch {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range ch {"),
+        "make chan single-var range binds received value:\n{}",
+        go
+    );
+}
+
+
+#[test]
 fn set_insert_uses_prelude() {
     let go = emit(
         "type node_id = int\n\nfn f() bool {\n    seen := set[node_id]{}\n    return seen.insert(3)\n}\n",

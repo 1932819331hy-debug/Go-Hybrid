@@ -912,12 +912,12 @@ impl Emitter {
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
-        let call = match e {
+        let (call, args) = match e {
             Expr::Try { operand, .. } => match operand.as_ref() {
-                Expr::Call { callee, .. } => callee.as_ref(),
+                Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
                 _ => return BindingKind::Plain,
             },
-            Expr::Call { callee, .. } => callee.as_ref(),
+            Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
             _ => return BindingKind::Plain,
         };
         if let Expr::Field { base, name, .. } = call {
@@ -958,7 +958,18 @@ impl Emitter {
         if matches!(call, Expr::Ident { name, .. } if name == "make") {
             // args[0] is the type-as-value encoding; peek at its shape.
             // (Verified against the parser's make encoding.)
-            return BindingKind::Chan;
+            if let Some(first) = args.first() {
+                if matches!(
+                    &first.value,
+                    Expr::StructLit {
+                        ty: Some(TypeExpr::Chan { .. }),
+                        ..
+                    }
+                ) {
+                    return BindingKind::Chan;
+                }
+            }
+            return BindingKind::Plain;
         }
         BindingKind::Plain
     }
