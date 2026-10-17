@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"go/token"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -42,6 +43,7 @@ func TestAnalyzerEmpiricalPassContext(t *testing.T) {
 		Pkg:          pkg.Types,
 		TypesInfo:    pkg.TypesInfo,
 		TypesSizes:   pkg.TypesSizes,
+		ReadFile:     os.ReadFile,
 		Report: func(d analysis.Diagnostic) {
 			reportedDiags = append(reportedDiags, d)
 		},
@@ -65,6 +67,14 @@ func TestAnalyzerEmpiricalPassContext(t *testing.T) {
 	t.Logf("B2. pass.IgnoredFiles: %v (len=%d)", pass.IgnoredFiles, len(pass.IgnoredFiles))
 	if len(pass.OtherFiles) > 0 {
 		t.Errorf("Expected empty OtherFiles for non-Go files, got %v", pass.OtherFiles)
+	}
+
+	// 2b. Empirical Question B3: Can pass.ReadFile read .hy once path is known?
+	badHyPath := filepath.Join(testdata, "bad.hy")
+	rfData, rfErr := pass.ReadFile(badHyPath)
+	t.Logf("B3. pass.ReadFile(%q): err=%v, bytes=%d", badHyPath, rfErr, len(rfData))
+	if rfErr != nil || len(rfData) == 0 {
+		t.Fatalf("pass.ReadFile failed on .hy file: %v", rfErr)
 	}
 
 	// 3. Sibling discovery requires directory scan anchor:
