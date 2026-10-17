@@ -2,7 +2,6 @@ package analyzer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"go/token"
 	"os"
@@ -52,11 +51,18 @@ type Engine struct {
 }
 
 var (
-	defaultWasmPath = "/Users/pro/Go-Hybrid/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm"
-	globalEngine    *Engine
+	defaultWasmPath  = wasmArtifactPath()
+	globalEngine     *Engine
 	globalEngineOnce sync.Once
 	globalEngineErr  error
 )
+
+func wasmArtifactPath() string {
+	if path := os.Getenv("HYBRID_WASM_PATH"); path != "" {
+		return path
+	}
+	return filepath.Join("..", "..", "compiler", "target", "wasm32-unknown-unknown", "release", "hy_wasm.wasm")
+}
 
 func GetEngine(wasmPath string) (*Engine, error) {
 	globalEngineOnce.Do(func() {
@@ -69,7 +75,7 @@ func GetEngine(wasmPath string) (*Engine, error) {
 			return
 		}
 		ctx := context.Background()
-		r := wazero.NewRuntime(ctx)
+		r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCloseOnContextDone(true))
 		compiled, err := r.CompileModule(ctx, wasmBytes)
 		if err != nil {
 			r.Close(ctx)
@@ -86,51 +92,12 @@ func GetEngine(wasmPath string) (*Engine, error) {
 }
 
 func (e *Engine) Check(src string) (*CheckOutput, error) {
-	ctx := e.ctx
-	mod, err := e.runtime.InstantiateModule(ctx, e.compiled, wazero.NewModuleConfig())
-	if err != nil {
-		return nil, fmt.Errorf("instantiate failed: %w", err)
+	engine := &WasmEngine{ctx: e.ctx, runtime: e.runtime, compiled: e.compiled}
+	res := engine.CheckSource(e.ctx, src)
+	if res.Verdict == VerdictAnalysisFailure {
+		return nil, res.Failure
 	}
-	defer mod.Close(ctx)
-
-	allocFn := mod.ExportedFunction("hy_wasm_alloc")
-	freeFn := mod.ExportedFunction("hy_wasm_free")
-	checkFn := mod.ExportedFunction("hy_wasm_check")
-
-	srcBytes := []byte(src)
-	srcLen := uint64(len(srcBytes))
-
-	resAlloc, err := allocFn.Call(ctx, srcLen)
-	if err != nil {
-		return nil, fmt.Errorf("alloc failed: %w", err)
-	}
-	srcPtr := uint32(resAlloc[0])
-
-	if !mod.Memory().Write(srcPtr, srcBytes) {
-		return nil, fmt.Errorf("memory write failed")
-	}
-
-	resCheck, err := checkFn.Call(ctx, uint64(srcPtr), srcLen)
-	if err != nil {
-		return nil, fmt.Errorf("check call failed: %w", err)
-	}
-
-	_, _ = freeFn.Call(ctx, uint64(srcPtr), srcLen)
-
-	packed := resCheck[0]
-	outPtr := uint32(packed >> 32)
-	outLen := uint32(packed & 0xFFFFFFFF)
-
-	outBytes, ok := mod.Memory().Read(outPtr, outLen)
-	if !ok {
-		return nil, fmt.Errorf("memory read failed")
-	}
-
-	var out CheckOutput
-	if err := json.Unmarshal(outBytes, &out); err != nil {
-		return nil, fmt.Errorf("unmarshal json failed: %w", err)
-	}
-	return &out, nil
+	return &CheckOutput{Version: 1, Summary: *res.Summary, Diagnostics: res.Diagnostics}, nil
 }
 
 // PassContextLog records empirical pass inspection for research
@@ -203,7 +170,10 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		firstFile := pass.Fset.File(pass.Files[0].Pos())
 		if firstFile != nil {
 			dir := filepath.Dir(firstFile.Name())
-			entries, _ := os.ReadDir(dir)
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				return nil, fmt.Errorf("discover .hy files: %w", err)
+			}
 			for _, e := range entries {
 				if filepath.Ext(e.Name()) == ".hy" {
 					fullPath := filepath.Join(dir, e.Name())
@@ -223,9 +193,10 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 						// Primary read via os.ReadFile to support on-disk singlechecker execution
 						data, err := os.ReadFile(fullPath)
-						if err == nil {
-							hyFiles[fullPath] = string(data)
+						if err != nil {
+							return nil, fmt.Errorf("read %s: %w", fullPath, err)
 						}
+						hyFiles[fullPath] = string(data)
 					}
 				}
 			}
@@ -251,6 +222,9 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			for _, d := range out.Diagnostics {
 				var exactPos token.Pos = token.NoPos
 				if fileToken != nil && d.Span.Start.Line > 0 {
+					if d.Span.Start.Line > fileToken.LineCount() {
+						return nil, fmt.Errorf("diagnostic line outside %s", filename)
+					}
 					lineStart := fileToken.LineStart(d.Span.Start.Line)
 					if lineStart.IsValid() {
 						exactPos = lineStart + token.Pos(d.Span.Start.Col-1)

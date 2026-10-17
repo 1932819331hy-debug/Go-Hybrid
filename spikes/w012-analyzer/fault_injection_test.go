@@ -9,12 +9,12 @@ import (
 )
 
 type MockWasmABI struct {
-	AllocFn       func(ctx context.Context, byteLen uint64) (uint32, error)
-	FreeFn        func(ctx context.Context, ptr, byteLen uint64) error
-	CheckFn       func(ctx context.Context, ptr, byteLen uint64) (uint64, error)
-	Memory        []byte
-	FailRead      bool
-	FailWrite     bool
+	AllocFn   func(ctx context.Context, byteLen uint64) (uint32, error)
+	FreeFn    func(ctx context.Context, ptr, byteLen uint64) error
+	CheckFn   func(ctx context.Context, ptr, byteLen uint64) (uint64, error)
+	Memory    []byte
+	FailRead  bool
+	FailWrite bool
 }
 
 func (m *MockWasmABI) Alloc(ctx context.Context, byteLen uint64) (uint32, error) {
@@ -73,7 +73,7 @@ func TestFailureDomainSeparation(t *testing.T) {
 	defer engine.Close()
 
 	// 1. Positive Control: Valid Program -> VerdictAccept
-	validSrcBytes, err := os.ReadFile("/Users/pro/Go-Hybrid/tests/checker-corpus/09-a3-map-slot-valid.hy")
+	validSrcBytes, err := os.ReadFile("../../tests/checker-corpus/09-a3-map-slot-valid.hy")
 	if err != nil {
 		t.Fatalf("failed to read valid corpus file: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestFailureDomainSeparation(t *testing.T) {
 	t.Logf("[PASS] Valid program -> %s", resValid.Verdict)
 
 	// 2. Negative Control: Hybrid Rule Violation -> VerdictReject (User rejection)
-	invalidSrcBytes, err := os.ReadFile("/Users/pro/Go-Hybrid/tests/checker-corpus/08-a3-map-slot-invalidated.hy")
+	invalidSrcBytes, err := os.ReadFile("../../tests/checker-corpus/08-a3-map-slot-invalidated.hy")
 	if err != nil {
 		t.Fatalf("failed to read invalid corpus file: %v", err)
 	}

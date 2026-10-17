@@ -128,7 +128,7 @@ type WasmEngine struct {
 }
 
 func NewWasmEngine(ctx context.Context, wasmBytes []byte) (*WasmEngine, error) {
-	r := wazero.NewRuntime(ctx)
+	r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCloseOnContextDone(true))
 	compiled, err := r.CompileModule(ctx, wasmBytes)
 	if err != nil {
 		r.Close(ctx)
@@ -228,24 +228,68 @@ func CheckSourceWithABI(ctx context.Context, abi WasmABI, src string) *AnalysisR
 		}
 	}
 
-	var out CheckOutput
-	if err := json.Unmarshal(outBytes, &out); err != nil {
-		return &AnalysisResult{
-			Verdict: VerdictAnalysisFailure,
-			Failure: fmt.Errorf("infrastructure error: malformed diagnostic envelope: %w", err),
-		}
+	out, err := decodeCheckOutput(outBytes)
+	if err != nil {
+		return &AnalysisResult{Verdict: VerdictAnalysisFailure, Failure: fmt.Errorf("infrastructure error: malformed diagnostic envelope: %w", err)}
 	}
-
 	if out.Summary.Verdict == "accept" {
-		return &AnalysisResult{
-			Verdict: VerdictAccept,
-			Summary: &out.Summary,
+		return &AnalysisResult{Verdict: VerdictAccept, Summary: &out.Summary}
+	}
+	return &AnalysisResult{Verdict: VerdictReject, Diagnostics: out.Diagnostics, Summary: &out.Summary}
+}
+
+// decodeCheckOutput validates semantic structure, not merely JSON syntax.
+// Unknown additive fields remain allowed; missing fields and contradictory
+// summaries are infrastructure failures rather than user-code verdicts.
+func decodeCheckOutput(data []byte) (*CheckOutput, error) {
+	var wire struct {
+		Version     *int          `json:"version"`
+		Diagnostics *[]Diagnostic `json:"diagnostics"`
+		Summary     *struct {
+			Verdict  string `json:"verdict"`
+			Errors   *int   `json:"errors"`
+			Warnings *int   `json:"warnings"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return nil, err
+	}
+	if wire.Version == nil || *wire.Version != 1 || wire.Diagnostics == nil || wire.Summary == nil || wire.Summary.Errors == nil || wire.Summary.Warnings == nil {
+		return nil, errors.New("missing required fields or unsupported envelope version")
+	}
+	var out CheckOutput
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	errorsCount, warningsCount := 0, 0
+	for _, d := range out.Diagnostics {
+		if d.Code == "" || d.Message == "" || d.Span.Start.Line < 1 || d.Span.Start.Col < 1 || d.Span.End.Line < d.Span.Start.Line || d.Span.End.Col < 1 || (d.Span.End.Line == d.Span.Start.Line && d.Span.End.Col < d.Span.Start.Col) {
+			return nil, errors.New("invalid diagnostic code, message, or span")
+		}
+		switch d.Severity {
+		case "error":
+			errorsCount++
+		case "warning":
+			warningsCount++
+		case "note":
+		default:
+			return nil, fmt.Errorf("unknown diagnostic severity %q", d.Severity)
 		}
 	}
-
-	return &AnalysisResult{
-		Verdict:     VerdictReject,
-		Diagnostics: out.Diagnostics,
-		Summary:     &out.Summary,
+	if out.Summary.Errors != errorsCount || out.Summary.Warnings != warningsCount {
+		return nil, errors.New("summary counts disagree with diagnostics")
 	}
+	switch out.Summary.Verdict {
+	case "accept":
+		if errorsCount != 0 {
+			return nil, errors.New("accept verdict with error diagnostics")
+		}
+	case "reject":
+		if errorsCount == 0 {
+			return nil, errors.New("reject verdict without error diagnostics")
+		}
+	default:
+		return nil, fmt.Errorf("unknown verdict %q", out.Summary.Verdict)
+	}
+	return &out, nil
 }

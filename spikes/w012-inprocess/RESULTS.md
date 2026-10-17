@@ -18,10 +18,10 @@
 
 | Target # | Target Scope | Target Hypothesis | Pass Criterion | Confirmatory Result |
 |---|---|---|---|---|
-| **Target 1** | Corpus Parity | 55/55 fixtures match native CLI byte-for-byte | 100.0% parity (0 diffs) | **CONFIRMED (55/55, 100.0%)** |
-| **Target 2** | Native CLI Subprocess | Original 15–40 ms assumption overstated; p50 < 8 ms | Documented baseline | **FALSIFIED / OVERSTATED** (p50: 5.745 ms) |
-| **Target 3** | Steady-State WASM Speedup | Warm in-process check p50 < 1.0 ms; speedup $\ge 10\times$ | p50 ratio $\ge 10\times$ | **CONFIRMED** (p50: 0.272 ms, **21.1x speedup**) |
-| **Target 4** | Filesystem Cache Break-Even | FS cache reduces compile by $>90\%$; break-even $\le 5$ checks | $N_{\text{break-even}} \le 5$ | **CONFIRMED** (Compile: 12.86 ms, **3 checks**) |
+| **Target 1** | Corpus Parity | 55/55 fixtures match native CLI as normalized parsed JSON envelopes (input filenames normalized only) | 100.0% parity (0 diffs) | **CONFIRMED (55/55, 100.0%)** |
+| **Target 2** | Native CLI Subprocess | Original 15–40 ms assumption overstated; p50 < 8 ms | Documented baseline | **FALSIFIED / OVERSTATED** (p50: 5.038 ms) |
+| **Target 3** | Steady-State WASM Speedup | Warm in-process check p50 < 1.0 ms; speedup $\ge 10\times$ | p50 ratio $\ge 10\times$ | **CONFIRMED** (p50: 0.269 ms, **18.7x speedup**) |
+| **Target 4** | Filesystem Cache Break-Even | FS cache reduces compile by $>90\%$; break-even $\le 5$ checks | $N_{\text{break-even}} \le 5$ | **CONFIRMED** (Compile: 12.919 ms, **3 checks**) |
 | **Target 5** | Failure-Domain Separation | Failures fail closed to `AnalysisFailure`, disjoint from Reject | 100% pass on 5 fault injections | **CONFIRMED** (5/5 injected faults caught) |
 | **Target 6** | On-Disk Analyzer & Position | On-disk discovery works via `os.ReadDir`; exact positions via `Fset.AddFile` | Exact `line:col` in `go vet` | **CONFIRMED** (`sibling.hy:7:13`) |
 
@@ -127,9 +127,39 @@ BREAK-EVEN QUANTITATIVE ANALYSIS (100 ITERATIONS CONFIRMATORY):
 
 ## 3. Protocol Verification Sign-Off
 All preregistered targets have completed confirmatory execution:
-1. Corpus parity: **100.0% confirmed** (55/55 fixtures matching byte-for-byte).
+1. Corpus parity: **100.0% confirmed** (55/55 fixtures matching as normalized parsed JSON envelopes (input filenames normalized only)).
 2. Baseline CLI latency: **5.038 ms p50** (Original 15–40ms normal CLI latency estimate was overstated on this host).
 3. Representative steady-state speedup: **≈ 17–19x** (18.7x observed at p50: 5.038 ms vs 0.269 ms).
 4. Break-even threshold: **73 checks (cold uncached)** vs **3 checks (filesystem-cached)** by p50.
 5. Failure-domain isolation: **100% verified across all 5 fault-injection scenarios** (fails closed to `AnalysisFailure`).
 6. On-disk Analyzer execution: **Exact source line/col positions confirmed** (`file.hy:line:col` emitted under `go vet -vettool`). Sibling `.hy` discovery relies on host filesystem scanning (`os.ReadDir`). Current spike proves on-disk go-vet/singlechecker integration. It does NOT prove unsaved editor-buffer integration.
+
+
+## Closeout validation — 2026-10-18
+
+The earlier corpus script checked expected fixture verdicts and the first error rule; it did **not** establish complete native/WASM diagnostic equality. The updated script now invokes the native CLI for every fixture and compares complete parsed JSON envelopes, normalizing only the input filename (including its occurrences in diagnostic notes). This is semantic JSON equality, not raw byte equality.
+
+Executed against the existing native/WASM artifacts from the reviewed baseline:
+
+```text
+Corpus fixture agreement: 55/55
+Native/WASM normalized envelope parity: 55/55
+```
+
+`go test ./...` passes for the analyzer module, including ten malformed-envelope cases, acceptance of additive fields, the original five boundary fault injections, a real minimal guest trap, and a real infinite-loop guest interrupted by a 50 ms context deadline. The allocator-failure test uses a mock error; it does not exhaust a real guest heap. The malformed-output tests now include valid JSON with missing/unknown verdicts and contradictory counts. The Analyzer invokes the same validated boundary as the failure harness and propagates infrastructure errors rather than reporting a code diagnostic. Wazero context cancellation is enabled explicitly.
+
+A rebuilt singlechecker driver reports the expected `sibling.hy:6:5`, `:7:5`, and `:7:13` diagnostics under `go vet -vettool`; exit 1 is the expected rejection of the invalid fixture.
+
+Reproduction (from repository root; build both artifacts from the reviewed baseline first):
+
+```sh
+export HYBRID_WASM_PATH="$PWD/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm"
+export HYBRID_NATIVE_PATH="$PWD/compiler/target/release/hyb"
+node test_wasm_parity.js
+cd spikes/w012-analyzer
+go test ./...
+go build -o /tmp/hybvet ./cmd/hybvet
+go vet -vettool=/tmp/hybvet ./testpkg
+```
+
+Benchmark provenance: all canonical 100-run timing figures above are the recorded snapshot at `b3d73c2c3f211f69e856abd089adc4cad9a21f50`, before this closeout added envelope validation. They were not rerun or relabeled as measurements of the changed wrapper. The added validation cost and end-to-end editor latency remain unmeasured. The parity script's per-file timings are separate and are not the canonical benchmark. Long-duration memory behavior remains unproven. Stock-gopls plugins, unsaved `.hy` buffers, and a completed standalone LSP are not demonstrated.

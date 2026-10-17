@@ -7,7 +7,7 @@
 - **Local Branch**: `spike/w012-inprocess-analyzer`
 - **Preregistration Commit**: `58ad41ae78f240680525a634aad8309fc9ad7281`
 - **Protocol Class**: Preregistered Confirmatory Replication (N=100 iterations)
-- **Status**: **STATUS: FINAL-HARDENED — NOT SUBMITTED**
+- **Status**: **STATUS: PUBLIC EVIDENCE — AWAITING M1 REVIEW**
 - **Review Date**: 2026-10-18
 
 ---
@@ -39,11 +39,11 @@ To maintain absolute maintainer credibility, this audit explicitly segregates ve
 ### PROVEN
 1. **Rust Checker WASM Target**: `hy-syntax`, `hy-check`, and `hy-diag` compile directly to `wasm32-unknown-unknown` without OS dependencies.
 2. **Wazero In-Process Embedding**: Pure Go host embedding via `github.com/tetratelabs/wazero v1.9.0` executes without CGO or external toolchains.
-3. **Corpus Verdict Parity**: 55/55 corpus fixtures match byte-for-byte against the native CLI across all diagnostic codes and verdicts.
-4. **Warm Latency Advantage**: Pure in-process WASM checking executes in **0.272 ms (p50)** vs **5.745 ms (p50)** for native CLI subprocesses (21.1x speedup).
+3. **Corpus Verdict Parity**: 55/55 corpus fixtures match as normalized parsed JSON envelopes (input filenames normalized only) against the native CLI across all diagnostic codes and verdicts.
+4. **Warm Latency Advantage**: Pure in-process WASM checking executes in **0.269 ms (p50)** vs **5.038 ms (p50)** for native CLI subprocesses (18.7x speedup).
 5. **Thread and State Isolation**: No state drift or obvious memory-growth signal was observed during the 5,200-call test horizon in Rust and Wazero.
 6. **Failure-Domain / Fail-Closed Separation**: Fault injection tests (WASM trap, malformed JSON, invalid memory bounds, alloc failure, context timeout) deterministically trigger `AnalysisFailure` and fail closed, never returning `Accept`.
-7. **Filesystem Compilation Caching**: Wazero filesystem cache drops compilation time from 350.955 ms to 12.860 ms (p50), breaking even in 3 checks.
+7. **Filesystem Compilation Caching**: Wazero filesystem cache drops compilation time from 346.119 ms to 12.919 ms (p50), breaking even in 3 checks.
 8. **On-Disk Singlechecker / `go vet` Integration**: Sibling `.hy` files are discovered via disk scan, and exact source spans map to `token.FileSet`, outputting exact `line:column` positions in `go vet`.
 
 ### PARTIALLY PROVEN
@@ -63,13 +63,13 @@ To maintain absolute maintainer credibility, this audit explicitly segregates ve
 
 ## 3. Real `analysis.Analyzer` Spike & Contract Audit
 
-A minimal, real, runnable prototype was constructed in [`spikes/w012-analyzer/`](file:///Users/pro/Go-Hybrid/spikes/w012-analyzer/) adhering to `golang.org/x/tools/go/analysis`.
+A minimal, real, runnable prototype was constructed in [`spikes/w012-analyzer/`](spikes/w012-analyzer/) adhering to `golang.org/x/tools/go/analysis`.
 
 ### The `pass.ReadFile` Contract vs. On-Disk Execution
 The official Go documentation for `Pass.ReadFile` specifies:
 > *"The only valid file names are the elements of OtherFiles and IgnoredFiles, and names returned by Fset.File(f.FileStart).Name() for each f in Files. Analyzers must use this function (if provided) instead of accessing the file system directly. This allows a driver to provide a virtualized file tree (including, for example, unsaved editor buffers) and to track dependencies precisely to avoid unnecessary recomputation."*
 
-Empirical findings from [`analyzer_test.go`](file:///Users/pro/Go-Hybrid/spikes/w012-analyzer/analyzer_test.go):
+Empirical findings from [`analyzer_test.go`](spikes/w012-analyzer/analyzer_test.go):
 1. **`pass.Files`**: Length strictly 1 (`sample.go`). Go parser ignores non-Go files.
 2. **`pass.OtherFiles` & `pass.IgnoredFiles`**: Both are empty (`[]`). Non-Go/non-C files are not tracked by the Go toolchain.
 3. **Execution Domain**:
@@ -197,7 +197,7 @@ Measurements conducted on Apple Silicon under Darwin x86_64 emulation / arm64 ru
    *(Mean estimate: $12.974 / 4.844 \approx \mathbf{3\text{ checks}}$)*.
    - With persistent filesystem compilation caching, in-process checking breaks even on the **3rd file check**.
 3. **Long-Lived Service / LSP Server (Case B / E)**:
-   - Compilation cost is paid once at startup. Every subsequent check executes in **0.269 ms**, delivering an immediate **18.7x speedup** on every keystroke/save.
+   - Compilation cost is paid once at startup. The recorded pre-hardening warm microbenchmark measured **0.269 ms** and **18.7x**. This is not an end-to-end keystroke/save measurement.
 
 ---
 
@@ -229,11 +229,11 @@ $$\text{VerdictAnalysisFailure} \cap (\text{VerdictAccept} \cup \text{VerdictRej
 |---|---|---|---|---|
 | **Positive Control** | Valid program (`09-a3-map-slot-valid.hy`) | `VerdictAccept` | `VerdictAccept` | **PASSED** |
 | **Negative Control** | A3 violation (`08-a3-map-slot-invalidated.hy`)| `VerdictReject` | `VerdictReject` | **PASSED** |
-| **Fault 1: WASM Trap** | `unreachable` opcode executed in guest | `VerdictAnalysisFailure` | `VerdictAnalysisFailure` | **PASSED** |
+| **Fault 1: WASM Trap** | Real minimal guest `unreachable` trap (plus original mock) | `VerdictAnalysisFailure` | `VerdictAnalysisFailure` | **PASSED** |
 | **Fault 2: Malformed JSON**| Truncated / corrupt diagnostic payload | `VerdictAnalysisFailure` | `VerdictAnalysisFailure` | **PASSED** |
 | **Fault 3: Invalid Pointer**| Out-of-bounds guest memory pointer (50000) | `VerdictAnalysisFailure` | `VerdictAnalysisFailure` | **PASSED** |
-| **Fault 4: Alloc Failure** | Guest OOM on `hy_wasm_alloc` | `VerdictAnalysisFailure` | `VerdictAnalysisFailure` | **PASSED** |
-| **Fault 5: Timeout** | Context deadline exceeded before check | `VerdictAnalysisFailure` | `VerdictAnalysisFailure` | **PASSED** |
+| **Fault 4: Alloc Failure** | Mock allocator error returned at ABI boundary | `VerdictAnalysisFailure` | `VerdictAnalysisFailure` | **PASSED** |
+| **Fault 5: Timeout** | Pre-expired context plus real infinite-loop guest interrupted during execution | `VerdictAnalysisFailure` | `VerdictAnalysisFailure` | **PASSED** |
 
 - **Status**: **Safety fail-closed CONFIRMED; diagnostic/error-domain separation implemented.**
 
@@ -244,7 +244,7 @@ $$\text{VerdictAnalysisFailure} \cap (\text{VerdictAccept} \cup \text{VerdictRej
 | Capability | Without W-011 (Standalone `.hy` Surface) | With W-011 (Go Syntax Surface) |
 |---|---|---|
 | **Browser WASM Playground** | **Fully Functional**. Zero dependency on Go toolchain; compiles and runs `.hy` directly in V8/browser Monaco editor. | Fully Functional. |
-| **Standalone LSP (`hyb lsp`)** | **Fully Functional**. Standard LSP architecture handling `.hy` buffers directly with <0.3 ms latency. | Redundant if gopls handles directives. |
+| **Standalone LSP (`hyb lsp`)** | **Proposed architecture**. The embedded engine is demonstrated; no standalone LSP implementation or end-to-end editor latency is established here. | Redundant if gopls handles directives. |
 | **`go vet` Integration** | **Partial Feasibility**. Discovers sibling `.hy` via directory scan anchor; emits exact `line:col` diagnostics. | **Native**. Runs directly on `pass.Files` with exact Go `token.Pos` source spans. |
 | **Stock `gopls` Integration** | **Infeasible**. Stock `gopls` cannot parse `.hy` or load out-of-tree analyzer plugins. | **Infeasible dynamically**. Requires either upstreaming or custom gopls build. |
 | **Custom `gopls` Build** | Requires hacking `.hy` grammar into gopls parser. | **Fully Functional**. Direct registration of analyzer on Go files. |
@@ -258,9 +258,9 @@ $$\text{VerdictAnalysisFailure} \cap (\text{VerdictAccept} \cup \text{VerdictRej
 
 | # | Assumption in Issue #268 | Original Claim | Hardened Empirical Verdict | Final Evidence & Architecture Basis |
 |---|---|---|---|---|
-| 1 | Subprocess startup is a bottleneck | 15–40 ms latency | **PARTIALLY CONFIRMED** | Original absolute latency assumption (15–40 ms) was overstated (measured p50: 5.745 ms). However, relative in-process advantage is confirmed (21.1x speedup at 0.272 ms). |
+| 1 | Subprocess startup is a bottleneck | 15–40 ms latency | **PARTIALLY CONFIRMED** | Original absolute latency assumption (15–40 ms) was overstated (measured p50: 5.038 ms). However, relative in-process advantage is confirmed (18.7x speedup at 0.269 ms). |
 | 2 | Rust checker compiles to WASM | Feasible | **CONFIRMED** | `wasm32-unknown-unknown` produces clean 903.4 KB binary with 0 OS dependencies. |
-| 3 | Wazero simplifies deployment | High benefit | **PARTIALLY CONFIRMED** | Eliminates CGO and Rust toolchain requirements; requires compilation cache (12.86 ms) to avoid cold 350 ms penalty. |
+| 3 | Wazero simplifies deployment | High benefit | **PARTIALLY CONFIRMED** | Eliminates CGO and Rust toolchain requirements; requires compilation cache (12.919 ms) to avoid cold 350 ms penalty. |
 | 4 | `TypesInfo` replaces `foreign.rs` | Fully replaces | **PARTIALLY CONFIRMED** | Eliminates structural stubs (packages, names, atomic types); cannot replace linear ownership or `CallMode::Consume/Borrow`. |
 | 5 | `gopls` integration achievable | Easy plugin | **REJECTED** | Stock `gopls` has no dynamic plugin loader and ignores `.hy`. Must pivot to standalone LSP server. |
 | 6 | `go vet` and `gopls` conflation | Distinct tools | **REJECTED (Conflated)** | Issue #268 incorrectly treated `analysis.Analyzer` as an in-process `gopls` plugin. |
@@ -286,8 +286,38 @@ $$\text{VerdictAnalysisFailure} \cap (\text{VerdictAccept} \cup \text{VerdictRej
 
 ## 12. Submission Package Metrics & Sign-Off
 
-- **Technical Review Readiness**: **92%** (All 4 reviewer blockers resolved, confirmatory 100-run benchmark ledger locked in, fail-closed contract enforced, exact positions verified).
+- **Technical Review Readiness**: Evidence available for formal review; no numerical readiness or payout probability is inferred.
 - **Actual M1 Payout Probability**: **UNKNOWN / Competition-Dependent** (17 competing entries for the $500 Hybrid Bounty pool; dependent on maintainer review priority in Discussion slot 12 on 2026-11-01).
 - **Reviewed Upstream Commit**: `e2a5f7d5eb90becb210df274765adfa50c99b21b` (`upstream/main`)
 - **Preregistration Commit**: `58ad41ae78f240680525a634aad8309fc9ad7281`
-- **Global Status**: **STATUS: FINAL-HARDENED — NOT SUBMITTED**
+- **Global Status**: **STATUS: PUBLIC EVIDENCE — AWAITING M1 REVIEW**
+
+
+## Closeout validation — 2026-10-18
+
+The earlier corpus script checked expected fixture verdicts and the first error rule; it did **not** establish complete native/WASM diagnostic equality. The updated script now invokes the native CLI for every fixture and compares complete parsed JSON envelopes, normalizing only the input filename (including its occurrences in diagnostic notes). This is semantic JSON equality, not raw byte equality.
+
+Executed against the existing native/WASM artifacts from the reviewed baseline:
+
+```text
+Corpus fixture agreement: 55/55
+Native/WASM normalized envelope parity: 55/55
+```
+
+`go test ./...` passes for the analyzer module, including ten malformed-envelope cases, acceptance of additive fields, the original five boundary fault injections, a real minimal guest trap, and a real infinite-loop guest interrupted by a 50 ms context deadline. The allocator-failure test uses a mock error; it does not exhaust a real guest heap. The malformed-output tests now include valid JSON with missing/unknown verdicts and contradictory counts. The Analyzer invokes the same validated boundary as the failure harness and propagates infrastructure errors rather than reporting a code diagnostic. Wazero context cancellation is enabled explicitly.
+
+A rebuilt singlechecker driver reports the expected `sibling.hy:6:5`, `:7:5`, and `:7:13` diagnostics under `go vet -vettool`; exit 1 is the expected rejection of the invalid fixture.
+
+Reproduction (from repository root; build both artifacts from the reviewed baseline first):
+
+```sh
+export HYBRID_WASM_PATH="$PWD/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm"
+export HYBRID_NATIVE_PATH="$PWD/compiler/target/release/hyb"
+node test_wasm_parity.js
+cd spikes/w012-analyzer
+go test ./...
+go build -o /tmp/hybvet ./cmd/hybvet
+go vet -vettool=/tmp/hybvet ./testpkg
+```
+
+Benchmark provenance: all canonical 100-run timing figures above are the recorded snapshot at `b3d73c2c3f211f69e856abd089adc4cad9a21f50`, before this closeout added envelope validation. They were not rerun or relabeled as measurements of the changed wrapper. The added validation cost and end-to-end editor latency remain unmeasured. The parity script's per-file timings are separate and are not the canonical benchmark. Long-duration memory behavior remains unproven. Stock-gopls plugins, unsaved `.hy` buffers, and a completed standalone LSP are not demonstrated.

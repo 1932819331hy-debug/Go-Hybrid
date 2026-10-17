@@ -1,8 +1,11 @@
 const fs = require('fs');
 const path = require('path');
+const {spawnSync} = require('child_process');
+const assert = require('assert');
 
 async function main() {
-    const wasmPath = path.join(__dirname, 'compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm');
+    const wasmPath = process.env.HYBRID_WASM_PATH || path.join(__dirname, 'compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm');
+    const nativePath = process.env.HYBRID_NATIVE_PATH || path.join(__dirname, 'compiler/target/release/hyb');
     const wasmBytes = fs.readFileSync(wasmPath);
 
     console.log(`Loaded WASM: ${wasmBytes.length} bytes (${(wasmBytes.length / 1024).toFixed(1)} KB)`);
@@ -45,12 +48,13 @@ async function main() {
     const resReject = checkSource(sampleReject);
     console.log('Sample Reject verdict:', resReject.verdict, 'errors:', resReject.errors, 'rule:', resReject.diagnostics[0]?.tier0_rule);
 
-    // Test across all 55 corpus files and measure time
+    // Test across all corpus files and measure time
     const corpusDir = path.join(__dirname, 'tests/checker-corpus');
     const files = fs.readdirSync(corpusDir).filter(f => f.endsWith('.hy')).sort();
 
     console.log(`\nVerifying all ${files.length} corpus files against WASM...`);
     let passed = 0;
+    let nativeMatches = 0;
     const times = [];
 
     for (const f of files) {
@@ -64,6 +68,20 @@ async function main() {
         const res = checkSource(src);
         const t1 = performance.now();
         times.push(t1 - t0);
+
+        // Compare complete parsed envelopes after normalizing only the input
+        // filename (the WASM ABI currently calls its input "input.hy").
+        const native = spawnSync(nativePath, ['check', fullPath, '--json'], {encoding:'utf8'});
+        if (native.error || ![0,1].includes(native.status)) throw native.error || new Error(`native CLI failed: ${native.status}: ${native.stderr}`);
+        const nativeOutput = JSON.parse(native.stdout);
+        function normalize(value) {
+            if (typeof value === 'string') return value.split(fullPath).join('input.hy');
+            if (Array.isArray(value)) return value.map(normalize);
+            if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(k => [k, normalize(value[k])]));
+            return value;
+        }
+        assert.deepStrictEqual(normalize(res), normalize(nativeOutput), `native/WASM diagnostic mismatch: ${f}`);
+        nativeMatches++;
 
         const verdict = res.summary ? res.summary.verdict : res.verdict;
         const errors = res.summary ? res.summary.errors : res.errors;
@@ -92,7 +110,9 @@ async function main() {
     const p90 = times[Math.floor(times.length * 0.9)];
     const p99 = times[times.length - 1];
 
-    console.log(`Corpus parity: ${passed}/${files.length} (${(passed/files.length*100).toFixed(1)}%)`);
+    console.log(`Corpus fixture agreement: ${passed}/${files.length}`);
+    console.log(`Native/WASM normalized envelope parity: ${nativeMatches}/${files.length}`);
+    if (files.length === 0 || passed !== files.length || nativeMatches !== files.length) process.exitCode = 1;
     console.log(`WASM Check Latency per file:`);
     console.log(`  mean: ${mean.toFixed(3)} ms`);
     console.log(`  p50:  ${p50.toFixed(3)} ms`);
