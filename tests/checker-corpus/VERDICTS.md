@@ -644,3 +644,14 @@ so `move h` froze `h` but not `shared` and the emitted Go raced.
 | 58 | 58-defer-live-reference-via-alias | REJECT | A1b | `HYB-E3003` | the deferred call names the ALIAS, the move transfers the ORIGIN |
 | 59 | 59-rebind-forgets-defer-capture | REJECT | A1b | `HYB-E3003` | rebinding the name must not forget the captured storage |
 | 60 | 60-rebind-without-defer-control | ACCEPT | — | — | the over-rejection guard: a rebind with no defer and no boundary |
+## Additive corpus registration — 2026-10-17: address-of launder through a call (#435)
+
+`collect_ref_roots` walks `AddrOf` and the `UnOp::Addr` spelling, so `&h`
+now contributes its root. These two fixtures pin the behaviour from the corpus
+side: the escape must reject, and a read-only use of the same address must stay
+accepted so the rule cannot degrade into "never take an address".
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 61 | 61-addr-of-call-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `p := keep(&h)` then `task worker(move h)` then a write through `p` |
+| 62 | 62-addr-of-call-read-control | ACCEPT | — | — | `read_size(&h)` returns a scalar, so no alias survives the call |
