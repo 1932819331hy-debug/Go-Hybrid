@@ -262,3 +262,8 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 ## Contributor validation: submit revision lookup (2026-10-16)
 - Base 00610f7: resolve_head ignores failed git rev-parse, allowing an invalid revision/error message into a Kaggle upload and submitted.json. Abort before touching worker files or invoking Kaggle when HEAD lookup fails.
 - Three new offline tests: original two failures/one pass; patched all 11 job-test methods pass. Real temporary Git repositories cover unborn and committed HEAD; a mocked upload boundary verifies no push, payload mutation or submission record after lookup failure. git diff --check passes. No real Kaggle submission or compiler/Rust/Go suite run; maintainer CI remains required, including repair of existing workflow conflict markers (#339).
+
+## Contributor validation: registered stdout assertions (2026-10-17)
+- Base `8dd0002`: case 35 registers `EXPECTED-OUTPUT: idle`, but the differential harness reports FULL AGREEMENT for `sent` or empty stdout when execution exits 0. Consume the optional single-line assertion, allow one terminal LF/CRLF, and report mismatches; reject ambiguous or malformed annotations. Fixtures without an output assertion retain their execution contract. Register the new tests in quick CI.
+- Baseline: 5/8 initial regressions fail. Candidate: 11 output tests plus 13 existing marker-parser tests and 2 existing mocked exit-status tests pass (26/26); all 52 current corpus files parse, with case 35 the sole output assertion. Python compilation and `git diff --check` pass on Windows and macOS. Build/run processes are mocked in the new tests; Go/Rust and the full Linux compiler/differential suites are not available locally. Owner CI and bounty review remain pending.
+
