@@ -344,3 +344,48 @@ fn untyped_constant_expression_overflow_is_rejected() {
     );
     assert_eq!(r.verdict, Verdict::Reject);
 }
+
+#[test]
+fn landed_constfold_regressions_remain_rejected_after_default_int_port() {
+    for src in [
+        "fn main() {\n    var n int8 = 100 + 100\n    fmt.println(\"{n}\")\n}\n",
+        "fn main() {\n    var x int = 2.5\n    fmt.println(\"{x}\")\n}\n",
+    ] {
+        let r = check(src);
+        assert!(
+            error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+            "landed #224 overflow/truncation behavior must survive #297 integration: {:?}",
+            error_codes(&r)
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn folded_default_int_shift_overflows_are_rejected() {
+    for src in [
+        "fn main() {\n    x := 1 << 63\n    fmt.println(\"{x}\")\n}\n",
+        "fn main() {\n    x := 1 << 128\n    fmt.println(\"{x}\")\n}\n",
+    ] {
+        let r = check(src);
+        assert!(
+            error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+            "folded default-int shift overflow must be HYB-E6002: {:?}",
+            error_codes(&r)
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn nondecimal_underscore_literal_past_i128_is_rejected() {
+    let r = check(
+        "fn main() {\n    x := 0x1_0000_0000_0000_0000_0000_0000_0000_0000\n    fmt.println(\"{x}\")\n}\n",
+    );
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "radix parsing must retain >i128 overflow instead of failing open: {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
