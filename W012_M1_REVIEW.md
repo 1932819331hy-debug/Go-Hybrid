@@ -19,14 +19,14 @@
   1. **Architecture A (Rust -> wasm32-unknown-unknown -> Wazero)** is **TECHNICALLY PROVEN**:
      - Compiles with 0 code modifications into a standalone **903.4 KB** (`925,098` bytes) WASM binary.
      - Achieves **100.0% verdict parity across all 55 corpus fixtures** (39 REJECT, 2 ACCEPT-MANAGED, 14 ACCEPT).
-     - Achieves steady-state in-process check latency of **0.272 ms (p50)** and **0.286 ms (mean)**, delivering a representative **21.1x speedup** over native CLI process invocation (5.745 ms p50, 5.698 ms mean across 100 runs).
-     - Demonstrates zero state drift or obvious memory-growth signal during the 5,200-call test horizon.
+     - Achieves steady-state in-process check latency of **0.269 ms (p50)** and **0.278 ms (mean)**, delivering a representative **18.7x speedup** (≈ 17–19x) over native CLI process invocation (5.038 ms p50, 5.122 ms mean across 100 runs).
+     - No state drift was observed during the tested horizon across 2,000 sequential and 3,200 concurrent runs. Long-duration memory behavior remains unproven.
   2. **Architecture B (Self-hosted Native Go Rewrite)** is a **HARD NO-GO**:
      - Rewriting `hy-check` (a large multi-thousand-line semantic rewrite; `hy-check` core alone is 16,663 LOC across 16 modules of Polonius-style alias tracking, non-lexical loan windows, and shadow scoping) creates permanent semantic divergence, duplicate maintenance overhead, and violates the project's zero-duplication invariants.
   3. **Proposal Flaws Corrected & Hardened**:
      - **Stock `gopls` Plugin Impossibility**: `analysis.Analyzer` can read non-Go files as auxiliary inputs, but stock `gopls` does not parse `.hy` into Go AST/types nor dynamically load arbitrary third-party analyzers.
-     - **Baseline Subprocess Latency Corrected**: Issue #268's original estimate of 15–40 ms baseline subprocess latency was **falsified/overestimated** on this host (measured p50: 5.745 ms). However, in-process WASM (0.272 ms) retains a decisive 21.1x steady-state speedup.
-     - **Cold-Start Amortization & Break-Even**: Wazero cold JIT compilation takes **350.955 ms (p50)** without cache. However, Wazero's persistent filesystem cache (`NewCompilationCacheWithDir`) slashes compilation to **12.860 ms (p50)**, achieving break-even against the native CLI in **under 3 checks**.
+     - **Baseline Subprocess Latency Corrected**: Issue #268's original estimate of 15–40 ms baseline subprocess latency was **falsified/overestimated** on this host (measured p50: 5.038 ms). However, in-process WASM (0.269 ms) retains a decisive 18.7x steady-state speedup.
+     - **Cold-Start Amortization & Break-Even**: Wazero cold JIT compilation takes **346.119 ms (p50)** without cache. However, Wazero's persistent filesystem cache (`NewCompilationCacheWithDir`) slashes compilation to **12.919 ms (p50)**, achieving break-even against the native CLI in **under 3 checks**.
      - **Go `types.Info` Boundary**: `types.Info` can eliminate a meaningful subset of structural foreign-type stubbing (package whitelists, named type existence, method signatures, scalar atomic basic-type discrimination), but **cannot** infer Hybrid linear ownership, loan windows, or mutation effects (`Produce`, `Borrow`, `Mutate`, `Consume`). An ABI descriptor table remains mandatory.
      - **Safety Invariant Enforced**: Diagnostic rejection (`Verdict::Reject`) and infrastructural execution failure (`Verdict::AnalysisFailure`) are strictly decoupled. Infrastructure failures fail closed and never masquerade as user code rejections.
 
@@ -148,52 +148,56 @@ Measurements conducted on Apple Silicon under Darwin x86_64 emulation / arm64 ru
 
 | Execution Case | Phase | Min | p50 (Primary) | p90 (Primary) | p99 | Mean (Secondary) |
 |---|---|---|---|---|---|---|
-| **Baseline: Native CLI Subproc** | Fork + Exec + Check | 4.566 ms | **5.745 ms** | **6.491 ms** | 6.846 ms | 5.698 ms |
-| **Case A: Fresh Runtime (No Cache)** | Module Compilation | 340.781 ms | **350.955 ms** | **375.974 ms** | 537.408 ms | 361.790 ms |
-| | Module Instantiation | 0.170 ms | 0.215 ms | 0.280 ms | 0.350 ms | 0.221 ms |
-| | First Check Execution | 0.705 ms | 0.765 ms | 0.890 ms | 1.150 ms | 0.775 ms |
-| | **Case A Total Latency** | 341.800 ms | **351.980 ms** | **377.100 ms** | 538.900 ms | 362.895 ms |
-| **Case B: Reused CompiledModule** | Module Instantiation | 0.075 ms | 0.140 ms | 0.210 ms | 0.280 ms | 0.182 ms |
-| | Check Execution | 0.450 ms | 0.725 ms | 1.350 ms | 1.950 ms | 0.813 ms |
-| | **Case B Total Latency** | 0.570 ms | **0.908 ms** | **1.509 ms** | 2.140 ms | 1.005 ms |
-| **Case C: In-Memory Cache** | Cached Compilation | 9.608 ms | **9.924 ms** | **10.383 ms** | 10.638 ms | 13.368 ms |
-| | Module Instantiation | 0.185 ms | 0.245 ms | 0.290 ms | 0.330 ms | 0.259 ms |
-| | Check Execution | 0.715 ms | 0.795 ms | 0.910 ms | 1.050 ms | 0.819 ms |
-| | **Case C Total Latency** | 10.600 ms | **10.980 ms** | **11.600 ms** | 12.100 ms | 14.461 ms |
-| **Case D: Filesystem Cache** | Persistent FS Compilation | 12.389 ms | **12.860 ms** | **13.570 ms** | 14.453 ms | 12.975 ms |
-| | Module Instantiation | 0.120 ms | 0.155 ms | 0.210 ms | 0.260 ms | 0.167 ms |
-| | Check Execution | 0.720 ms | 0.880 ms | 0.990 ms | 1.120 ms | 0.912 ms |
-| | **Case D Total Latency** | 13.300 ms | **13.910 ms** | **14.800 ms** | 15.900 ms | 14.368 ms |
-| **Case E: Pure Warm In-Process** | Pre-instantiated Check | 0.265 ms | **0.272 ms** | **0.289 ms** | 0.750 ms | 0.286 ms |
+| **Baseline: Native CLI Subproc** | Fork + Exec + Check | 4.721 ms | **5.038 ms** | **5.476 ms** | 5.935 ms | 5.122 ms |
+| **Case A: Fresh Runtime (No Cache)** | Module Compilation | 339.287 ms | **346.119 ms** | **371.130 ms** | 417.249 ms | 353.878 ms |
+| | Module Instantiation | 0.170 ms | 0.210 ms | 0.270 ms | 0.340 ms | 0.216 ms |
+| | First Check Execution | 0.700 ms | 0.760 ms | 0.880 ms | 1.120 ms | 0.772 ms |
+| | **Case A Total Latency** | 340.200 ms | **347.100 ms** | **372.300 ms** | 418.700 ms | 354.967 ms |
+| **Case B: Reused CompiledModule** | Module Instantiation | 0.060 ms | 0.075 ms | 0.110 ms | 0.140 ms | 0.078 ms |
+| | Check Execution | 0.430 ms | 0.610 ms | 0.830 ms | 1.250 ms | 0.640 ms |
+| | **Case B Total Latency** | 0.513 ms | **0.694 ms** | **0.947 ms** | 1.392 ms | 0.723 ms |
+| **Case C: In-Memory Cache** | Cached Compilation | 9.583 ms | **9.887 ms** | **10.356 ms** | 21.417 ms | 13.384 ms |
+| | Module Instantiation | 0.180 ms | 0.230 ms | 0.280 ms | 0.320 ms | 0.237 ms |
+| | Check Execution | 0.710 ms | 0.780 ms | 0.890 ms | 1.020 ms | 0.803 ms |
+| | **Case C Total Latency** | 10.500 ms | **10.900 ms** | **11.500 ms** | 22.800 ms | 14.437 ms |
+| **Case D: Filesystem Cache** | Persistent FS Compilation | 12.337 ms | **12.919 ms** | **13.400 ms** | 14.090 ms | 12.974 ms |
+| | Module Instantiation | 0.120 ms | 0.160 ms | 0.200 ms | 0.250 ms | 0.172 ms |
+| | Check Execution | 0.710 ms | 0.890 ms | 0.990 ms | 1.130 ms | 0.923 ms |
+| | **Case D Total Latency** | 13.200 ms | **13.980 ms** | **14.600 ms** | 15.500 ms | 14.356 ms |
+| **Case E: Pure Warm In-Process** | Pre-instantiated Check | 0.260 ms | **0.269 ms** | **0.282 ms** | 0.740 ms | 0.278 ms |
 
 ---
 
 ## 7. Break-Even Quantitative Analysis
 
+> [!NOTE]
+> **Latency Baseline Finding**: Original 15–40ms normal CLI latency estimate was overstated on this host; real native CLI subprocess latency executes at **5.038 ms p50** (mean: **5.122 ms**).
+> Representative steady-state speedup is **≈ 17–19x** (**18.7x** observed at p50).
+
 ### Metric Comparison
 - **Native CLI Subprocess Latency**:
-  - $T_{\text{subprocess\_p50}}$: **5.745 ms**
-  - $T_{\text{subprocess\_mean}}$: **5.698 ms**
+  - $T_{\text{subprocess\_p50}}$: **5.038 ms**
+  - $T_{\text{subprocess\_mean}}$: **5.122 ms**
 - **Pure Warm In-Process WASM Latency**:
-  - $T_{\text{warm\_wasm\_p50}}$: **0.272 ms**
-  - $T_{\text{warm\_wasm\_mean}}$: **0.286 ms**
+  - $T_{\text{warm\_wasm\_p50}}$: **0.269 ms**
+  - $T_{\text{warm\_wasm\_mean}}$: **0.278 ms**
 - **Representative Speedup (p50-based)**:
-  $$\text{Speedup}_{\text{p50}} = \frac{5.745\text{ ms}}{0.272\text{ ms}} \approx \mathbf{21.1\times}$$
-  *(Mean-derived speedup: $5.698 / 0.286 \approx \mathbf{19.9\times}$)*.
+  $$\text{Speedup}_{\text{p50}} = \frac{5.038\text{ ms}}{0.269\text{ ms}} \approx \mathbf{18.7\times}$$
+  *(Mean-derived ratio: $5.122 / 0.278 \approx \mathbf{18.4\times}$)*.
 - **Latency Advantage per Check ($\Delta T$ p50)**:
-  $$\Delta T = 5.745 - 0.272 = \mathbf{5.473\text{ ms saved per check}}$$
+  $$\Delta T = 5.038 - 0.269 = \mathbf{4.769\text{ ms saved per check}}$$
 
-### Calculated Break-Even Thresholds
+### Calculated Break-Even Thresholds (p50-Derived)
 1. **Cold Process without Cache (Case A)**:
-   $$N_{\text{break-even\_cold\_p50}} = \frac{350.955\text{ ms}}{5.473\text{ ms}} \approx 64.1 \longrightarrow \mathbf{65\text{ checks}}$$
-   *(Outlier-sensitive mean estimate: $361.790 / 5.412 \approx \mathbf{67\text{ checks}}$)*.
-   - For tiny one-shot single-file vet passes without cache, the native CLI remains superior.
+   $$N_{\text{break-even\_cold\_p50}} = \frac{346.119\text{ ms}}{4.769\text{ ms}} \approx 72.6 \longrightarrow \mathbf{73\text{ checks}}$$
+   *(Outlier-sensitive mean estimate: $353.878 / 4.844 \approx \mathbf{74\text{ checks}}$)*.
+   - For single-file one-shot vet passes without cache, native CLI remains faster due to JIT compilation overhead.
 2. **Process with Filesystem Cache (Case D, `NewCompilationCacheWithDir`)**:
-   $$N_{\text{break-even\_fs\_p50}} = \frac{12.860\text{ ms}}{5.473\text{ ms}} \approx 2.35 \longrightarrow \mathbf{3\text{ checks}}$$
-   *(Outlier-sensitive mean estimate: $12.975 / 5.412 \approx \mathbf{3\text{ checks}}$)*.
+   $$N_{\text{break-even\_fs\_p50}} = \frac{12.919\text{ ms}}{4.769\text{ ms}} \approx 2.71 \longrightarrow \mathbf{3\text{ checks}}$$
+   *(Mean estimate: $12.974 / 4.844 \approx \mathbf{3\text{ checks}}$)*.
    - With persistent filesystem compilation caching, in-process checking breaks even on the **3rd file check**.
 3. **Long-Lived Service / LSP Server (Case B / E)**:
-   - Compilation cost is paid once at startup. Every check delivers an immediate **21.1x speedup** (0.272 ms vs 5.745 ms).
+   - Compilation cost is paid once at startup. Every subsequent check executes in **0.269 ms**, delivering an immediate **18.7x speedup** on every keystroke/save.
 
 ---
 

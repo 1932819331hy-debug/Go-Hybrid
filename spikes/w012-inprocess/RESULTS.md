@@ -93,43 +93,43 @@ PASS
 ================================================================================
 W-012 HARDENING BENCHMARK: Wazero vs Native Subprocess (100 iterations/case)
 ================================================================================
-[Baseline] Native CLI Subprocess:   min=4.566ms, p50=5.745ms, p90=6.491ms, p99=6.846ms, mean=5.698ms
-[CASE A] Fresh Runtime (No Cache):  total_mean=362.895ms (compile=361.790ms, inst=0.221ms, check=0.775ms)
-         Compile Stats: min=340.781ms, p50=350.955ms, p90=375.974ms, p99=537.408ms, mean=361.790ms
-[CASE B] Reused CompiledModule:     total_mean=1.005ms (inst=0.182ms, check=0.813ms)
-         Total Stats:   min=0.570ms, p50=0.908ms, p90=1.509ms, p99=2.140ms, mean=1.005ms
-[CASE C] New Runtime (In-Memory Cache): total_mean=14.461ms (compile=13.368ms, inst=0.259ms, check=0.819ms)
-         Compile Stats: min=9.608ms, p50=9.924ms, p90=10.383ms, p99=10.638ms, mean=13.368ms
-[CASE D] New Runtime (Filesystem Cache): total_mean=14.368ms (compile=12.975ms, inst=0.167ms, check=0.912ms)
-         Compile Stats: min=12.389ms, p50=12.860ms, p90=13.570ms, p99=14.453ms, mean=12.975ms
+[Baseline] Native CLI Subprocess:   min=4.721ms, p50=5.038ms, p90=5.476ms, p99=5.935ms, mean=5.122ms
+[CASE A] Fresh Runtime (No Cache):  total_mean=354.967ms (compile=353.878ms, inst=0.216ms, check=0.772ms)
+         Compile Stats: min=339.287ms, p50=346.119ms, p90=371.130ms, p99=417.249ms, mean=353.878ms
+[CASE B] Reused CompiledModule:     total_mean=0.723ms (inst=0.078ms, check=0.640ms)
+         Total Stats:   min=0.513ms, p50=0.694ms, p90=0.947ms, p99=1.392ms, mean=0.723ms
+[CASE C] New Runtime (In-Memory Cache): total_mean=14.437ms (compile=13.384ms, inst=0.237ms, check=0.803ms)
+         Compile Stats: min=9.583ms, p50=9.887ms, p90=10.356ms, p99=21.417ms, mean=13.384ms
+[CASE D] New Runtime (Filesystem Cache): total_mean=14.356ms (compile=12.974ms, inst=0.172ms, check=0.923ms)
+         Compile Stats: min=12.337ms, p50=12.919ms, p90=13.400ms, p99=14.090ms, mean=12.974ms
 ================================================================================
 BREAK-EVEN QUANTITATIVE ANALYSIS (100 ITERATIONS CONFIRMATORY):
  [Primary: p50-based Metrics]
-  • Native CLI Subprocess p50:                 5.745 ms
-  • Pure Warm WASM In-Process p50:             0.272 ms
-  • Representative Steady-State Speedup (p50): 21.1x
-  • Latency Advantage per Check (delta_T p50): 5.473 ms
-  • Cold Compile Overhead (T_compile_cold p50):350.955 ms
-  -> Break-Even (Cold / No Cache, p50):        N_break_even ≈ 64.1 checks (ceil: 65 checks)
-  • FS Cached Compile (T_compile_fs p50):      12.860 ms
-  -> Break-Even (Filesystem Cache, p50):       N_break_even ≈ 2.3 checks (ceil: 3 checks)
+  • Native CLI Subprocess p50:                 5.038 ms
+  • Pure Warm WASM In-Process p50:             0.269 ms
+  • Representative Steady-State Speedup (p50): 18.7x
+  • Latency Advantage per Check (delta_T p50): 4.769 ms
+  • Cold Compile Overhead (T_compile_cold p50):346.119 ms
+  -> Break-Even (Cold / No Cache, p50):        N_break_even ≈ 72.6 checks (ceil: 73 checks)
+  • FS Cached Compile (T_compile_fs p50):      12.919 ms
+  -> Break-Even (Filesystem Cache, p50):       N_break_even ≈ 2.7 checks (ceil: 3 checks)
 
  [Secondary: Outlier-Sensitive Mean Metrics]
-  • Native CLI Subprocess Mean:                5.698 ms
-  • Pure Warm WASM In-Process Mean:            0.286 ms
-  • Ratio of Means (Mean Speedup):             19.9x
-  -> Break-Even (Cold / No Cache, Mean):       N_break_even ≈ 66.9 checks (ceil: 67 checks)
-  -> Break-Even (Filesystem Cache, Mean):      N_break_even ≈ 2.4 checks (ceil: 3 checks)
+  • Native CLI Subprocess Mean:                5.122 ms
+  • Pure Warm WASM In-Process Mean:            0.278 ms
+  • Ratio of Means (Mean Speedup):             18.4x
+  -> Break-Even (Cold / No Cache, Mean):       N_break_even ≈ 73.1 checks (ceil: 74 checks)
+  -> Break-Even (Filesystem Cache, Mean):      N_break_even ≈ 2.7 checks (ceil: 3 checks)
 ================================================================================
 ```
 
 ---
 
 ## 3. Protocol Verification Sign-Off
-All 6 preregistered hypotheses have completed confirmatory execution:
-1. Corpus parity: **100.0% confirmed**.
-2. Baseline subprocess latency: **5.745 ms p50** (Falsifying the 15–40 ms assumption).
-3. Representative warm speedup: **21.1x by p50** (5.745 ms vs 0.272 ms).
-4. Break-even threshold: **65 checks (cold)** vs **3 checks (filesystem-cached)**.
-5. Failure-domain isolation: **100% verified across 5 injection faults**.
-6. On-disk Analyzer execution: **Exact source line/col positions confirmed**.
+All preregistered targets have completed confirmatory execution:
+1. Corpus parity: **100.0% confirmed** (55/55 fixtures matching byte-for-byte).
+2. Baseline CLI latency: **5.038 ms p50** (Original 15–40ms normal CLI latency estimate was overstated on this host).
+3. Representative steady-state speedup: **≈ 17–19x** (18.7x observed at p50: 5.038 ms vs 0.269 ms).
+4. Break-even threshold: **73 checks (cold uncached)** vs **3 checks (filesystem-cached)** by p50.
+5. Failure-domain isolation: **100% verified across all 5 fault-injection scenarios** (fails closed to `AnalysisFailure`).
+6. On-disk Analyzer execution: **Exact source line/col positions confirmed** (`file.hy:line:col` emitted under `go vet -vettool`). Sibling `.hy` discovery relies on host filesystem scanning (`os.ReadDir`). Current spike proves on-disk go-vet/singlechecker integration. It does NOT prove unsaved editor-buffer integration.
