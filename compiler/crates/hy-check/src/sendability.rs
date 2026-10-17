@@ -121,7 +121,118 @@ impl<'a> Checker<'a> {
                     self.binding_ty_str(b)
                 )],
             }),
+            shape if self.shape_holds_closure(shape, &mut Vec::new()) => {
+                Outcome::Rejected(RejectInfo {
+                    value: name.to_string(),
+                    ty: self.binding_ty_str(b),
+                    notes: vec![format!(
+                        "`{}` is a {} that holds closures; moving the container moves only the closure values, not the environment they capture, so the captured state stays reachable from this task (A5 perimeter, same rule as moving a bare closure)",
+                        name,
+                        shape.noun()
+                    )],
+                })
+            }
+            shape if self.shape_holds_unmovable_leaf(shape, &mut Vec::new()) => {
+                Outcome::Rejected(RejectInfo {
+                    value: name.to_string(),
+                    ty: self.binding_ty_str(b),
+                    notes: vec![format!(
+                        "`{}` is a {} that holds a borrow handle or foreign opaque value; moving the container cannot transfer non-movable interior state across tasks (O4/O7/A5)",
+                        name,
+                        shape.noun()
+                    )],
+                })
+            }
             _ => Outcome::Ok,
+        }
+    }
+
+    /// True when a composite shape (slice / array / map / struct / pointer)
+    /// reaches a `Closure` through its elements or fields. A moved container
+    /// of closures would otherwise launder captured state past the freeze:
+    /// `move fs` freezes `fs`, never the bindings the closures inside it
+    /// capture. `seen` guards recursive struct decls.
+    pub(crate) fn shape_holds_closure(&self, shape: &TypeShape, seen: &mut Vec<String>) -> bool {
+        match shape {
+            TypeShape::Closure => true,
+            TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Pointer(e) => {
+                self.shape_holds_closure(e, seen)
+            }
+            TypeShape::Map(k, v) => {
+                self.shape_holds_closure(k, seen) || self.shape_holds_closure(v, seen)
+            }
+            TypeShape::Struct(Some(sname)) => {
+                if seen.iter().any(|s| s == sname) {
+                    return false;
+                }
+                seen.push(sname.clone());
+                let Some(fields) = self.structs.get(sname) else {
+                    return false;
+                };
+                fields
+                    .iter()
+                    .any(|(_, ty)| self.shape_holds_closure(&self.shape_of_type(ty), seen))
+            }
+            _ => false,
+        }
+    }
+
+    /// True when a composite shape reaches a `BorrowHandle` or `ForeignOpaque`
+    /// through its elements or fields (neither can cross tasks via `move`).
+    pub(crate) fn shape_holds_unmovable_leaf(
+        &self,
+        shape: &TypeShape,
+        seen: &mut Vec<String>,
+    ) -> bool {
+        match shape {
+            TypeShape::BorrowHandle(_) | TypeShape::ForeignOpaque(_) => true,
+            TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Pointer(e) => {
+                self.shape_holds_unmovable_leaf(e, seen)
+            }
+            TypeShape::Map(k, v) => {
+                self.shape_holds_unmovable_leaf(k, seen)
+                    || self.shape_holds_unmovable_leaf(v, seen)
+            }
+            TypeShape::Struct(Some(sname)) => {
+                if seen.iter().any(|s| s == sname) {
+                    return false;
+                }
+                seen.push(sname.clone());
+                let Some(fields) = self.structs.get(sname) else {
+                    return false;
+                };
+                fields
+                    .iter()
+                    .any(|(_, ty)| self.shape_holds_unmovable_leaf(&self.shape_of_type(ty), seen))
+            }
+            _ => false,
+        }
+    }
+
+    /// True when a `const` value of `shape` is a pure value-copy representation
+    /// with no shared reference backing, no closure captures, no handles, and
+    /// no foreign synchronization/opaque state (Class-4 immutability exemption).
+    pub(crate) fn shape_is_const_sendable(
+        &self,
+        shape: &TypeShape,
+        seen: &mut Vec<String>,
+    ) -> bool {
+        match shape {
+            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Chan(_) => true,
+            TypeShape::Array(elem) => self.shape_is_const_sendable(elem, seen),
+            TypeShape::Struct(Some(sname)) => {
+                if seen.iter().any(|s| s == sname) {
+                    return false;
+                }
+                seen.push(sname.clone());
+                let Some(fields) = self.structs.get(sname) else {
+                    return false;
+                };
+                fields
+                    .iter()
+                    .all(|(_, ty)| self.shape_is_const_sendable(&self.shape_of_type(ty), seen))
+            }
+            _ => false,
         }
     }
 
@@ -167,8 +278,12 @@ impl<'a> Checker<'a> {
             }
             Expr::SliceLit { items, .. } => self.classify_composite(st, expr, items.iter()),
             // field/index/slice reads: classify the read's shape, but honor
-            // immutable roots (views of const values stay immutable, OQ5)
+            // immutable roots when the resulting value is a value copy (views
+            // of const values that do not share reference storage stay
+            // immutable, OQ5; slice views or reference fields of a const
+            // composite share mutable Go runtime storage, #188).
             Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
+                let shape = self.shape_of_expr(st, expr);
                 if let Some(root) = expr.root_ident() {
                     if let Some(b) = self.lookup_binding(st, root) {
                         if b.moved.is_some() {
@@ -180,12 +295,11 @@ impl<'a> Checker<'a> {
                                 risky: !b.shape.is_sendable_by_type(),
                             };
                         }
-                        if b.immutable {
+                        if b.immutable && self.shape_is_const_sendable(&shape, &mut Vec::new()) {
                             return Outcome::Ok;
                         }
                     }
                 }
-                let shape = self.shape_of_expr(st, expr);
                 self.outcome_for_shape(&shape, &expr.render())
             }
             // everything else (calls, receives, arithmetic, try, paren):
@@ -217,8 +331,14 @@ impl<'a> Checker<'a> {
                 risky: !b.shape.is_sendable_by_type(),
             };
         }
-        if b.immutable {
-            return Outcome::Ok; // class 4 (let/const/const-decl)
+        // Issue #188: `const` composites carrying reference storage (maps,
+        // slices, pointers, or structs/arrays containing them), closures,
+        // handles, or foreign opaques lower to runtime Go `var`s or capture
+        // mutable state. Only `const` bindings whose runtime representation is
+        // a pure value copy qualify for the Class-4 immutability exemption at
+        // spawn/send sites.
+        if b.immutable && self.shape_is_const_sendable(&b.shape, &mut Vec::new()) {
+            return Outcome::Ok; // class 4 (value-copy const)
         }
         if matches!(b.shape, TypeShape::Unknown) {
             // FAIL-CLOSED (O4.9): a binding whose type the checker could
@@ -248,6 +368,11 @@ impl<'a> Checker<'a> {
             "this {} is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)",
             b.shape.noun()
         )];
+        if b.immutable {
+            notes.push(
+                "a composite `const` with reference storage lowers to a runtime-mutable Go value, so sharing it across a task or channel boundary without `managed` can race if the receiver mutates it (issue #188)".to_string(),
+            );
+        }
         if matches!(b.shape, TypeShape::Map(_, _)) {
             notes.push(
                 "as written this also panics in Go — concurrent map writes are a runtime fatal; the checker tells you earlier".to_string(),
@@ -282,9 +407,6 @@ impl<'a> Checker<'a> {
                 desc: self.managed_desc(root, b),
                 risky: !b.shape.is_sendable_by_type(),
             };
-        }
-        if b.immutable {
-            return Outcome::Ok;
         }
         if matches!(b.shape, TypeShape::Unknown) {
             // FAIL-CLOSED (O4.9): a borrow of an unproven value.
@@ -899,6 +1021,17 @@ impl<'a> Checker<'a> {
                             reason: "the name did not resolve in this scope".to_string(),
                         });
                     }
+                } else if matches!(op, Expr::Field { .. })
+                    && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_))
+                {
+                    if let Some(root) = op.root_ident() {
+                        if self.lookup_binding(st, root).is_some() {
+                            if !managed {
+                                self.check_non_owned_move(st, root, v.span());
+                            }
+                            moves.push((root.to_string(), v.span()));
+                        }
+                    }
                 } else if !managed {
                     self.check_o54_non_ident_move(st, op, v.span());
                 }
@@ -931,6 +1064,17 @@ impl<'a> Checker<'a> {
                             value: name.clone(),
                             reason: "the name did not resolve in this scope".to_string(),
                         });
+                    }
+                } else if matches!(op, Expr::Field { .. })
+                    && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_))
+                {
+                    if let Some(root) = op.root_ident() {
+                        if self.lookup_binding(st, root).is_some() {
+                            if !managed {
+                                self.check_non_owned_move(st, root, mspan);
+                            }
+                            moves.push((root.to_string(), mspan));
+                        }
                     }
                 } else if !managed {
                     self.check_o54_non_ident_move(st, op, mspan);

@@ -72,6 +72,7 @@ fn check_one_closure(
                     "closure parameter `{}` (the caller retains the argument across calls)",
                     p.name
                 )),
+                slot_loan: false,
             },
         );
     }
@@ -95,9 +96,7 @@ fn check_body_boundaries(ck: &mut Checker<'_>, st: &mut FnState, block: &Block, 
     }
 }
 
-fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
-    // Check uses on every statement in the closure BEFORE any new defines or
-    // move transfers on this statement take effect (#29).
+fn check_stmt_own_uses(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
     let mut uses = Vec::new();
     crate::walk::own_uses(stmt, &mut uses);
     if !managed {
@@ -123,44 +122,58 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
         }
     }
     ck.check_uses(st, &uses);
+}
+
+fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
+    // Check uses on every statement in the closure BEFORE any new defines or
+    // move transfers on this statement take effect (#29). For `Stmt::If`,
+    // `init` executes BEFORE `cond`, so `cond`'s uses are checked after `init`.
+    if !matches!(stmt, Stmt::If { .. }) {
+        check_stmt_own_uses(ck, st, stmt, managed);
+    }
 
     match stmt {
         Stmt::Local(l) => {
             for v in &l.values {
                 ck.mark_move_in_value(st, v, format!("the move-define `{}`", v.render()));
             }
-            if l.names.len() == 1 && l.values.len() == 1 {
-             if let Expr::Ident { name: rhs_name, .. } = crate::model::unwrap_parens(&l.values[0]) {
-                 if st.env.contains_key(rhs_name) || st.scopes.iter().any(|s| s.contains_key(rhs_name)) {
-                     let resolved_root = crate::freeze::resolve_alias(st, rhs_name);
-                     st.aliases.insert(l.names[0].clone(), resolved_root);
-                 }
-             }
-         }
             // T22 (issue #12 parity with the flat pass): only `const` is
             // DEEPLY immutable; `let` is a SHALLOW immutable binding, so it
             // must NOT take the class-4 sendability shortcut.
             let immutable = l.kind == LocalKind::Const;
-            if let Some(t) = &l.ty {
-                // ascribed: the declared type decides
-                let shape = ck.shape_of_type(t);
+            if l.values.is_empty() {
+                if let Some(t) = &l.ty {
+                    ck.check_zero_value_local(l, t);
+                }
+                let shape = l
+                    .ty
+                    .as_ref()
+                    .map(|t| ck.shape_of_type(t))
+                    .unwrap_or(TypeShape::Unknown);
+                let ty = l.ty.clone();
                 for name in &l.names {
-                    ck.define_binding(st, name, shape.clone(), Some(t.clone()), immutable, managed);
+                    ck.define_binding(st, name, shape.clone(), ty.clone(), immutable, managed);
                 }
             } else if l.names.len() == l.values.len() {
                 for (name, value) in l.names.iter().zip(l.values.iter()) {
                     let moved_non_owned = crate::model::move_operand_ident(value)
                         .and_then(|src| ck.lookup_binding(st, &src))
-                        .and_then(|b| b.non_owned_origin.clone());
+                        .and_then(|b| b.non_owned_origin.clone())
+                        .or_else(|| ck.moved_non_owned_origin_in_expr(st, value));
                     // ascription fills gaps (O4.9); inference keeps priority
                     // when it resolves (boundary handles stay precise)
                     let inferred = ck.shape_of_expr(st, value);
                     let (shape, ty) = match (&l.ty, inferred) {
                         (Some(t), TypeShape::Unknown) => (ck.shape_of_type(t), Some(t.clone())),
-                        (_, inferred) => (inferred, ck.ty_of_expr(st, value)),
+                        (_, inferred) => (
+                            inferred,
+                            ck.ty_of_expr(st, value).or_else(|| l.ty.clone()),
+                        ),
                     };
-                    ck.define_binding(st, name, shape, ty, immutable, managed);
-                    if crate::model::move_operand_ident(value).is_some() {
+                    if crate::model::move_operand_ident(value).is_some()
+                        || matches!(crate::model::unwrap_parens(value), Expr::Move { .. })
+                    {
+                        ck.define_binding(st, name, shape, ty, immutable, managed);
                         if let Some(origin) = moved_non_owned {
                             if let Some(b) = st.env_lookup_mut(name) {
                                 b.non_owned_origin = Some(origin);
@@ -168,11 +181,61 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                         }
                         continue;
                     }
+                    let reads_self = ck.value_reads_storage_of(st, value, name);
+                    let shadowed_origin = if ck.shape_may_share(&shape) && reads_self {
+                        ck.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                            if via_share && !o.starts_with("a may-share peer of ") {
+                                format!("a may-share peer of {}", o)
+                            } else {
+                                o
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    let prior_alias = if reads_self {
+                        st.aliases.get(name).cloned()
+                    } else {
+                        None
+                    };
+                    let prior_shares: Vec<String> = if reads_self {
+                        st.may_share
+                            .get(name)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    ck.define_binding(st, name, shape, ty, immutable, managed);
+                    if let Some(origin) = &moved_non_owned {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin.clone());
+                            }
+                        }
+                    }
+                    if reads_self {
+                        if let Some(pa) = prior_alias {
+                            if pa != *name {
+                                st.aliases.insert(name.clone(), pa);
+                            }
+                        }
+                        for peer in prior_shares {
+                            st.share_edge(name, &peer);
+                        }
+                    }
                     // issue #137: track may_share edges and aliases inside closures
                     // so local aliases of non-owned captured bindings inherit origin
                     // and cannot bypass O5.1 / O5.4 move restrictions.
                     ck.record_may_share(st, name, value);
                     ck.record_alias(st, name, value);
+                    if let Some(origin) = shadowed_origin {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin);
+                            }
+                        }
+                    }
                 }
                 ck.record_local_borrow_aliases(st, l);
             } else {
@@ -285,6 +348,7 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             if let Some(i) = init {
                 check_stmt_boundaries(ck, st, i, managed);
             }
+            check_stmt_own_uses(ck, st, stmt, managed);
             st.scope_push();
             check_body_boundaries(ck, st, then, managed);
             st.scope_pop();
@@ -294,6 +358,14 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             st.scope_pop();
         }
         Stmt::For { kind, body, .. } => {
+            let outer_depth = st.scopes.len();
+            let pre_moved: std::collections::HashSet<String> = st
+                .env
+                .iter()
+                .chain(st.scopes.iter().flat_map(|s| s.iter()))
+                .filter(|(_, b)| b.moved.is_some())
+                .map(|(k, _)| k.clone())
+                .collect();
             st.scope_push(); // the loop vars' scope
             match kind {
                 Iterate { vars, expr } => {
@@ -327,10 +399,33 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             }
             st.scope_push(); // the body's own scope
             check_body_boundaries(ck, st, body, managed);
+            if !managed {
+                let flat_body = crate::walk::flatten(body);
+                let mut loop_stmts: Vec<(&Stmt, usize)> =
+                    Vec::with_capacity(flat_body.stmts.len() + 1);
+                loop_stmts.push((stmt, 0));
+                for (s, idx) in flat_body.stmts {
+                    loop_stmts.push((s, idx + 1));
+                }
+                let mut reported_backedge = std::collections::HashSet::new();
+                ck.check_loop_backedge(
+                    st,
+                    outer_depth,
+                    &loop_stmts,
+                    body,
+                    &pre_moved,
+                    &mut reported_backedge,
+                );
+            }
             st.scope_pop();
             st.scope_pop();
         }
-        Stmt::Match { arms, .. } => {
+        Stmt::Match {
+            subject,
+            arms,
+            span,
+        } => {
+            ck.check_match(st, subject, arms, *span);
             for arm in arms {
                 st.scope_push();
                 check_body_boundaries(ck, st, &arm.body, managed);
@@ -342,10 +437,13 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             check_body_boundaries(ck, st, block, managed);
             st.scope_pop();
         }
-        Stmt::Assign { values, .. } => {
-            for v in values {
-                ck.mark_move_in_value(st, v, format!("the move-assign `{}`", v.render()));
-            }
+        Stmt::Assign {
+            targets,
+            op,
+            values,
+            ..
+        } => {
+            ck.process_closure_assign(st, targets, *op, values);
         }
         Stmt::Return { values, .. } => {
             for v in values {

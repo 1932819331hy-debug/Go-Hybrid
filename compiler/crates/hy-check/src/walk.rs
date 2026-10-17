@@ -106,6 +106,41 @@ fn walk_block<'a>(out: &mut FlatInfo<'a>, block: &'a Block) {
 }
 
 fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
+    if let Stmt::If {
+        init: Some(i),
+        then,
+        otherwise,
+        ..
+    } = stmt
+    {
+        // ONE implicit scope for the if (init vars stay visible through
+        // the whole construct, Go rule); `init` executes BEFORE `cond`,
+        // so walk `init` first inside the if-scope and assign `Stmt::If`
+        // (`cond`) the index immediately after `init`.
+        out.mark(out.next, true, false);
+        walk_one(out, i);
+
+        let idx = out.next;
+        out.next += 1;
+        out.stmts.push((stmt, idx));
+
+        let mut uses = Vec::new();
+        own_uses(stmt, &mut uses);
+        for u in uses {
+            let e = out.last_use.entry(u.name).or_insert(idx);
+            if *e < idx {
+                *e = idx;
+            }
+        }
+
+        scoped_block(out, then);
+        if let Some(o) = otherwise {
+            walk_one(out, o);
+        }
+        out.mark(out.next, false, true); // Pop at the next stmt (or trailing)
+        return;
+    }
+
     let idx = out.next;
     out.next += 1;
     out.stmts.push((stmt, idx));
@@ -121,18 +156,13 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
 
     match stmt {
         Stmt::If {
-            init,
             then,
             otherwise,
             ..
         } => {
-            // ONE implicit scope for the if (init vars stay visible through
-            // the whole construct, Go rule); the then/else bodies open their
+            // ONE implicit scope for the if; the then/else bodies open their
             // own scopes below.
             out.mark(idx, true, false);
-            if let Some(i) = init {
-                walk_one(out, i);
-            }
             scoped_block(out, then);
             if let Some(o) = otherwise {
                 walk_one(out, o);
@@ -210,6 +240,9 @@ pub(crate) struct Use {
     /// true when the use is the direct operand of a `move x` at its own
     /// transfer site (exempt from the use check unless already moved).
     pub via_move: bool,
+    /// true when the use is the direct operand of an address-of `&x`
+    /// (T24: `&` on a map-slot loan binding is HYB-E3104).
+    pub via_addr: bool,
 }
 
 /// Collect the uses of THIS statement only (child statements are separate
@@ -291,6 +324,7 @@ fn place_uses(place: &Place, out: &mut Vec<Use>) {
             span: place.span,
             is_write: true,
             via_move: false,
+            via_addr: false,
         }),
         PlaceKind::Index { base, index } => {
             place_uses(base, out);
@@ -308,6 +342,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
             span: *span,
             is_write: false,
             via_move: false,
+            via_addr: false,
         }),
         Expr::Lit { .. } => {}
         Expr::Interp { parts, .. } => {
@@ -321,15 +356,43 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
             expr_uses(lhs, out);
             expr_uses(rhs, out);
         }
+        Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            span,
+        }
+        | Expr::AddrOf { operand, span } => match crate::model::unwrap_parens(operand) {
+            Expr::Ident { name, .. } => out.push(Use {
+                name: name.clone(),
+                span: *span,
+                is_write: false,
+                via_move: false,
+                via_addr: true,
+            }),
+            _ => expr_uses(operand, out),
+        },
         Expr::Unary { operand, .. } => expr_uses(operand, out),
-        Expr::AddrOf { operand, .. } => expr_uses(operand, out),
         Expr::Move { operand, span } => match crate::model::unwrap_parens(operand) {
             Expr::Ident { name, .. } => out.push(Use {
                 name: name.clone(),
                 span: *span,
                 is_write: false,
                 via_move: true,
+                via_addr: false,
             }),
+            Expr::Field { .. } => {
+                if let Some(root) = crate::model::unwrap_parens(operand).root_ident() {
+                    out.push(Use {
+                        name: root.to_string(),
+                        span: *span,
+                        is_write: false,
+                        via_move: true,
+                        via_addr: false,
+                    });
+                } else {
+                    expr_uses(operand, out);
+                }
+            }
             _ => expr_uses(operand, out),
         },
         Expr::Try { operand, .. } => expr_uses(operand, out),
