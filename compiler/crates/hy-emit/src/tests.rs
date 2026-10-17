@@ -403,7 +403,6 @@ fn compound_bit_assigns_emit() {
     assert!(go.contains("x >>= 1"), ":\n{}", go);
 }
 
-
 #[test]
 fn comparison_in_call_arg_parses_clean() {
     let go = emit("fn main() {\n    fmt.printf(\"%v\", 1 < 2)\n}");
@@ -514,7 +513,11 @@ fn managed_block_emits_marker_comment() {
     assert!(go.contains("// managed"), "audit marker greppable:\n{}", go);
     // row 14: the marker carries the category + reason + tickets
     assert!(go.contains("[mutex]"), "category in marker:\n{}", go);
-    assert!(go.contains("shared counter under a lock"), "reason in marker:\n{}", go);
+    assert!(
+        go.contains("shared counter under a lock"),
+        "reason in marker:\n{}",
+        go
+    );
     assert!(go.contains("PROJ-9"), "tickets in marker:\n{}", go);
     assert!(go.contains("go w(counter)"), ":\n{}", go);
 }
@@ -591,9 +594,47 @@ fn inclusive_range_and_labeled_break() {
         go
     );
     assert!(go.contains("break hyLoop"), ":\n{}", go);
+    // Inclusive ranges use a continue-safe stop flag (#322), not
+    // `i <= 8; i++` (that form wraps at a type maximum). Bounds are
+    // hoisted so the stop check is `i != hyHiN`.
     assert!(
-        go.contains("for i := 1; i <= 8; i++ {"),
-        "inclusive range:\n{}",
+        go.contains("<= ") && go.contains("8"),
+        "inclusive empty-range guard:\n{}",
+        go
+    );
+    assert!(
+        go.contains("i != "),
+        "inclusive last-value stop check:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for i := 1; i <= 8; i++ {"),
+        "must not emit the wrapping post-increment form:\n{}",
+        go
+    );
+}
+
+#[test]
+fn inclusive_range_at_type_maximum_uses_stop_flag() {
+    // Issue #322: int8 127..=127 must not lower to `value <= high; value++`
+    // (increment wraps to -128 and the loop never ends).
+    let go = emit(
+        "fn main() {\n    var high int8 = 127\n    for value in high..=high {\n        fmt.println(value)\n    }\n}\n",
+    );
+    assert!(
+        !go.contains("value <= high; value++")
+            && !go.contains("for value := high; value <= high; value++"),
+        "wrapping inclusive form must not be emitted:\n{}",
+        go
+    );
+    assert!(
+        go.contains("value !="),
+        "continue-safe stop check present:\n{}",
+        go
+    );
+    assert!(
+        go.contains("<= "),
+        "empty-range guard still present:\n{}",
         go
     );
 }
@@ -742,6 +783,96 @@ fn option_match_lowes_to_ok_branch() {
         ":\n{}",
         go
     );
+}
+
+#[test]
+fn match_multi_some_arms_retains_all_arms() {
+    // Issue #204: match on option with multiple some arms must retain all arms,
+    // not just the last one.
+    let go = emit(
+        "fn main() {\n    opt := some(15)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        some(v): {\n            fmt.println(\"small\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("v := hyMatch0.val"), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"small\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"none\")"), ":\n{}", go);
+}
+
+#[test]
+fn match_unguarded_some_first_emits_buildable_go() {
+    // An UNGUARDED `some` arm placed before another `some` arm matches
+    // whenever `ok` is true, so later arms are unreachable. The emitter
+    // must not chain a `} else {` onto a chain that has no preceding `if`
+    // (that produced an orphan `else` and unbuildable Go, while `hyb check`
+    // reported 0 diagnostics).
+    let go = emit(
+        "fn main() {\n    opt := some(3)\n    match opt {\n        some(v): {\n            fmt.println(\"small\")\n        }\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n    }\n}\n",
+    );
+    let opens = go.matches('{').count();
+    let closes = go.matches('}').count();
+    assert_eq!(opens, closes, "unbalanced braces (orphan else):\n{}", go);
+    assert_eq!(
+        go.matches("} else {").count(),
+        1,
+        "expected exactly one else (the none arm):\n{}",
+        go
+    );
+    let ok = go.find("if hyMatch0.ok {").expect("ok branch");
+    let small = go.find("fmt.Println(\"small\")").expect("small arm body");
+    let els = go.find("} else {").expect("none arm");
+    assert!(
+        ok < small && small < els,
+        "unguarded arm body must be inside the ok branch, before the else:\n{}",
+        go
+    );
+}
+
+#[test]
+fn match_guarded_then_unguarded_some_still_chains() {
+    // Guarded-first ordering must keep working: the guarded arm is an `if`
+    // and the first unguarded arm is its `else`.
+    let go = emit(
+        "fn main() {\n    opt := some(15)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        some(v): {\n            fmt.println(\"small\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n    }\n}\n",
+    );
+    assert_eq!(go.matches('{').count(), go.matches('}').count(), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"small\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"none\")"), ":\n{}", go);
+}
+
+#[test]
+fn match_guarded_some_with_wildcard_fallback() {
+    // Issue #204: with guarded some arms and wildcard, failed guard must fall through to wildcard.
+    let go = emit(
+        "fn main() {\n    opt := some(3)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        _: {\n            fmt.println(\"fallback\")\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("hyMatched1 := false"), ":\n{}", go);
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("hyMatched1 = true"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched1 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"fallback\")"), ":\n{}", go);
+}
+
+#[test]
+fn match_guarded_some_with_none_and_wildcard() {
+    // Issue #204: guarded some arm, none arm, and wildcard arm all handled cleanly.
+    let go = emit(
+        "fn main() {\n    opt := some(3)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n        _: {\n            fmt.println(\"fallback\")\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("hyMatched1 := false"), ":\n{}", go);
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("hyMatched1 = true"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched1 && !hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"none\")"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched1 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"fallback\")"), ":\n{}", go);
 }
 
 #[test]
@@ -1275,12 +1406,10 @@ fn diff_composite_const_lands_as_var() {
 
 #[test]
 fn local_composite_const_lands_as_var() {
-    let go = emit("fn main() {\n    const thresholds = [10, 50]\n    fmt.println(\"{thresholds[0]}\")\n}");
-    assert!(
-        go.contains("var thresholds = []int{10, 50}"),
-        ":\n{}",
-        go
+    let go = emit(
+        "fn main() {\n    const thresholds = [10, 50]\n    fmt.println(\"{thresholds[0]}\")\n}",
     );
+    assert!(go.contains("var thresholds = []int{10, 50}"), ":\n{}", go);
     assert!(!go.contains("const thresholds"), ":\n{}", go);
 }
 
@@ -1505,8 +1634,16 @@ fn e3_short_circuit_and_or_with_try_guards_rhs_evaluation() {
         "|| must guard RHS try evaluation under `if !hyT3`:\n{}",
         go
     );
-    assert!(go.contains("a := hyT0"), "a binds hoisted short-circuit temp:\n{}", go);
-    assert!(go.contains("b := hyT3"), "b binds hoisted short-circuit temp:\n{}", go);
+    assert!(
+        go.contains("a := hyT0"),
+        "a binds hoisted short-circuit temp:\n{}",
+        go
+    );
+    assert!(
+        go.contains("b := hyT3"),
+        "b binds hoisted short-circuit temp:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -1540,6 +1677,56 @@ fn e3_hoist_preserves_preceding_operand_evaluation_order() {
     assert!(
         go.contains("total := hyT0 + hyT1"),
         "substituted in order:\n{}",
+        go
+    );
+}
+
+#[test]
+fn non_exhaustive_option_match_rejects_at_check_and_emits_no_garbage() {
+    // AMENDMENT (maintainer, 2026-10-16, logged in the merge message):
+    // this test previously pinned an EMITTER-side EmitError citing E5001.
+    // pr-173 moved exhaustiveness into the CHECKER (HYB-E5001 fires at
+    // hyb check; verified by hy-check's own suite), so the emitter's
+    // no-some-arm path intentionally lowers nothing. What must never come
+    // back is #143 R1/R2's failure mode: an orphan `} else {` or a silent
+    // single-arm branch in the emitted Go. These pins stay:
+    let go_none_only = emit(
+        "fn main() {\n    var x option[int] = some(1)\n    match x {\n        none: fmt.println(\"none\")\n    }\n}\n",
+    );
+    assert!(
+        !go_none_only.contains("} else {"),
+        "orphan else came back:\n{}",
+        go_none_only
+    );
+
+    let go_some_only = emit(
+        "fn main() {\n    var x option[int] = some(1)\n    match x {\n        some(v): fmt.println(v)\n    }\n}\n",
+    );
+    assert!(
+        !go_some_only.contains("} else {"),
+        "orphan else came back:\n{}",
+        go_some_only
+    );
+}
+
+#[test]
+fn user_struct_shadowing_primitive_zero_value_issue_326() {
+    let src = r#"
+struct rune {
+    count int
+}
+fn fail_helper() (int, error) {
+    return 0, nil
+}
+fn test_fn() (rune, error) {
+    fail_helper()?
+    return rune{ count: 1 }, nil
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("return *new(rune), hyErr1"),
+        "expected return *new(rune), hyErr1, got:\n{}",
         go
     );
 }

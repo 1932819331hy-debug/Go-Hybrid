@@ -18,8 +18,8 @@
 
 use crate::foreign::{self, CallMode};
 use crate::model::{
-    as_addr_of, collect_ref_roots, move_operand_ident, unwrap_parens, Binding, Checker, FnState,
-    Loan, LoanTarget, MoveKind, TypeShape,
+    as_addr_of, collect_addr_of_roots, collect_ref_roots, move_operand_ident, unwrap_parens,
+    Binding, Checker, FnState, Loan, LoanTarget, MoveKind, TypeShape,
 };
 use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
@@ -92,6 +92,7 @@ enum Resolved {
     /// `recv.method(...)` — receiver root binding + its shape.
     Method {
         root: String,
+        root_span: Span,
         method: String,
         recv: TypeShape,
     },
@@ -100,6 +101,17 @@ enum Resolved {
         name: String,
     },
     None,
+}
+
+fn root_ident_span(expr: &Expr) -> Option<Span> {
+    match expr {
+        Expr::Ident { span, .. } => Some(*span),
+        Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, .. } => {
+            root_ident_span(base)
+        }
+        Expr::Paren { inner, .. } => root_ident_span(inner),
+        _ => None,
+    }
 }
 
 impl<'a> Checker<'a> {
@@ -116,8 +128,10 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(root) = base.root_ident() {
                     let recv = self.shape_of_expr(st, base);
+                    let root_span = root_ident_span(base).unwrap_or_else(|| base.span());
                     return Resolved::Method {
                         root: root.to_string(),
+                        root_span,
                         method: name.clone(),
                         recv,
                     };
@@ -139,16 +153,61 @@ impl<'a> Checker<'a> {
         cr: &CallRef,
         idx: usize,
         loop_end: Option<usize>,
+        stmt_consumes: &mut Vec<(Span, Span)>,
     ) {
         match self.resolve_call(st, cr) {
             Resolved::Package { pkg, method } => {
-                if foreign::package_mode(&pkg, &method) == CallMode::Borrow {
-                    // a borrow-mode package call lends its handle-typed args
-                    // for the call (`serde_json.to_string_pretty(doc)`)
-                    self.lend_handle_args(st, cr, idx);
+                match foreign::package_mode(&pkg, &method) {
+                    CallMode::Borrow => {
+                        // a borrow-mode package call lends its handle-typed args
+                        // for the call (`serde_json.to_string_pretty(doc)`) or
+                        // across the whole loop when iterating a view
+                        self.lend_handle_args(st, cr, idx, loop_end);
+                    }
+                    CallMode::Mutate => {
+                        for a in cr.args {
+                            if let Some(root) = a.value.root_ident() {
+                                let active_handle = self
+                                    .lookup_binding(st, root)
+                                    .map(|b| b.shape.is_handle() && b.moved.is_none())
+                                    .unwrap_or(false);
+                                if active_handle {
+                                    self.check_a2_conflict(st, cr, root, idx);
+                                }
+                            }
+                        }
+                    }
+                    CallMode::Consume => {
+                        for a in cr.args {
+                            if let Some(root) = a.value.root_ident() {
+                                let active_handle = self
+                                    .lookup_binding(st, root)
+                                    .map(|b| b.shape.is_handle() && b.moved.is_none())
+                                    .unwrap_or(false);
+                                if active_handle {
+                                    let rspan = root_ident_span(&a.value).unwrap_or(a.span);
+                                    self.mark_move(
+                                        st,
+                                        root,
+                                        cr.span,
+                                        format!("the consuming call `{}`", cr.callee.render()),
+                                        MoveKind::Consumed,
+                                    );
+                                    stmt_consumes.push((rspan, cr.span));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-            Resolved::Method { root, method, recv } => {
+            Resolved::Method {
+                root,
+                root_span,
+                method,
+                recv,
+            } => {
+                self.check_call_const_writes(st, cr, &HashSet::new());
                 let Some(tname) = receiver_type_name(&recv) else {
                     return;
                 };
@@ -194,6 +253,7 @@ impl<'a> Checker<'a> {
                             format!("the consuming call `{}`", cr.callee.render()),
                             MoveKind::Consumed,
                         );
+                        stmt_consumes.push((root_span, cr.span));
                     }
                     _ => {}
                 }
@@ -210,10 +270,13 @@ impl<'a> Checker<'a> {
                 if name == "delete" {
                     // A3: map delete is a map mutation
                     self.check_delete_conflict(st, cr, idx);
-                    // T22 (#123): a delete mutates the collection — a
-                    // `const` root is frozen exactly like an index write.
+                }
+                if name == "delete" || name == "copy" {
+                    // T22 (#123/#188): a delete or copy mutates its first
+                    // argument — a `const` root is frozen like an index write.
                     self.check_delete_const(st, cr, &HashSet::new());
                 }
+                self.check_call_const_writes(st, cr, &HashSet::new());
                 if self.fns.contains_key(&name) {
                     // A3 #111: the callee may insert/delete through the
                     // argument — that event runs inside THIS call site's
@@ -221,23 +284,27 @@ impl<'a> Checker<'a> {
                     self.check_a3_call_conflict(st, cr, idx, &name);
                     // A7 borrow-by-default: a handle passed to a Hybrid
                     // function is lent for the call only
-                    self.lend_handle_args(st, cr, idx);
+                    self.lend_handle_args(st, cr, idx, None);
                 } else if st.closure_mutates.contains_key(&name) {
                     // A3 #111 form 4: a local closure whose body mutates a
                     // captured binding — event attributed to this call site.
                     self.check_a3_closure_call(st, cr, idx, &name);
                 }
             }
-            Resolved::None => {}
+            Resolved::None => {
+                self.check_call_const_writes(st, cr, &HashSet::new());
+            }
         }
     }
 
     /// HYB-E3101 (A2): a mutating-mode call conflicts with any live
-    /// borrow-mode loan on the same handle.
+    /// borrow-mode loan on the same handle (or an alias / may-share peer).
     fn check_a2_conflict(&mut self, st: &FnState, cr: &CallRef, root: &str, idx: usize) {
         let conflict = st.loans.iter().find(|l| {
-            matches!(&l.target, LoanTarget::Handle { handle } if handle == root)
-                && l.created <= idx
+            matches!(
+                &l.target,
+                LoanTarget::Handle { handle } if a3_paths_conflict(st, handle, root)
+            ) && l.created <= idx
                 && idx <= l.last
         });
         let Some(loan) = conflict else { return };
@@ -258,23 +325,36 @@ impl<'a> Checker<'a> {
         );
     }
 
-    /// Handle-typed arguments of a call are lent for the call (call-scoped).
-    fn lend_handle_args(&self, st: &mut FnState, cr: &CallRef, idx: usize) {
+    /// Handle-typed arguments of a call are lent for the call (call-scoped) or
+    /// across the whole loop when the call is a for-loop ITERATE expression.
+    fn lend_handle_args(
+        &self,
+        st: &mut FnState,
+        cr: &CallRef,
+        idx: usize,
+        loop_end: Option<usize>,
+    ) {
+        let last = loop_end.unwrap_or(idx);
         for a in cr.args {
-            if let Expr::Ident { name, .. } = &a.value {
+            if let Some(name) = a.value.root_ident() {
                 if let Some(b) = self.lookup_binding(st, name) {
-                    if b.shape.is_handle() {
+                    if b.shape.is_handle() && b.moved.is_none() {
                         st.loans.push(Loan {
                             target: LoanTarget::Handle {
-                                handle: name.clone(),
+                                handle: name.to_string(),
                             },
                             created: idx,
-                            last: idx,
+                            last,
                             span: a.span,
                             desc: format!(
-                                "the argument `{}` lent to `{}` (A7 borrow-by-default)",
+                                "the argument `{}` lent to `{}`{}",
                                 name,
-                                cr.callee.render()
+                                cr.callee.render(),
+                                if loop_end.is_some() {
+                                    " (live across the whole loop)"
+                                } else {
+                                    " (A7 borrow-by-default)"
+                                }
                             ),
                         });
                     }
@@ -417,10 +497,61 @@ impl<'a> Checker<'a> {
     }
 
     fn block_mutates_param(&self, block: &Block, param: &str, depth: usize) -> bool {
-        block
-            .stmts
-            .iter()
-            .any(|s| self.stmt_mutates_param(s, param, depth))
+        self.stmts_mutate_param(&block.stmts, param, depth)
+    }
+
+    fn stmts_mutate_param(&self, stmts: &[Stmt], param: &str, depth: usize) -> bool {
+        for (i, s) in stmts.iter().enumerate() {
+            if self.stmt_mutates_param(s, param, depth) {
+                return true;
+            }
+            match s {
+                Stmt::Local(l) => {
+                    let mut shadowed = false;
+                    for (name, val) in l.names.iter().zip(l.values.iter()) {
+                        let is_alias = walk::expr_path(val)
+                            .map(|p| path_root(&p) == param)
+                            .unwrap_or(false);
+                        if is_alias {
+                            if self.stmts_mutate_param(&stmts[i + 1..], name, depth) {
+                                return true;
+                            }
+                        } else if name == param {
+                            shadowed = true;
+                        }
+                    }
+                    if shadowed {
+                        return false;
+                    }
+                }
+                Stmt::Assign {
+                    targets, values, ..
+                } if targets.len() == values.len() => {
+                    let mut rebound_other = false;
+                    for (t, val) in targets.iter().zip(values.iter()) {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            let is_alias = walk::expr_path(val)
+                                .map(|p| path_root(&p) == param)
+                                .unwrap_or(false);
+                            if is_alias {
+                                if name != param
+                                    && self.stmts_mutate_param(&stmts[i + 1..], name, depth)
+                                {
+                                    return true;
+                                }
+                            } else if name == param {
+                                rebound_other = true;
+                            }
+                        }
+                    }
+                    if rebound_other {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn stmt_mutates_param(&self, stmt: &Stmt, param: &str, depth: usize) -> bool {
@@ -483,10 +614,24 @@ impl<'a> Checker<'a> {
                     return true;
                 }
             }
-            Stmt::Match { arms, .. } => {
+            Stmt::Match { subject, arms, .. } => {
+                let mut sroots = Vec::new();
+                collect_ref_roots(subject, &mut sroots);
+                let subject_reaches_param = sroots.iter().any(|r| r == param);
                 for arm in arms {
                     if self.block_mutates_param(&arm.body, param, depth) {
                         return true;
+                    }
+                    if subject_reaches_param {
+                        if let hy_syntax::MatchPattern::Path {
+                            binding: Some(bname),
+                            ..
+                        } = &arm.pattern
+                        {
+                            if self.block_mutates_param(&arm.body, bname, depth) {
+                                return true;
+                            }
+                        }
                     }
                 }
             }
@@ -507,8 +652,15 @@ impl<'a> Checker<'a> {
     /// references are the closure's fresh binding, not the caller's map).
     fn expr_fnlit_mutates_param(&self, e: &Expr, param: &str, depth: usize) -> bool {
         match e {
-            Expr::FnLit { params, body, .. } => {
-                if params.iter().any(|p| p.name == param) {
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                if params.iter().any(|p| p.name == param)
+                    || results.iter().any(|r| r.name.as_deref() == Some(param))
+                {
                     false
                 } else {
                     self.block_mutates_param(body, param, depth)
@@ -582,10 +734,17 @@ impl<'a> Checker<'a> {
     /// body may mutate — consumed at the closure's call sites (#111 form 4).
     /// The closure's own params are excluded: they are fresh bindings.
     fn record_closure_mutations(&self, st: &mut FnState, name: &str, value: &Expr) {
-        let Expr::FnLit { params, body, .. } = unwrap_parens(value) else {
+        let Expr::FnLit {
+            params,
+            results,
+            body,
+            ..
+        } = unwrap_parens(value)
+        else {
             return;
         };
-        let bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+        let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+        bound.extend(results.iter().filter_map(|r| r.name.clone()));
         let roots = self.collect_mutation_roots(st, body, &bound);
         if !roots.is_empty() {
             st.closure_mutates
@@ -606,13 +765,84 @@ impl<'a> Checker<'a> {
         bound: &HashSet<String>,
     ) -> HashSet<String> {
         let mut out: HashSet<String> = HashSet::new();
+        let mut local_aliases: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut local_shadows: HashSet<String> = bound.clone();
+        let mut match_aliases: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let resolve = |raw: &str,
+                       aliases: &std::collections::HashMap<String, String>,
+                       shadows: &HashSet<String>|
+         -> Option<String> {
+            if let Some(target) = aliases.get(raw) {
+                return Some(target.clone());
+            }
+            if shadows.contains(raw) {
+                return None;
+            }
+            Some(raw.to_string())
+        };
         let flat = walk::flatten(body);
         for (stmt, _idx) in &flat.stmts {
+            match stmt {
+                Stmt::Local(l) => {
+                    for (name, val) in l.names.iter().zip(l.values.iter()) {
+                        let resolved = walk::expr_path(val)
+                            .and_then(|p| resolve(path_root(&p), &local_aliases, &local_shadows));
+                        if let Some(r) = resolved {
+                            local_shadows.remove(name.as_str());
+                            local_aliases.insert(name.clone(), r);
+                        } else {
+                            local_aliases.remove(name.as_str());
+                            local_shadows.insert(name.clone());
+                        }
+                    }
+                }
+                Stmt::Assign {
+                    targets, values, ..
+                } if targets.len() == values.len() => {
+                    for (t, val) in targets.iter().zip(values.iter()) {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            let resolved = walk::expr_path(val).and_then(|p| {
+                                resolve(path_root(&p), &local_aliases, &local_shadows)
+                            });
+                            if let Some(r) = resolved {
+                                local_shadows.remove(name.as_str());
+                                local_aliases.insert(name.clone(), r);
+                            } else if bound.contains(name.as_str()) {
+                                local_aliases.remove(name.as_str());
+                                local_shadows.insert(name.clone());
+                            }
+                        }
+                    }
+                }
+                Stmt::Match { subject, arms, .. } => {
+                    let mut sroots = Vec::new();
+                    collect_ref_roots(subject, &mut sroots);
+                    sroots.retain(|r| !bound.contains(r));
+                    for arm in arms {
+                        if let hy_syntax::MatchPattern::Path {
+                            binding: Some(bname),
+                            ..
+                        } = &arm.pattern
+                        {
+                            match_aliases
+                                .entry(bname.clone())
+                                .or_default()
+                                .extend(sroots.iter().cloned());
+                        }
+                    }
+                }
+                _ => {}
+            }
             // index-assign targets
             if let Stmt::Assign { targets, .. } = stmt {
                 for t in targets {
-                    if matches!(t.kind, PlaceKind::Index { .. }) && !bound.contains(t.root()) {
-                        out.insert(path_root(&walk::place_path(t).unwrap_or_default()).to_string());
+                    if matches!(t.kind, PlaceKind::Index { .. }) {
+                        let raw = path_root(&walk::place_path(t).unwrap_or_default()).to_string();
+                        if let Some(r) = resolve(&raw, &local_aliases, &local_shadows) {
+                            out.insert(r);
+                        }
                     }
                 }
             }
@@ -627,13 +857,19 @@ impl<'a> Checker<'a> {
             for v in fnlit_values {
                 if let Expr::FnLit {
                     params: fp,
+                    results: fr,
                     body: fb,
                     ..
                 } = unwrap_parens(v)
                 {
-                    let mut inner_bound = bound.clone();
-                    inner_bound.extend(fp.iter().map(|p| p.name.clone()));
-                    out.extend(self.collect_mutation_roots(st, fb, &inner_bound));
+                    let mut inner_bound: HashSet<String> =
+                        fp.iter().map(|p| p.name.clone()).collect();
+                    inner_bound.extend(fr.iter().filter_map(|r| r.name.clone()));
+                    for ir in self.collect_mutation_roots(st, fb, &inner_bound) {
+                        if let Some(r) = resolve(&ir, &local_aliases, &local_shadows) {
+                            out.insert(r);
+                        }
+                    }
                 }
             }
             // calls in this statement
@@ -645,8 +881,9 @@ impl<'a> Checker<'a> {
                         if name == "delete" {
                             if let Some(first) = cr.args.first() {
                                 if let Some(p) = walk::expr_path(&first.value) {
-                                    let r = path_root(&p).to_string();
-                                    if !bound.contains(&r) {
+                                    if let Some(r) =
+                                        resolve(path_root(&p), &local_aliases, &local_shadows)
+                                    {
                                         out.insert(r);
                                     }
                                 }
@@ -661,10 +898,11 @@ impl<'a> Checker<'a> {
                                 let Some(p) = walk::expr_path(&a.value) else {
                                     continue;
                                 };
-                                let r = path_root(&p).to_string();
-                                if bound.contains(&r) {
+                                let Some(r) =
+                                    resolve(path_root(&p), &local_aliases, &local_shadows)
+                                else {
                                     continue;
-                                }
+                                };
                                 let mutates = match decl.params.get(i) {
                                     Some(tp) => self.fn_mutates_param(decl, &tp.name, 0),
                                     None => true, // fail closed
@@ -680,8 +918,9 @@ impl<'a> Checker<'a> {
                             // unknown callee — fail closed on path args
                             for a in cr.args {
                                 if let Some(p) = walk::expr_path(&a.value) {
-                                    let r = path_root(&p).to_string();
-                                    if !bound.contains(&r) {
+                                    if let Some(r) =
+                                        resolve(path_root(&p), &local_aliases, &local_shadows)
+                                    {
                                         out.insert(r);
                                     }
                                 }
@@ -696,8 +935,9 @@ impl<'a> Checker<'a> {
                         }
                         for a in cr.args {
                             if let Some(p) = walk::expr_path(&a.value) {
-                                let r = path_root(&p).to_string();
-                                if !bound.contains(&r) {
+                                if let Some(r) =
+                                    resolve(path_root(&p), &local_aliases, &local_shadows)
+                                {
                                     out.insert(r);
                                 }
                             }
@@ -706,8 +946,9 @@ impl<'a> Checker<'a> {
                     _ => {
                         for a in cr.args {
                             if let Some(p) = walk::expr_path(&a.value) {
-                                let r = path_root(&p).to_string();
-                                if !bound.contains(&r) {
+                                if let Some(r) =
+                                    resolve(path_root(&p), &local_aliases, &local_shadows)
+                                {
                                     out.insert(r);
                                 }
                             }
@@ -715,6 +956,38 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+        for _ in 0..8 {
+            let mut added = Vec::new();
+            for r in &out {
+                if let Some(targets) = match_aliases.get(r) {
+                    for t in targets {
+                        if !bound.contains(t) && !out.contains(t) {
+                            added.push(t.clone());
+                        }
+                    }
+                }
+            }
+            if added.is_empty() {
+                break;
+            }
+            out.extend(added);
+        }
+        for _ in 0..8 {
+            let mut added = Vec::new();
+            for r in &out {
+                if let Some(targets) = match_aliases.get(r) {
+                    for t in targets {
+                        if !bound.contains(t) && !out.contains(t) {
+                            added.push(t.clone());
+                        }
+                    }
+                }
+            }
+            if added.is_empty() {
+                break;
+            }
+            out.extend(added);
         }
         out
     }
@@ -760,6 +1033,9 @@ impl<'a> Checker<'a> {
         if l.values.is_empty() {
             // `var hits atomic.int64` / `var got []int` — shape from the
             // ascription (there is no initializer to infer from).
+            if let Some(t) = &l.ty {
+                self.check_zero_value_local(l, t);
+            }
             let shape =
                 l.ty.as_ref()
                     .map(|t| self.shape_of_type(t))
@@ -785,15 +1061,45 @@ impl<'a> Checker<'a> {
             }
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
             let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
-            for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
-                let (shape, ty) = match (&l.ty, shape) {
-                    (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
-                    (_, s) => (s, ty.or_else(|| l.ty.clone())),
-                };
+            let resolved: Vec<(String, TypeShape, Option<hy_syntax::TypeExpr>, Option<String>)> = l
+                .names
+                .iter()
+                .zip(shapes)
+                .zip(tys)
+                .map(|((name, shape), ty)| {
+                    let (shape, ty) = match (&l.ty, shape) {
+                        (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
+                        (_, s) => (s, ty.or_else(|| l.ty.clone())),
+                    };
+                    let shadowed = if self.shape_may_share(&shape)
+                        && self.value_reads_storage_of(st, &l.values[0], name)
+                    {
+                        self.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                            if via_share && !o.starts_with("a may-share peer of ") {
+                                format!("a may-share peer of {}", o)
+                            } else {
+                                o
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    (name.clone(), shape, ty, shadowed)
+                })
+                .collect();
+            for (name, shape, ty, shadowed_origin) in resolved {
                 let is_view = matches!(shape, TypeShape::BorrowHandle(_));
-                self.define_binding(st, name, shape, ty, immutable, managed);
+                self.define_binding(st, &name, shape.clone(), ty, immutable, managed);
                 if is_view {
-                    self.extend_call_loans_to_view(st, &l.values[0], name, idx);
+                    self.extend_call_loans_to_view(st, &l.values[0], &name, idx);
+                }
+                self.record_multi_value_share_and_alias(st, &name, &shape, &l.values[0]);
+                if let Some(origin) = shadowed_origin {
+                    if let Some(b) = st.env_lookup_mut(&name) {
+                        if b.non_owned_origin.is_none() {
+                            b.non_owned_origin = Some(origin);
+                        }
+                    }
                 }
             }
         } else {
@@ -851,17 +1157,29 @@ impl<'a> Checker<'a> {
                     (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
                     (_, inferred) => (inferred, self.ty_of_expr(st, value)),
                 };
-                // `x := move y` — y is moved; x takes ownership (no alias);
-                // non-ident moves (`x := move s.data`) trigger HYB-E3004 (O5.4).
-                let moved_non_owned = move_operand_ident(value)
-                    .and_then(|src| self.lookup_binding(st, &src))
-                    .and_then(|b| b.non_owned_origin.clone());
+                let shadowed_const = self.shape_may_share(&shape)
+                    && self.value_reads_storage_of(st, value, name)
+                    && self
+                        .const_write_root(
+                            st,
+                            &Place {
+                                kind: PlaceKind::Ident(name.clone()),
+                                span: value.span(),
+                            },
+                        )
+                        .is_some();
+                let immutable = immutable || shadowed_const;
                 self.mark_move_in_value(
                     st,
                     value,
                     format!("the move-define `{}`", value.render()),
                 );
-                if move_operand_ident(value).is_some() {
+                // `x := move y` — y is moved; x takes ownership (no alias);
+                // non-ident moves (`x := move s.data`) trigger HYB-E3004 (O5.4).
+                let moved_non_owned = self.moved_non_owned_origin_in_expr(st, value);
+                if move_operand_ident(value).is_some()
+                    || matches!(unwrap_parens(value), Expr::Move { .. })
+                {
                     self.define_binding(st, name, shape, ty, immutable, managed);
                     if let Some(origin) = moved_non_owned {
                         if let Some(b) = st.env_lookup_mut(name) {
@@ -878,11 +1196,10 @@ impl<'a> Checker<'a> {
                 // range var, O5.1) is lost and `move m` passed HYB-E3004
                 // while the caller still holds the same map. Read the origin
                 // the outer binding would cite NOW, before it is shadowed.
-                let shadowed_origin = if self.shape_may_share(&shape)
-                    && self.value_reads_storage_of(st, value, name)
-                {
+                let reads_self = self.value_reads_storage_of(st, value, name);
+                let shadowed_origin = if self.shape_may_share(&shape) && reads_self {
                     self.non_owned_origin_of(st, name).map(|(o, via_share)| {
-                        if via_share {
+                        if via_share && !o.starts_with("a may-share peer of ") {
                             format!("a may-share peer of {}", o)
                         } else {
                             o
@@ -891,8 +1208,38 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                let prior_alias = if reads_self {
+                    st.aliases.get(name).cloned()
+                } else {
+                    None
+                };
+                let prior_shares: Vec<String> = if reads_self {
+                    st.may_share
+                        .get(name)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 let is_view = matches!(shape, TypeShape::BorrowHandle(_));
                 self.define_binding(st, name, shape, ty, immutable, managed);
+                if let Some(origin) = &moved_non_owned {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        if b.non_owned_origin.is_none() {
+                            b.non_owned_origin = Some(origin.clone());
+                        }
+                    }
+                }
+                if reads_self {
+                    if let Some(pa) = prior_alias {
+                        if pa != *name {
+                            st.aliases.insert(name.clone(), pa);
+                        }
+                    }
+                    for peer in prior_shares {
+                        st.share_edge(name, &peer);
+                    }
+                }
                 // A2 non-lexical extension: `u := doc.array(...)` stores an
                 // element VIEW — the borrow loan the call opened on the
                 // handle lives until the view's last use (O7), not just the
@@ -937,16 +1284,20 @@ impl<'a> Checker<'a> {
     /// or parenthesized copy, a re-slice, a reference-bearing projection, a
     /// composite literal embedding it, or a call that takes it as a
     /// non-`move` argument / receiver and returns a value that may share.
-    /// Used for the self-shadowing define, where those recorders cannot
-    /// tell the outer `name` from the new inner one.
-    fn value_reads_storage_of(&self, st: &FnState, value: &Expr, name: &str) -> bool {
+    /// Used for self-shadowing defines and self-rebind assignments, where
+    /// those recorders cannot tell the prior `name` from the new one.
+    pub(crate) fn value_reads_storage_of(&self, st: &FnState, value: &Expr, name: &str) -> bool {
         let root_is = |e: &Expr| e.root_ident() == Some(name);
         match unwrap_parens(value) {
             Expr::Ident { name: src, .. } => src == name,
-            Expr::Slice { base, .. } => root_is(unwrap_parens(base)),
-            Expr::Field { .. } | Expr::Index { .. } => {
-                self.shape_may_share(&self.shape_of_expr(st, unwrap_parens(value)))
-                    && root_is(value)
+            Expr::Try { operand, .. } => self.value_reads_storage_of(st, operand, name),
+            Expr::Slice { base, .. } => {
+                root_is(unwrap_parens(base)) || self.value_reads_storage_of(st, base, name)
+            }
+            Expr::Field { base, .. } | Expr::Index { base, .. } => {
+                let sh = self.shape_of_expr(st, unwrap_parens(value));
+                (self.shape_may_share(&sh) || matches!(sh, TypeShape::Unknown))
+                    && (root_is(value) || self.value_reads_storage_of(st, base, name))
             }
             Expr::StructLit { fields, .. } => fields
                 .iter()
@@ -963,10 +1314,13 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 let via_arg = args.iter().any(|a| {
-                    !matches!(unwrap_parens(&a.value), Expr::Move { .. }) && root_is(&a.value)
+                    !matches!(unwrap_parens(&a.value), Expr::Move { .. })
+                        && (root_is(&a.value) || self.value_reads_storage_of(st, &a.value, name))
                 });
                 let via_recv = match unwrap_parens(callee) {
-                    Expr::Field { base, .. } => root_is(base),
+                    Expr::Field { base, .. } => {
+                        root_is(base) || self.value_reads_storage_of(st, base, name)
+                    }
                     _ => false,
                 };
                 via_arg || via_recv
@@ -1022,9 +1376,15 @@ impl<'a> Checker<'a> {
             // the freeze rule. Link the closure binding to each captured
             // reference-bearing outer binding so a later `move` of either
             // freezes the other (O5.2), exactly like a shallow copy.
-            Expr::FnLit { params, body, .. } => {
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
                 let mut bound: std::collections::HashSet<String> =
                     params.iter().map(|p| p.name.clone()).collect();
+                bound.extend(results.iter().filter_map(|r| r.name.clone()));
                 let mut idents = Vec::new();
                 collect_capture_idents_block(body, &mut bound, &mut idents);
                 for id in idents {
@@ -1053,19 +1413,134 @@ impl<'a> Checker<'a> {
                     if root == name {
                         continue;
                     }
-                    if self.binding_may_share(st, &root) {
+                    if let Some(b) = self.lookup_binding(st, &root) {
+                        if b.shape.is_handle()
+                            && !self.shape_carries_handle(&result)
+                            && !matches!(result, TypeShape::Unknown)
+                        {
+                            // O9: boundary calls on a handle that return a pure
+                            // Go value (e.g. `out := enc.finish()?` returning
+                            // `[]byte`) produce a fresh Go copy, not an alias
+                            // of the handle.
+                            continue;
+                        }
+                        // pr-319 (#318): a slice of an ADDRESSABLE ARRAY
+                        // views the array's storage even when the element
+                        // type is primitive - link it so a later move
+                        // freezes the array too.
+                        if self.shape_may_share(&b.shape)
+                            || self.expr_slices_addressable_array(st, value, &root)
+                        {
+                            st.share_edge(name, &root);
+                        }
+                    }
+                }
+                if let Some(origin) = self.moved_non_owned_origin_in_expr(st, value) {
+                    if let Some(nb) = st.env_lookup_mut(name) {
+                        if nb.non_owned_origin.is_none() {
+                            nb.non_owned_origin = Some(origin);
+                        }
+                    }
+                }
+                let mut addr_roots = Vec::new();
+                collect_addr_of_roots(value, &mut addr_roots);
+                for root in addr_roots {
+                    if root != name {
                         st.share_edge(name, &root);
+                        let origin = self
+                            .lookup_binding(st, &root)
+                            .and_then(|b| b.non_owned_origin.clone());
+                        if let Some(origin) = origin {
+                            if let Some(nb) = st.env_lookup_mut(name) {
+                                if nb.non_owned_origin.is_none() {
+                                    nb.non_owned_origin = Some(origin);
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    // `record_literal_ref` (pr-28's composite-literal recursion) is gone:
-    // `record_may_share` now walks literals, calls and views with
-    // `collect_ref_roots`, so a literal field that embeds a live binding —
-    // bare (`holder{m: agg}`), projected (`holder{m: h1.m}`) or produced by
-    // a call (`wrap{items: same(agg)}`) — is covered by one collector.
 
+    /// True when `value` contains a slice whose base is an addressable
+    /// array rooted at `root`. A call that returns an array by value
+    /// (`clone(a)[:]`) is a copy: the slice base is the call, so it does
+    /// not match even though `collect_ref_roots` still sees `a`.
+    fn expr_slices_addressable_array(&self, st: &FnState, value: &Expr, root: &str) -> bool {
+        match value {
+            Expr::Slice { base, lo, hi, .. } => {
+                if self.addressable_array_root(st, base) == Some(root) {
+                    return true;
+                }
+                if self.expr_slices_addressable_array(st, base, root) {
+                    return true;
+                }
+                if let Some(lo) = lo {
+                    if self.expr_slices_addressable_array(st, lo, root) {
+                        return true;
+                    }
+                }
+                if let Some(hi) = hi {
+                    if self.expr_slices_addressable_array(st, hi, root) {
+                        return true;
+                    }
+                }
+                false
+            }
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. }
+            | Expr::Unary { operand: inner, .. }
+            | Expr::AddrOf { operand: inner, .. } => {
+                self.expr_slices_addressable_array(st, inner, root)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_slices_addressable_array(st, lhs, root)
+                    || self.expr_slices_addressable_array(st, rhs, root)
+            }
+            Expr::Index { base, index, .. } => {
+                self.expr_slices_addressable_array(st, base, root)
+                    || self.expr_slices_addressable_array(st, index, root)
+            }
+            Expr::Field { base, .. } => self.expr_slices_addressable_array(st, base, root),
+            Expr::Call { callee, args, .. } => {
+                self.expr_slices_addressable_array(st, callee, root)
+                    || args
+                        .iter()
+                        .any(|a| self.expr_slices_addressable_array(st, &a.value, root))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.expr_slices_addressable_array(st, &f.value, root)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|it| self.expr_slices_addressable_array(st, it, root)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                self.expr_slices_addressable_array(st, k, root)
+                    || self.expr_slices_addressable_array(st, v, root)
+            }),
+            Expr::Receive { chan, .. } => self.expr_slices_addressable_array(st, chan, root),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                hy_syntax::InterpPart::Expr(e) => {
+                    self.expr_slices_addressable_array(st, e, root)
+                }
+                hy_syntax::InterpPart::Lit(_) => false,
+            }),
+            // Closure bodies are checked as their own statements.
+            Expr::FnLit { .. } | Expr::Ident { .. } | Expr::Lit { .. } => false,
+        }
+    }
+
+    /// Binding an addressable `[N]T` expression is rooted at.
+    /// `a`, `b.data`, and `g[i]` qualify; a call does not (it yields a copy).
+    fn addressable_array_root<'e>(&self, st: &FnState, expr: &'e Expr) -> Option<&'e str> {
+        let expr = unwrap_parens(expr);
+        if !matches!(self.shape_of_expr(st, expr), TypeShape::Array(_)) {
+            return None;
+        }
+        expr.root_ident()
+    }
     // `record_literal_ref` (pr-28's composite-literal recursion) is gone:
     // `record_may_share` now walks literals, calls and views with
     // `collect_ref_roots`, so a literal field that embeds a live binding —
@@ -1080,17 +1555,22 @@ impl<'a> Checker<'a> {
     /// binding must freeze the other (O5.2). A primitive-element slice
     /// (`[]int`) copies by value and shares nothing, so no edge is recorded
     /// and the positive control stays accepted.
-    fn record_copy_may_share(&self, st: &mut FnState, cr: &CallRef) {
+    pub(crate) fn record_copy_may_share(&self, st: &mut FnState, cr: &CallRef) {
         let (Some(dst), Some(src)) = (cr.args.first(), cr.args.get(1)) else {
             return;
         };
         // A slice shape is always a reference (`shape_may_share(Slice)` is
         // unconditional), so consult the ELEMENT shape instead: only a
-        // reference-bearing element is copied by reference.
-        let TypeShape::Slice(elem) = self.shape_of_expr(st, unwrap_parens(&dst.value)) else {
-            return;
-        };
-        if !self.shape_may_share(&elem) {
+        // reference-bearing element is copied by reference. Check both `dst`
+        // and `src` so an untyped/unknown slice on one side still records the
+        // edge when the other side's element type is known to share.
+        let elem_shares = [&dst.value, &src.value].into_iter().any(|arg| {
+            matches!(
+                self.shape_of_expr(st, unwrap_parens(arg)),
+                TypeShape::Slice(elem) if self.shape_may_share(&elem)
+            )
+        });
+        if !elem_shares {
             return;
         }
         let mut dst_roots = Vec::new();
@@ -1123,7 +1603,7 @@ impl<'a> Checker<'a> {
             Expr::Ident { name: src, .. } => {
                 if let Some(b) = self.lookup_binding(st, src) {
                     let src_origin = b.non_owned_origin.clone();
-                    if b.shape.is_reference_alias() {
+                    if b.shape.is_reference_alias() || b.shape.is_handle() {
                         st.aliases.insert(name.to_string(), src.clone());
                         if let Some(origin) = src_origin {
                             if let Some(nb) = st.env_lookup_mut(name) {
@@ -1144,48 +1624,70 @@ impl<'a> Checker<'a> {
             // considered; the first reference-typed one wins (the freeze is a
             // single-parent link) and `move`-wrapped operands, which transfer
             // ownership into the callee, are skipped by the collector.
-            other
-                if self
-                    .shape_of_expr(st, unwrap_parens(other))
-                    .is_reference_alias() =>
-            {
-                let mut roots = Vec::new();
-                collect_ref_roots(value, &mut roots);
-                for src in roots {
-                    if src == name {
-                        continue;
-                    }
-                    let matched = self
-                        .lookup_binding(st, &src)
-                        .map(|b| (b.shape.is_reference_alias(), b.non_owned_origin.clone()));
-                    if let Some((true, origin)) = matched {
-                        st.aliases.insert(name.to_string(), src.clone());
-                        if let Some(origin) = origin {
-                            if let Some(nb) = st.env_lookup_mut(name) {
-                                nb.non_owned_origin = Some(origin);
-                            }
+            other => {
+                let other_shape = self.shape_of_expr(st, unwrap_parens(other));
+                if other_shape.is_reference_alias()
+                    || matches!(other_shape, TypeShape::OwnHandle(_))
+                {
+                    let mut roots = Vec::new();
+                    collect_ref_roots(value, &mut roots);
+                    for src in roots {
+                        if src == name {
+                            continue;
                         }
-                        break;
+                        let matched = self.lookup_binding(st, &src).map(|b| {
+                            let ok = if matches!(other_shape, TypeShape::OwnHandle(_)) {
+                                self.shape_carries_handle(&b.shape)
+                            } else {
+                                b.shape.is_reference_alias()
+                            };
+                            (ok, b.non_owned_origin.clone())
+                        });
+                        if let Some((true, origin)) = matched {
+                            st.aliases.insert(name.to_string(), src.clone());
+                            if let Some(origin) = origin {
+                                if let Some(nb) = st.env_lookup_mut(name) {
+                                    nb.non_owned_origin = Some(origin);
+                                }
+                            }
+                            break;
+                        }
                     }
                 }
             }
-            _ => {}
         }
     }
 
     /// Record O5.2 alias links for pointer borrows (`p := &stats`, `slot := &m[k]`)
     /// so moving `p` freezes the underlying mutable binding `stats` (#33).
+    /// pr-312: the alias recording descends into NESTED address-of operands
+    /// inside composite literals (`p := stats{cpu: &usage}`) via
+    /// collect_addr_of_roots, not just the direct as_addr_of form.
     pub(crate) fn record_local_borrow_aliases(&self, st: &mut FnState, l: &LocalDecl) {
         if l.names.len() == l.values.len() {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
+                let inner = unwrap_parens(value);
+                let is_borrow = as_addr_of(inner).is_some()
+                    || contains_addr_of_in_literal(inner)
+                    || matches!(inner, Expr::Ident { name: src, .. } if st.borrow_bindings.contains(src));
+                if is_borrow {
+                    st.borrow_bindings.insert(name.clone());
+                } else {
+                    st.borrow_bindings.remove(name);
+                }
                 if move_operand_ident(value).is_none() {
-                    if let Some(op) = as_addr_of(unwrap_parens(value)) {
-                        if let Some(src) = op.root_ident() {
-                            if src != name {
-                                if let Some(b) = self.lookup_binding(st, src) {
-                                    if !b.shape.is_sendable_by_type() {
-                                        st.aliases.insert(name.clone(), src.to_string());
-                                    }
+                    let shape = self.shape_of_expr(st, value);
+                    if field_borrow_kind(&shape).is_none() && !matches!(shape, TypeShape::Unknown) {
+                        continue;
+                    }
+                    let mut addr_roots = Vec::new();
+                    collect_addr_of_roots(value, &mut addr_roots);
+                    for src in addr_roots {
+                        if src != *name {
+                            if let Some(b) = self.lookup_binding(st, &src) {
+                                if !b.shape.is_sendable_by_type() {
+                                    st.aliases.insert(name.clone(), src);
+                                    break;
                                 }
                             }
                         }
@@ -1196,6 +1698,8 @@ impl<'a> Checker<'a> {
     }
 
     /// Record O5.2 alias links for pointer-borrow rebinds (`p = &stats`).
+    /// pr-312: nested address-of operands inside composite rebinds are
+    /// tracked the same way as the define form.
     pub(crate) fn record_assign_borrow_aliases(
         &self,
         st: &mut FnState,
@@ -1206,14 +1710,28 @@ impl<'a> Checker<'a> {
         if op == AssignOp::Assign && values.len() == targets.len() {
             for (t, v) in targets.iter().zip(values.iter()) {
                 if let PlaceKind::Ident(name) = &t.kind {
+                    let inner = unwrap_parens(v);
+                    let is_borrow = as_addr_of(inner).is_some()
+                        || contains_addr_of_in_literal(inner)
+                        || matches!(inner, Expr::Ident { name: src, .. } if st.borrow_bindings.contains(src));
+                    if is_borrow {
+                        st.borrow_bindings.insert(name.clone());
+                    } else {
+                        st.borrow_bindings.remove(name);
+                    }
                     if move_operand_ident(v).is_none() {
-                        if let Some(addr_op) = as_addr_of(unwrap_parens(v)) {
-                            if let Some(src) = addr_op.root_ident() {
-                                if src != name {
-                                    if let Some(b) = self.lookup_binding(st, src) {
-                                        if !b.shape.is_sendable_by_type() {
-                                            st.aliases.insert(name.clone(), src.to_string());
-                                        }
+                        let shape = self.shape_of_expr(st, v);
+                        if field_borrow_kind(&shape).is_none() && !matches!(shape, TypeShape::Unknown) {
+                            continue;
+                        }
+                        let mut addr_roots = Vec::new();
+                        collect_addr_of_roots(v, &mut addr_roots);
+                        for src in addr_roots {
+                            if src != *name {
+                                if let Some(b) = self.lookup_binding(st, &src) {
+                                    if !b.shape.is_sendable_by_type() {
+                                        st.aliases.insert(name.clone(), src);
+                                        break;
                                     }
                                 }
                             }
@@ -1228,26 +1746,173 @@ impl<'a> Checker<'a> {
     /// to the last use of the view binding `name` (the A2 non-lexical
     /// window for define-stored element views).
     fn extend_call_loans_to_view(&self, st: &mut FnState, value: &Expr, name: &str, idx: usize) {
+        let view_last = st.last_use.get(name).copied().unwrap_or(idx).max(idx);
         let mut calls = Vec::new();
         walk::expr_calls(value, &mut calls);
         let mut roots = Vec::new();
         for cr in &calls {
-            if let Resolved::Method { root, method, recv } = self.resolve_call(st, cr) {
-                if let Some(t) = receiver_type_name(&recv) {
-                    if foreign::method_mode(&t, &method) == CallMode::Borrow {
-                        roots.push(root);
+            match self.resolve_call(st, cr) {
+                Resolved::Method {
+                    root, method, recv, ..
+                } => {
+                    if let Some(t) = receiver_type_name(&recv) {
+                        if foreign::method_mode(&t, &method) == CallMode::Borrow {
+                            roots.push(root);
+                        }
                     }
                 }
+                Resolved::Package { pkg, method } => {
+                    if foreign::package_mode(&pkg, &method) == CallMode::Borrow {
+                        for a in cr.args {
+                            if let Some(root) = a.value.root_ident() {
+                                if self
+                                    .lookup_binding(st, root)
+                                    .map(|b| b.shape.is_handle())
+                                    .unwrap_or(false)
+                                {
+                                    roots.push(root.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-        if roots.is_empty() {
-            return;
-        }
-        let view_last = st.last_use.get(name).copied().unwrap_or(idx).max(idx);
         for loan in st.loans.iter_mut() {
             if let LoanTarget::Handle { handle } = &loan.target {
                 if loan.created == idx && loan.last == idx && roots.iter().any(|r| r == handle) {
                     loan.last = view_last;
+                }
+            }
+        }
+        let mut ref_roots = Vec::new();
+        collect_ref_roots(value, &mut ref_roots);
+        for src in ref_roots {
+            if src == name {
+                continue;
+            }
+            let is_borrow_src = self
+                .lookup_binding(st, &src)
+                .map(|b| matches!(b.shape, TypeShape::BorrowHandle(_)))
+                .unwrap_or(false);
+            if is_borrow_src {
+                let group = st.share_group(&src);
+                for loan in st.loans.iter_mut() {
+                    if let LoanTarget::Handle { handle } = &loan.target {
+                        if loan.created <= idx
+                            && idx <= loan.last
+                            && (handle == &src || group.contains(handle))
+                        {
+                            loan.last = loan.last.max(view_last);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Record may-share and alias edges for one target `name` of a multi-value
+    /// define or assignment (`h2, ok := alias_pair(h)`, `m, ok := buckets[k]`)
+    /// using that target's resolved `shape` (#75).
+    pub(crate) fn record_multi_value_share_and_alias(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        shape: &TypeShape,
+        value: &Expr,
+    ) {
+        if !self.shape_may_share(shape) && !matches!(shape, TypeShape::Unknown) {
+            return;
+        }
+        let mut roots = Vec::new();
+        collect_ref_roots(value, &mut roots);
+        for root in &roots {
+            if root == name {
+                continue;
+            }
+            if let Some(b) = self.lookup_binding(st, root) {
+                if b.shape.is_handle()
+                    && !self.shape_carries_handle(shape)
+                    && !matches!(shape, TypeShape::Unknown)
+                {
+                    continue;
+                }
+                if self.shape_may_share(&b.shape) {
+                    st.share_edge(name, root);
+                }
+            }
+        }
+        if shape.is_reference_alias() || matches!(shape, TypeShape::OwnHandle(_)) {
+            for src in &roots {
+                if src == name {
+                    continue;
+                }
+                let matched = self.lookup_binding(st, src).map(|b| {
+                    let ok = if matches!(shape, TypeShape::OwnHandle(_)) {
+                        self.shape_carries_handle(&b.shape)
+                    } else {
+                        b.shape.is_reference_alias()
+                    };
+                    (ok, b.non_owned_origin.clone())
+                });
+                if let Some((true, origin)) = matched {
+                    st.aliases.insert(name.to_string(), src.clone());
+                    if let Some(origin) = origin {
+                        if let Some(nb) = st.env_lookup_mut(name) {
+                            nb.non_owned_origin = Some(origin);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        if let Some(origin) = self.moved_non_owned_origin_in_expr(st, value) {
+            if let Some(nb) = st.env_lookup_mut(name) {
+                if nb.non_owned_origin.is_none() {
+                    nb.non_owned_origin = Some(origin);
+                }
+            }
+        }
+    }
+
+    /// Transfer `name`'s non-owned origin (O5.1) to any existing may-share
+    /// peers and direct alias children before `name`'s share/alias edges are
+    /// cleared by a shadowing define or non-self rebind (#75).
+    fn transfer_non_owned_origin_to_peers_and_aliases(&self, st: &mut FnState, name: &str) {
+        if let Some((orig, _)) = self.non_owned_origin_of(st, name) {
+            let peer_origin = if orig.starts_with("a may-share peer of ") {
+                orig.clone()
+            } else {
+                format!("a may-share peer of {}", orig)
+            };
+            let peers: Vec<String> = st.share_group(name).into_iter().collect();
+            for peer in peers {
+                if peer == name {
+                    continue;
+                }
+                if let Some(pb) = st.env_lookup_mut(&peer) {
+                    if pb.non_owned_origin.is_none() {
+                        pb.non_owned_origin = Some(peer_origin.clone());
+                    }
+                }
+            }
+            let alias_children: Vec<String> = st
+                .aliases
+                .iter()
+                .filter_map(|(k, v)| {
+                    if v == name && k != name {
+                        Some(k.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for child in alias_children {
+                if let Some(cb) = st.env_lookup_mut(&child) {
+                    if cb.non_owned_origin.is_none() {
+                        cb.non_owned_origin = Some(orig.clone());
+                    }
                 }
             }
         }
@@ -1262,6 +1927,12 @@ impl<'a> Checker<'a> {
         immutable: bool,
         managed: bool,
     ) {
+        // Issue #75: before a shadowing or same-scope define (`h2 := h;
+        // if true { h := fresh; ... }` or `h2 := h; h, ok := fresh, true`)
+        // clears `name`'s share/alias edges and replaces `name` in the lexical
+        // environment, transfer `name`'s non-owned origin to any existing
+        // may-share peers and direct alias children so they remain non-owned.
+        self.transfer_non_owned_origin_to_peers_and_aliases(st, name);
         st.aliases.remove(name);
         st.share_clear(name);
         let non_owned_origin = if immutable && !shape.is_sendable_by_type() {
@@ -1278,8 +1949,118 @@ impl<'a> Checker<'a> {
                 managed_taint: managed, // O6.2: born inside `managed {}`
                 moved: None,
                 non_owned_origin,
+                slot_loan: false,
             },
         );
+    }
+
+    /// Bind the payload variable `name` of a `match subject { some(name): ... }`
+    /// arm in the arm's block scope (`#243`). `option[T]` lowers to
+    /// `hyb_opt_T{v: T, ok: bool}`, so `some(name)` copies `subject.v` and
+    /// shares mutable GC storage with `subject`, inherits its `non_owned_origin`
+    /// and `moved` state, and links to any `const` root of `subject`.
+    pub(crate) fn bind_match_arm(
+        &mut self,
+        st: &mut FnState,
+        name: &str,
+        subject: &Expr,
+        managed: bool,
+    ) {
+        let shape = self.shape_of_expr(st, subject);
+        let ty = match self.ty_of_expr(st, subject) {
+            Some(hy_syntax::TypeExpr::Option { elem, .. }) => Some(*elem),
+            other => other,
+        };
+
+        let mut roots = Vec::new();
+        collect_ref_roots(subject, &mut roots);
+
+        let pre_tainted = roots.iter().any(|r| {
+            self.lookup_binding(st, r)
+                .map(|b| b.managed_taint)
+                .unwrap_or(false)
+        });
+        let pre_moved = roots.iter().find_map(|r| {
+            self.lookup_binding(st, r).and_then(|b| b.moved.clone())
+        });
+        let pre_origin = if self.shape_may_share(&shape) {
+            roots.iter().find_map(|r| {
+                self.non_owned_origin_of(st, r).map(|(o, via_share)| {
+                    if via_share || (!shape.is_reference_alias() && r != name) {
+                        format!("a may-share peer of {}", o)
+                    } else {
+                        o
+                    }
+                })
+            })
+        } else {
+            None
+        };
+        let pre_const_root = roots.iter().find_map(|r| {
+            let p = Place {
+                kind: PlaceKind::Ident(r.clone()),
+                span: subject.span(),
+            };
+            self.const_write_root(st, &p)
+        });
+
+        let mut pre_share_peers: Vec<String> = Vec::new();
+        let mut pre_alias_root: Option<String> = None;
+        for r in &roots {
+            if self.binding_may_share(st, r) {
+                pre_share_peers.push(r.clone());
+                pre_share_peers.extend(st.share_group(r));
+            }
+            if pre_alias_root.is_none()
+                && self
+                    .lookup_binding(st, r)
+                    .map(|b| b.shape.is_reference_alias())
+                    .unwrap_or(false)
+            {
+                pre_alias_root = Some(crate::freeze::resolve_alias(st, r));
+            }
+        }
+
+        let self_shadows_const = pre_const_root.as_deref() == Some(name);
+        self.define_binding(
+            st,
+            name,
+            shape.clone(),
+            ty,
+            self_shadows_const,
+            managed || pre_tainted,
+        );
+
+        self.record_may_share(st, name, subject);
+        self.record_alias(st, name, subject);
+
+        for peer in &pre_share_peers {
+            if peer != name {
+                st.share_edge(name, peer);
+            }
+        }
+        if let Some(aroot) = pre_alias_root {
+            st.aliases.entry(name.to_string()).or_insert(aroot);
+        } else if pre_share_peers.iter().any(|p| p == name) {
+            st.aliases
+                .entry(name.to_string())
+                .or_insert_with(|| name.to_string());
+        }
+        if let Some(croot) = pre_const_root {
+            if croot != name {
+                st.share_edge(name, &croot);
+                st.aliases.entry(name.to_string()).or_insert(croot);
+            }
+        }
+
+        if let Some(b) = st.env_lookup_mut(name) {
+            if b.moved.is_none() {
+                b.moved = pre_moved;
+            }
+            if b.non_owned_origin.is_none() {
+                b.non_owned_origin = pre_origin;
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1312,6 +2093,9 @@ impl<'a> Checker<'a> {
                             span: v.span(),
                             desc: format!("`{} = {}`", binding, v.render()),
                         });
+                    }
+                    if matches!(self.shape_of_expr(st, v), TypeShape::BorrowHandle(_)) {
+                        self.extend_call_loans_to_view(st, v, name, idx);
                     }
                 }
             }
@@ -1357,8 +2141,9 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 if matches!(t.kind, PlaceKind::Field { .. }) {
+                    let shape = self.shape_of_expr(st, v);
                     let is_borrow = as_addr_of(v).is_some()
-                        || matches!(self.shape_of_expr(st, v), TypeShape::BorrowHandle(_));
+                        || field_borrow_kind(&shape).is_some();
                     if is_borrow {
                         self.emit_a6_field_borrow_error(t);
                     }
@@ -1368,7 +2153,7 @@ impl<'a> Checker<'a> {
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             for (t, shape) in targets.iter().zip(shapes.iter()) {
                 if matches!(t.kind, PlaceKind::Field { .. })
-                    && matches!(shape, TypeShape::BorrowHandle(_))
+                    && field_borrow_kind(shape).is_some()
                 {
                     self.emit_a6_field_borrow_error(t);
                 }
@@ -1416,78 +2201,245 @@ impl<'a> Checker<'a> {
         // whole-binding rebind: `rows = append(rows, ...)`, parallel
         // `m2, x = m, 1`, and multi-value unpack `n, m = make_pair()`.
         if op == AssignOp::Assign {
-            if values.len() == targets.len() {
-                // Evaluate all RHS shapes, types, and alias sources before
-                // mutating target bindings so parallel swaps/rebinds read the
-                // pre-assignment environment.
-                type RhsInfo = (TypeShape, Option<hy_syntax::TypeExpr>, Option<String>);
-                let rhs_info: Vec<RhsInfo> =
-                    values
-                        .iter()
-                        .map(|v| {
-                            let shape = self.shape_of_expr(st, v);
-                            let ty = self.ty_of_expr(st, v);
-                            let non_owned = match crate::model::unwrap_parens(v) {
-                                Expr::Ident { name: src, .. } => self
-                                    .lookup_binding(st, src)
-                                    .and_then(|b| b.non_owned_origin.clone()),
-                                other => move_operand_ident(other)
-                                    .and_then(|src| self.lookup_binding(st, &src))
-                                    .and_then(|b| b.non_owned_origin.clone()),
-                            };
-                            (shape, ty, non_owned)
-                        })
-                        .collect();
+            self.rebind_assign_targets(st, targets, values, &is_const_write);
+        }
+    }
 
-                for (i, ((t, v), (shape, ty, non_owned))) in targets
-                    .iter()
-                    .zip(values.iter())
-                    .zip(rhs_info)
-                    .enumerate()
-                {
-                    if is_const_write[i] {
-                        continue;
-                    }
-                    if let PlaceKind::Ident(name) = &t.kind {
-                        if let Some(b) = st.env_lookup_mut(name) {
-                            if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
-                                b.shape = shape;
-                            }
-                            if ty.is_some() || b.ty.is_none() {
-                                b.ty = ty;
-                            }
-                            b.moved = None; // a fresh value re-owns the binding
-                            b.non_owned_origin = non_owned;
+    pub(crate) fn process_closure_assign(
+        &mut self,
+        st: &mut FnState,
+        targets: &[Place],
+        op: AssignOp,
+        values: &[Expr],
+    ) {
+        for v in values {
+            self.mark_move_in_value(st, v, format!("the move-assign `{}`", v.render()));
+        }
+        if op == AssignOp::Assign {
+            let no_const_mask = vec![false; targets.len()];
+            self.rebind_assign_targets(st, targets, values, &no_const_mask);
+        }
+        self.record_assign_borrow_aliases(st, targets, op, values);
+    }
+
+    fn rebind_assign_targets(
+        &mut self,
+        st: &mut FnState,
+        targets: &[Place],
+        values: &[Expr],
+        is_const_write: &[bool],
+    ) {
+        if values.len() == targets.len() {
+            // Evaluate all RHS shapes, types, and alias sources before
+            // mutating target bindings so parallel swaps/rebinds read the
+            // pre-assignment environment.
+            struct AssignRhsInfo {
+                shape: TypeShape,
+                ty: Option<hy_syntax::TypeExpr>,
+                non_owned: Option<String>,
+                reads_self: bool,
+                shadowed_origin: Option<String>,
+                prior_alias: Option<String>,
+                prior_shares: Vec<String>,
+            }
+            let rhs_info: Vec<AssignRhsInfo> = targets
+                .iter()
+                .zip(values.iter())
+                .map(|(t, v)| {
+                    let shape = self.shape_of_expr(st, v);
+                    let ty = self.ty_of_expr(st, v);
+                    let non_owned = match crate::model::unwrap_parens(v) {
+                        Expr::Ident { name: src, .. } => self
+                            .lookup_binding(st, src)
+                            .and_then(|b| b.non_owned_origin.clone()),
+                        other => move_operand_ident(other)
+                            .and_then(|src| self.lookup_binding(st, &src))
+                            .and_then(|b| b.non_owned_origin.clone())
+                            .or_else(|| self.moved_non_owned_origin_in_expr(st, other)),
+                    };
+                    let (reads_self, shadowed_origin, prior_alias, prior_shares) = match &t.kind {
+                        PlaceKind::Ident(name) => {
+                            let rs = self.value_reads_storage_of(st, v, name);
+                            let so = if self.shape_may_share(&shape) && rs {
+                                self.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                                    if via_share && !o.starts_with("a may-share peer of ") {
+                                        format!("a may-share peer of {}", o)
+                                    } else {
+                                        o
+                                    }
+                                })
+                            } else {
+                                None
+                            };
+                            let pa = if rs {
+                                st.aliases.get(name).cloned()
+                            } else {
+                                None
+                            };
+                            let ps = if rs {
+                                st.may_share
+                                    .get(name)
+                                    .map(|s| s.iter().cloned().collect())
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            };
+                            (rs, so, pa, ps)
                         }
-                        // a rebind re-owns the binding: drop the old alias and
-                        // may-share edges, then re-record from the new value (#27)
-                        st.aliases.remove(name);
-                        st.share_clear(name);
-                        self.record_may_share(st, name, v);
-                        // rebind may create a fresh alias — ident copies AND
-                        // call results that hand back argument storage (#38)
-                        self.record_alias(st, name, v);
-                        // #111: a closure rebind replaces the old body's
-                        // mutation set (or clears it for non-closure values)
-                        st.closure_mutates.remove(name);
-                        self.record_closure_mutations(st, name, v);
+                        _ => (false, None, None, Vec::new()),
+                    };
+                    AssignRhsInfo {
+                        shape,
+                        ty,
+                        non_owned,
+                        reads_self,
+                        shadowed_origin,
+                        prior_alias,
+                        prior_shares,
+                    }
+                })
+                .collect();
+
+            for (i, ((t, v), info)) in targets
+                .iter()
+                .zip(values.iter())
+                .zip(rhs_info)
+                .enumerate()
+            {
+                if is_const_write.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                if let PlaceKind::Ident(name) = &t.kind {
+                    // Before clearing `name`'s non-owned origin and may-share
+                    // edges on a non-self rebind (`h2 := h; h = fresh`), transfer
+                    // `name`'s non-owned origin to any existing may-share peers
+                    // and preserve clique connectivity among `name`'s former
+                    // neighbors so they remain linked to each other.
+                    if !info.reads_self {
+                        self.transfer_non_owned_origin_to_peers_and_aliases(st, name);
+                        let neighbors: Vec<String> = st
+                            .may_share
+                            .get(name)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default();
+                        for idx_a in 0..neighbors.len() {
+                            for idx_b in (idx_a + 1)..neighbors.len() {
+                                st.share_edge(&neighbors[idx_a], &neighbors[idx_b]);
+                            }
+                        }
+                    }
+
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        if !matches!(info.shape, TypeShape::Unknown) || b.ty.is_none() {
+                            b.shape = info.shape;
+                        }
+                        if info.ty.is_some() || b.ty.is_none() {
+                            b.ty = info.ty;
+                        }
+                        b.moved = None; // a fresh value re-owns the binding
+                        b.non_owned_origin = info.non_owned;
+                    }
+                    // a rebind re-owns the binding: drop the old alias and
+                    // may-share edges, then re-record from the new value (#27)
+                    st.aliases.remove(name);
+                    st.share_clear(name);
+                    if info.reads_self {
+                        if let Some(pa) = info.prior_alias {
+                            if &pa != name {
+                                st.aliases.insert(name.clone(), pa);
+                            }
+                        }
+                        for peer in info.prior_shares {
+                            st.share_edge(name, &peer);
+                        }
+                    }
+                    self.record_may_share(st, name, v);
+                    // rebind may create a fresh alias — ident copies AND
+                    // call results that hand back argument storage (#38)
+                    self.record_alias(st, name, v);
+                    if let Some(origin) = info.shadowed_origin {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin);
+                            }
+                        }
+                    }
+                    // #111: a closure rebind replaces the old body's
+                    // mutation set (or clears it for non-closure values)
+                    st.closure_mutates.remove(name);
+                    self.record_closure_mutations(st, name, v);
+                } else {
+                    let root = t.root();
+                    if !root.is_empty() && self.binding_may_share(st, root) {
+                        self.record_may_share(st, root, v);
                     }
                 }
-            } else if values.len() == 1 && targets.len() > 1 {
-                let shapes = self.multi_value_shapes(st, &values[0], targets.len());
-                let tys = self.multi_value_tys(st, &values[0], targets.len());
-                for ((t, shape), ty) in targets.iter().zip(shapes).zip(tys) {
-                    if let PlaceKind::Ident(name) = &t.kind {
-                        if let Some(b) = st.env_lookup_mut(name) {
-                            if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
-                                b.shape = shape;
+            }
+        } else if values.len() == 1 && targets.len() > 1 {
+            let shapes = self.multi_value_shapes(st, &values[0], targets.len());
+            let tys = self.multi_value_tys(st, &values[0], targets.len());
+            for (i, ((t, shape), ty)) in targets.iter().zip(shapes).zip(tys).enumerate() {
+                if is_const_write.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                if let PlaceKind::Ident(name) = &t.kind {
+                    let reads_self = self.value_reads_storage_of(st, &values[0], name);
+                    let shadowed_origin = if self.shape_may_share(&shape) && reads_self {
+                        self.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                            if via_share && !o.starts_with("a may-share peer of ") {
+                                format!("a may-share peer of {}", o)
+                            } else {
+                                o
                             }
-                            if ty.is_some() || b.ty.is_none() {
-                                b.ty = ty;
-                            }
-                            b.moved = None;
+                        })
+                    } else {
+                        None
+                    };
+                    let prior_alias = if reads_self {
+                        st.aliases.get(name).cloned()
+                    } else {
+                        None
+                    };
+                    let prior_shares: Vec<String> = if reads_self {
+                        st.may_share
+                            .get(name)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    if !reads_self {
+                        self.transfer_non_owned_origin_to_peers_and_aliases(st, name);
+                    }
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
+                            b.shape = shape.clone();
                         }
-                        st.aliases.remove(name);
+                        if ty.is_some() || b.ty.is_none() {
+                            b.ty = ty;
+                        }
+                        b.moved = None;
+                        b.non_owned_origin = None;
+                    }
+                    st.aliases.remove(name);
+                    st.share_clear(name);
+                    if reads_self {
+                        if let Some(pa) = prior_alias {
+                            if &pa != name {
+                                st.aliases.insert(name.clone(), pa);
+                            }
+                        }
+                        for peer in prior_shares {
+                            st.share_edge(name, &peer);
+                        }
+                    }
+                    self.record_multi_value_share_and_alias(st, name, &shape, &values[0]);
+                    if let Some(origin) = shadowed_origin {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin);
+                            }
+                        }
                     }
                 }
             }
@@ -1515,16 +2467,30 @@ impl<'a> Checker<'a> {
     /// carry `immutable: true`, and `lookup_binding` resolves locals first,
     /// so a shadowing copy is never reported). Field/index places walk to
     /// their base: `cells[0]`, `cfg.tag`, and the plain rebind `cells = ...`
+    fn binding_const_root(&self, st: &FnState, name: &str) -> Option<String> {
+        if let Some(b) = self.lookup_binding(st, name) {
+            if b.immutable {
+                return Some(name.to_string());
+            }
+            if let Some(origin) = &b.non_owned_origin {
+                if let Some(idx) = origin.find("`const ") {
+                    let rest = &origin[idx + 7..];
+                    if let Some(end) = rest.find('`') {
+                        return Some(rest[..end].to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve a write target to its `const` root. Fn-local and file-level
     /// all resolve through here (T22 / issue #37).
     fn const_write_root(&self, st: &FnState, p: &Place) -> Option<String> {
         match &p.kind {
             PlaceKind::Ident(name) => {
-                if self
-                    .lookup_binding(st, name)
-                    .filter(|b| b.immutable)
-                    .is_some()
-                {
-                    return Some(name.clone());
+                if let Some(hit) = self.binding_const_root(st, name) {
+                    return Some(hit);
                 }
                 // #123: a copy of a `const` (`alias := cells`, `let copy =
                 // cells`) points at the same backing storage, so writing
@@ -1537,12 +2503,8 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     if let Some(parent) = st.aliases.get(&n) {
-                        if self
-                            .lookup_binding(st, parent)
-                            .filter(|b| b.immutable)
-                            .is_some()
-                        {
-                            return Some(parent.clone());
+                        if let Some(hit) = self.binding_const_root(st, parent) {
+                            return Some(hit);
                         }
                         stack.push(parent.clone());
                     }
@@ -1550,12 +2512,8 @@ impl<'a> Checker<'a> {
                         if seen.contains(&peer) {
                             continue;
                         }
-                        if self
-                            .lookup_binding(st, &peer)
-                            .filter(|b| b.immutable)
-                            .is_some()
-                        {
-                            return Some(peer);
+                        if let Some(hit) = self.binding_const_root(st, &peer) {
+                            return Some(hit);
                         }
                         stack.push(peer);
                     }
@@ -1597,89 +2555,801 @@ impl<'a> Checker<'a> {
     /// process_call's business — they are NOT rescanned here (no duplicate
     /// diagnostics).
     pub(crate) fn check_closure_const_writes(&mut self, st: &FnState, body: &Block) {
-        let flat = walk::flatten(body);
-        for (stmt, _idx) in &flat.stmts {
-            let mut fnlits = Vec::new();
-            walk::own_fnlits(stmt, &mut fnlits);
-            for flit in fnlits {
-                self.scan_closure_body(st, flit, &HashSet::new());
-            }
-        }
+        self.scan_block_const_writes(st, body, false);
     }
 
-    /// Scan one closure's body (`declared` = names shadowed between the
-    /// const and this scope — enclosing params/locals), then recurse into
-    /// every nested closure found in its statements.
-    fn scan_closure_body(&mut self, st: &FnState, flit: &Expr, declared: &HashSet<String>) {
-        let Expr::FnLit { params, body, .. } = crate::model::unwrap_parens(flit) else {
-            return;
-        };
-        let mut here = declared.clone();
-        here.extend(params.iter().map(|p| p.name.clone()));
-        let flat = walk::flatten(body);
-        for (s, _) in &flat.stmts {
-            if let Stmt::Local(l) = s {
-                here.extend(l.names.iter().cloned());
-            }
-        }
-        for (stmt, _idx) in &flat.stmts {
-            // write sites: rebinds, element/index writes, field stores,
-            // compound assigns (`+=`) — every Assign target root.
-            if let Stmt::Assign { targets, .. } = stmt {
-                for t in targets {
-                    if here.contains(t.root()) {
-                        continue;
-                    }
-                    if let Some(name) = self.const_write_root(st, t) {
-                        self.emit_const_write_error(&name, t.span);
+    fn scan_block_const_writes(&mut self, st: &FnState, body: &Block, check_writes: bool) {
+        let mut cst = st.clone();
+        let flat = walk::flatten_with_results(body, &cst.named_results);
+        cst.last_use = flat.last_use.clone();
+        for (stmt, idx) in &flat.stmts {
+            let idx = *idx;
+            if let Some(evs) = flat.events.get(&idx) {
+                for ev in evs {
+                    match ev {
+                        walk::ScopeEvent::Push => cst.scope_push(),
+                        walk::ScopeEvent::Pop => cst.scope_pop(),
+                        walk::ScopeEvent::SelectRecv { names, chan } => {
+                            let elem = match self.shape_of_expr(&cst, chan) {
+                                TypeShape::Chan(e) => *e,
+                                _ => TypeShape::Unknown,
+                            };
+                            for (i, n) in names.iter().enumerate() {
+                                let shape = if i == 0 {
+                                    elem.clone()
+                                } else {
+                                    TypeShape::Primitive
+                                };
+                                self.define_binding(&mut cst, n, shape, None, false, false);
+                            }
+                        }
+                        walk::ScopeEvent::MatchBind { name, subject } => {
+                            // pr-244 (#243): match-arm `some(v)` bindings
+                            // inherit the subject's const-root state — a
+                            // binding over a const composite freezes like the
+                            // const itself (E3006 surface); a plain binding
+                            // shadows and clears alias/share state.
+                            let mut roots = Vec::new();
+                            collect_ref_roots(subject, &mut roots);
+                            let croot = roots.iter().find_map(|r| {
+                                if self.lookup_binding(&cst, r).is_none() {
+                                    return None;
+                                }
+                                let p = Place {
+                                    kind: PlaceKind::Ident(r.clone()),
+                                    span: subject.span(),
+                                };
+                                self.const_write_root(&cst, &p)
+                            });
+                            if let Some(cr) = &croot {
+                                if name == cr {
+                                    self.define_binding(
+                                        &mut cst,
+                                        name,
+                                        TypeShape::Unknown,
+                                        None,
+                                        true,
+                                        false,
+                                    );
+                                } else {
+                                    cst.aliases.insert(name.to_string(), cr.clone());
+                                    cst.share_edge(name, cr);
+                                }
+                            } else {
+                                self.define_binding(
+                                    &mut cst,
+                                    name,
+                                    TypeShape::Unknown,
+                                    None,
+                                    false,
+                                    false,
+                                );
+                                cst.aliases.remove(*name);
+                                cst.share_clear(name);
+                            }
+                        }
                     }
                 }
             }
-            // `delete(const_map, k)` is a mutation too — the direct form is
-            // checked in process_call; a closure's own delete never gets
-            // there (#123).
-            let mut calls = Vec::new();
-            walk::own_calls(stmt, &mut calls);
-            for cr in &calls {
-                self.check_delete_const(st, cr, &here);
+
+            if check_writes {
+                let mut calls = Vec::new();
+                if let Stmt::For {
+                    kind: hy_syntax::ForKind::Iterate { expr, .. },
+                    ..
+                } = stmt
+                {
+                    walk::expr_calls(expr, &mut calls);
+                } else {
+                    walk::own_calls(stmt, &mut calls);
+                }
+                for cr in &calls {
+                    self.check_delete_const(&cst, cr, &HashSet::new());
+                    self.check_call_const_writes(&cst, cr, &HashSet::new());
+                }
             }
-            // nested closures — a NESTED closure's own locals shadow only at
-            // its level (flatten does not descend into FnLit bodies, so each
-            // level has collected only its own declarations so far).
-            let mut nested = Vec::new();
-            walk::own_fnlits(stmt, &mut nested);
-            for n in nested {
-                self.scan_closure_body(st, n, &here);
+
+            match stmt {
+                Stmt::Local(l) => {
+                    self.process_closure_const_local(&mut cst, l);
+                }
+                Stmt::Assign {
+                    targets,
+                    op,
+                    values,
+                    ..
+                } => {
+                    let is_const_write: Vec<bool> = targets
+                        .iter()
+                        .map(|t| match self.const_write_root(&cst, t) {
+                            Some(name) => {
+                                if check_writes {
+                                    self.emit_const_write_error(&name, t.span);
+                                }
+                                true
+                            }
+                            None => false,
+                        })
+                        .collect();
+
+                    if *op == AssignOp::Assign && targets.len() == values.len() {
+                        let rhs_info: Vec<(TypeShape, Option<hy_syntax::TypeExpr>)> = values
+                            .iter()
+                            .map(|v| (self.shape_of_expr(&cst, v), self.ty_of_expr(&cst, v)))
+                            .collect();
+                        for (i, ((t, v), (shape, ty))) in targets
+                            .iter()
+                            .zip(values.iter())
+                            .zip(rhs_info)
+                            .enumerate()
+                        {
+                            if is_const_write[i] {
+                                continue;
+                            }
+                            if let PlaceKind::Ident(name) = &t.kind {
+                                if let Some(b) = cst.env_lookup_mut(name) {
+                                    if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
+                                        b.shape = shape;
+                                    }
+                                    if ty.is_some() || b.ty.is_none() {
+                                        b.ty = ty;
+                                    }
+                                }
+                                cst.aliases.remove(name);
+                                cst.share_clear(name);
+                                self.record_may_share(&mut cst, name, v);
+                                self.record_alias(&mut cst, name, v);
+                            }
+                        }
+                        self.record_assign_borrow_aliases(&mut cst, targets, *op, values);
+                    }
+                }
+                Stmt::For { kind, .. } => match kind {
+                    hy_syntax::ForKind::Iterate { vars, expr } => {
+                        let is_chan =
+                            matches!(self.shape_of_expr(&cst, expr), TypeShape::Chan(_));
+                        let shapes = self.iterate_var_shapes(&cst, expr, vars.len());
+                        for (name, shape) in vars.iter().zip(shapes) {
+                            let is_ref = shape.is_reference_alias() || shape.is_handle();
+                            let carries = self.shape_may_share(&shape);
+                            self.define_binding(&mut cst, name, shape, None, false, false);
+                            if !is_chan {
+                                let mut roots = Vec::new();
+                                collect_ref_roots(expr, &mut roots);
+                                for root in roots {
+                                    if self.lookup_binding(&cst, &root).is_some() {
+                                        if is_ref {
+                                            cst.aliases.insert(name.clone(), root.clone());
+                                        }
+                                        if carries && self.binding_may_share(&cst, &root) {
+                                            cst.share_edge(name, &root);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    hy_syntax::ForKind::Range { var, .. } => {
+                        self.define_binding(&mut cst, var, TypeShape::Primitive, None, false, false);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+
+            let mut fnlits = Vec::new();
+            walk::own_fnlits(stmt, &mut fnlits);
+            for flit in fnlits {
+                let mut merged = cst.clone();
+                // Also preserve any top-level alias/share edges from the completed
+                // enclosing state `st` for bindings that are not shadowed in an
+                // inner scope of `merged` (covers post-closure rebinds to a const).
+                for (k, v) in &st.aliases {
+                    if !merged.scopes.iter().any(|s| s.contains_key(k)) {
+                        merged.aliases.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+                for (k, peers) in &st.may_share {
+                    if !merged.scopes.iter().any(|s| s.contains_key(k)) {
+                        for p in peers {
+                            if !merged.scopes.iter().any(|s| s.contains_key(p)) {
+                                merged.share_edge(k, p);
+                            }
+                        }
+                    }
+                }
+                self.scan_closure_body(&mut merged, flit, &HashSet::new());
             }
         }
     }
 
-    /// HYB-E3006 for `delete(root, ...)`: a delete mutates the collection,
-    /// so a `const` root is frozen exactly like an index write (T22).
-    /// `declared` is empty at direct call sites (no closure params apply —
-    /// enclosing scope shadowing falls out of the locals-first lookup).
+    /// Scan one closure's body with its own lexical scope and parameters,
+    /// then recurse into every nested closure found in its statements.
+    fn scan_closure_body(&mut self, st: &mut FnState, flit: &Expr, _declared: &HashSet<String>) {
+        let Expr::FnLit {
+            params,
+            results,
+            body,
+            ..
+        } = crate::model::unwrap_parens(flit)
+        else {
+            return;
+        };
+        // pr-213 architecture: params live in their own scope and SHADOW
+        // outer names; the body is scanned by the SAME ordered single-pass
+        // walker the driver uses (locals define in order, assigns check
+        // const roots and record rebind edges, scope events nest) — a
+        // two-pass shape cannot model pre-shadow order (the
+        // closure_pre_shadow pin) or rebind-then-write (the
+        // closure_local_alias pin).
+        st.scope_push();
+        for p in params {
+            let shape = self.shape_of_type(&p.ty);
+            self.define_binding(st, &p.name, shape, Some(p.ty.clone()), false, false);
+        }
+        for r in results {
+            if let Some(name) = &r.name {
+                if name != "_" {
+                    let shape = self.shape_of_type(&r.ty);
+                    self.define_binding(st, name, shape, Some(r.ty.clone()), false, false);
+                }
+            }
+        }
+        self.scan_block_const_writes(st, body, true);
+        st.scope_pop();
+    }
+
+    /// pr-213 (#212): inside closures, a `may_share`-shaped local whose
+    /// initializer reads the storage of a `const` root is itself frozen
+    /// (E3006 surface) — the same-stmt share-move form of a const write.
+    fn process_closure_const_local(&self, st: &mut FnState, l: &LocalDecl) {
+        for (name, value) in l.names.iter().zip(l.values.iter()) {
+            let inferred = self.shape_of_expr(st, value);
+            let (shape, ty) = match (&l.ty, inferred) {
+                (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
+                (_, inferred) => (inferred, self.ty_of_expr(st, value).or_else(|| l.ty.clone())),
+            };
+            let immutable = l.kind == LocalKind::Const;
+            let shadowed_const = self.shape_may_share(&shape)
+                && self.value_reads_storage_of(st, value, name)
+                && self
+                    .const_write_root(
+                        st,
+                        &Place {
+                            kind: PlaceKind::Ident(name.clone()),
+                            span: value.span(),
+                        },
+                    )
+                    .is_some();
+            self.define_binding(st, name, shape, ty, immutable || shadowed_const, false);
+            if move_operand_ident(value).is_none() {
+                self.record_may_share(st, name, value);
+                self.record_alias(st, name, value);
+            }
+        }
+    }
+
     fn check_delete_const(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
         let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) else {
             return;
         };
-        if name.as_str() != "delete" {
+        if name.as_str() != "delete" && name.as_str() != "copy" {
             return;
         }
         let Some(first) = cr.args.first() else {
             return;
         };
-        let Some(root) = first.value.root_ident() else {
-            return;
-        };
-        if declared.contains(root) {
-            return;
-        }
-        let place = Place {
-            kind: PlaceKind::Ident(root.to_string()),
-            span: first.value.span(),
-        };
-        if let Some(hit) = self.const_write_root(st, &place) {
+        if let Some(hit) = self.const_arg_root(st, &first.value, declared) {
             self.emit_const_write_error(&hit, first.value.span());
+        }
+    }
+
+    /// Resolve a call argument expression to a `const` root when the argument
+    /// passes mutable reference storage (map, slice, pointer, `&const_val`, or
+    /// a struct/array carrying reference fields) backed by that `const` (#188).
+    fn const_arg_root(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+        declared: &HashSet<String>,
+    ) -> Option<String> {
+        let inner = crate::model::unwrap_parens(expr);
+        if let Some(addr_op) = as_addr_of(inner) {
+            let root = addr_op.root_ident()?;
+            if declared.contains(root) {
+                return None;
+            }
+            let place = Place {
+                kind: PlaceKind::Ident(root.to_string()),
+                span: expr.span(),
+            };
+            return self.const_write_root(st, &place);
+        }
+        let arg_shape = self.shape_of_expr(st, inner);
+        if !(self.shape_may_share(&arg_shape) || matches!(arg_shape, TypeShape::Unknown)) {
+            return None;
+        }
+        let mut roots = Vec::new();
+        collect_ref_roots(inner, &mut roots);
+        if roots.is_empty() {
+            if let Some(r) = inner.root_ident() {
+                roots.push(r.to_string());
+            }
+        }
+        let mut move_ops = Vec::new();
+        crate::model::collect_move_operands(inner, &mut move_ops);
+        for (op, _) in move_ops {
+            let root = match op {
+                Expr::Ident { name, .. } => Some(name.as_str()),
+                Expr::Field { .. } => op.root_ident(),
+                _ => None,
+            };
+            if let Some(r) = root {
+                roots.push(r.to_string());
+            }
+        }
+        for root in roots {
+            if declared.contains(&root) {
+                continue;
+            }
+            let place = Place {
+                kind: PlaceKind::Ident(root),
+                span: expr.span(),
+            };
+            if let Some(hit) = self.const_write_root(st, &place) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    /// Issue #188: interprocedural T22 enforcement (`HYB-E3006`). When a
+    /// `const` composite with reference storage (or `&const_val`) is passed to
+    /// a function or closure that mutates that parameter (via index/field
+    /// store, `delete`, `copy`, channel send, task spawn, or transitive call),
+    /// reject the call site with `HYB-E3006` (`cannot write to const`).
+    /// Read-only helpers (`len(shared_map)`, `count(shared_map)`) do not
+    /// mutate the parameter and remain accepted.
+    fn check_call_const_writes(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
+        let callee = crate::model::unwrap_parens(cr.callee);
+        if let Expr::Ident { name, .. } = callee {
+            if name == "delete" || name == "copy" || A3_PURE_FNS.contains(&name.as_str()) {
+                return;
+            }
+        }
+        let mut hits: Vec<(String, Span)> = Vec::new();
+        if let Expr::Field {
+            base,
+            name: method_name,
+            ..
+        } = callee
+        {
+            let recv_base = match self.shape_of_expr(st, base) {
+                TypeShape::Struct(Some(s)) => Some(s),
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Struct(Some(s)) => Some(s),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(rname) = recv_base {
+                if let Some(decl) = self
+                    .method_decls
+                    .get(&(rname, method_name.clone()))
+                    .copied()
+                {
+                    if let Some(r) = &decl.receiver {
+                        let ptr_recv = matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
+                        let recv_const = if ptr_recv {
+                            base.root_ident()
+                                .filter(|root| !declared.contains(*root))
+                                .and_then(|root| {
+                                    self.const_write_root(
+                                        st,
+                                        &Place {
+                                            kind: PlaceKind::Ident(root.to_string()),
+                                            span: base.span(),
+                                        },
+                                    )
+                                })
+                        } else {
+                            self.const_arg_root(st, base, declared)
+                        };
+                        if let Some(const_name) = recv_const {
+                            if self.fn_mutates_const_param(decl, &r.name, 0) {
+                                hits.push((const_name, base.span()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (i, a) in cr.args.iter().enumerate() {
+            let Some(const_name) = self.const_arg_root(st, &a.value, declared) else {
+                continue;
+            };
+            let mutates = match callee {
+                Expr::Ident { name, .. } => {
+                    if declared.contains(name) {
+                        true
+                    } else if let Some(decl) = self.fns.get(name) {
+                        match decl.params.get(i) {
+                            Some(p) => self.fn_mutates_const_param(decl, &p.name, 0),
+                            None => true,
+                        }
+                    } else if self
+                        .lookup_binding(st, name)
+                        .map(|b| matches!(b.shape, TypeShape::Closure))
+                        .unwrap_or(false)
+                    {
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Expr::Field {
+                    base,
+                    name: method_name,
+                    ..
+                } => {
+                    let is_pkg = match crate::model::unwrap_parens(base) {
+                        Expr::Ident { name: pkg, .. } => {
+                            self.lookup_binding(st, pkg).is_none() && self.known_package(pkg)
+                        }
+                        _ => false,
+                    };
+                    if is_pkg {
+                        false
+                    } else if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
+                        true
+                    } else {
+                        let recv_base = match self.shape_of_expr(st, base) {
+                            TypeShape::Struct(Some(s)) => Some(s),
+                            TypeShape::Pointer(inner) => match *inner {
+                                TypeShape::Struct(Some(s)) => Some(s),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(decl) = recv_base.and_then(|rb| {
+                            self.method_decls.get(&(rb, method_name.clone())).copied()
+                        }) {
+                            match decl.params.get(i) {
+                                Some(p) => self.fn_mutates_const_param(decl, &p.name, 0),
+                                None => true,
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                }
+                Expr::FnLit { params, body, .. } => match params.get(i) {
+                    Some(p) => {
+                        let mut aliases = HashSet::new();
+                        aliases.insert(p.name.clone());
+                        self.block_mutates_const_param(body, &mut aliases, 0)
+                    }
+                    None => true,
+                },
+                _ => false,
+            };
+            if mutates {
+                hits.push((const_name, a.value.span()));
+            }
+        }
+        for (const_name, span) in hits {
+            self.emit_const_write_error(&const_name, span);
+        }
+    }
+
+    fn fn_mutates_const_param(&self, decl: &FnDecl, param: &str, depth: usize) -> bool {
+        if depth > 4 {
+            return true;
+        }
+        let Some(body) = &decl.body else {
+            return false;
+        };
+        let mut aliases = HashSet::new();
+        aliases.insert(param.to_string());
+        self.block_mutates_const_param(body, &mut aliases, depth)
+    }
+
+    fn block_mutates_const_param(
+        &self,
+        block: &Block,
+        aliases: &mut HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        for s in &block.stmts {
+            if self.stmt_mutates_const_param(s, aliases, depth) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn expr_reaches_const_aliases(expr: &Expr, aliases: &HashSet<String>) -> bool {
+        let inner = crate::model::unwrap_parens(expr);
+        if let Some(addr_op) = as_addr_of(inner) {
+            if let Some(r) = addr_op.root_ident() {
+                if aliases.contains(r) {
+                    return true;
+                }
+            }
+        }
+        if let Some(r) = inner.root_ident() {
+            if aliases.contains(r) {
+                return true;
+            }
+        }
+        let mut roots = Vec::new();
+        collect_ref_roots(inner, &mut roots);
+        roots.iter().any(|r| aliases.contains(r))
+    }
+
+    fn stmt_mutates_const_param(
+        &self,
+        stmt: &Stmt,
+        aliases: &mut HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        match stmt {
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                for t in targets {
+                    if matches!(t.kind, PlaceKind::Index { .. } | PlaceKind::Field { .. })
+                        && aliases.contains(t.root())
+                    {
+                        return true;
+                    }
+                }
+                for v in values {
+                    if self.expr_fnlit_mutates_const_param(v, aliases, depth) {
+                        return true;
+                    }
+                }
+                if targets.len() == values.len() {
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            if Self::expr_reaches_const_aliases(v, aliases) {
+                                aliases.insert(name.clone());
+                            } else {
+                                aliases.remove(name);
+                            }
+                        }
+                    }
+                }
+            }
+            Stmt::Local(l) => {
+                for v in &l.values {
+                    if self.expr_fnlit_mutates_const_param(v, aliases, depth) {
+                        return true;
+                    }
+                }
+                if l.values.is_empty() {
+                    for name in &l.names {
+                        aliases.remove(name);
+                    }
+                } else if l.names.len() == l.values.len() {
+                    for (name, v) in l.names.iter().zip(l.values.iter()) {
+                        if Self::expr_reaches_const_aliases(v, aliases) {
+                            aliases.insert(name.clone());
+                        } else {
+                            aliases.remove(name);
+                        }
+                    }
+                }
+            }
+            Stmt::Send { value, .. } => {
+                if Self::expr_reaches_const_aliases(value, aliases) {
+                    return true;
+                }
+            }
+            Stmt::Task { callee, args, span } => {
+                if args
+                    .iter()
+                    .any(|a| Self::expr_reaches_const_aliases(&a.value, aliases))
+                {
+                    return true;
+                }
+                let cr = CallRef {
+                    callee,
+                    args,
+                    span: *span,
+                };
+                if self.call_mutates_const_param(&cr, aliases, depth) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        let mut calls = Vec::new();
+        walk::own_calls(stmt, &mut calls);
+        for cr in &calls {
+            if self.call_mutates_const_param(cr, aliases, depth) {
+                return true;
+            }
+        }
+        match stmt {
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                let mut branch_aliases = aliases.clone();
+                if let Some(i) = init {
+                    if self.stmt_mutates_const_param(i, &mut branch_aliases, depth) {
+                        return true;
+                    }
+                }
+                let mut then_aliases = branch_aliases.clone();
+                if self.block_mutates_const_param(then, &mut then_aliases, depth) {
+                    return true;
+                }
+                if let Some(o) = otherwise {
+                    let mut else_aliases = branch_aliases;
+                    if self.stmt_mutates_const_param(o, &mut else_aliases, depth) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::For { body, .. }
+            | Stmt::Managed { body, .. }
+            | Stmt::Block { block: body, .. } => {
+                let mut body_aliases = aliases.clone();
+                if self.block_mutates_const_param(body, &mut body_aliases, depth) {
+                    return true;
+                }
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    let mut arm_aliases = aliases.clone();
+                    if self.block_mutates_const_param(&arm.body, &mut arm_aliases, depth) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    if let hy_syntax::SelectArmKind::Send { value, .. } = &arm.kind {
+                        if Self::expr_reaches_const_aliases(value, aliases) {
+                            return true;
+                        }
+                    }
+                    let mut arm_aliases = aliases.clone();
+                    if self.block_mutates_const_param(&arm.body, &mut arm_aliases, depth) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn expr_fnlit_mutates_const_param(
+        &self,
+        e: &Expr,
+        aliases: &HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        match e {
+            Expr::FnLit { params, body, .. } => {
+                let mut inner_aliases = aliases.clone();
+                for p in params {
+                    inner_aliases.remove(&p.name);
+                }
+                if inner_aliases.is_empty() {
+                    false
+                } else {
+                    self.block_mutates_const_param(body, &mut inner_aliases, depth)
+                }
+            }
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. }
+            | Expr::Unary { operand: inner, .. }
+            | Expr::AddrOf { operand: inner, .. } => {
+                self.expr_fnlit_mutates_const_param(inner, aliases, depth)
+            }
+            Expr::Call { callee, args, .. } => {
+                self.expr_fnlit_mutates_const_param(callee, aliases, depth)
+                    || args
+                        .iter()
+                        .any(|a| self.expr_fnlit_mutates_const_param(&a.value, aliases, depth))
+            }
+            Expr::Index { base, index, .. }
+            | Expr::Binary {
+                lhs: base,
+                rhs: index,
+                ..
+            } => {
+                self.expr_fnlit_mutates_const_param(base, aliases, depth)
+                    || self.expr_fnlit_mutates_const_param(index, aliases, depth)
+            }
+            _ => false,
+        }
+    }
+
+    fn call_mutates_const_param(
+        &self,
+        cr: &CallRef,
+        aliases: &HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        let arg_reaches_alias =
+            |a: &hy_syntax::CallArg| Self::expr_reaches_const_aliases(&a.value, aliases);
+        match crate::model::unwrap_parens(cr.callee) {
+            Expr::Ident { name, .. } => {
+                if name == "delete" || name == "copy" {
+                    return cr.args.first().map(&arg_reaches_alias).unwrap_or(false);
+                }
+                if A3_PURE_FNS.contains(&name.as_str()) {
+                    return false;
+                }
+                if let Some(decl) = self.fns.get(name) {
+                    for (i, a) in cr.args.iter().enumerate() {
+                        if !arg_reaches_alias(a) {
+                            continue;
+                        }
+                        match decl.params.get(i) {
+                            Some(p) => {
+                                if self.fn_mutates_const_param(decl, &p.name, depth + 1) {
+                                    return true;
+                                }
+                            }
+                            None => return true,
+                        }
+                    }
+                    return false;
+                }
+                cr.args.iter().any(&arg_reaches_alias)
+            }
+            Expr::Field {
+                base,
+                name: method_name,
+                ..
+            } => {
+                if let Expr::Ident { name: pkg, .. } = &**base {
+                    if A3_PURE_PKGS.contains(&pkg.as_str()) {
+                        return false;
+                    }
+                }
+                let matching: Vec<&FnDecl> = self
+                    .method_decls
+                    .iter()
+                    .filter(|((_, m), _)| m == method_name)
+                    .map(|(_, d)| *d)
+                    .collect();
+                if Self::expr_reaches_const_aliases(base, aliases)
+                    && (matching.is_empty()
+                        || matching.iter().any(|d| {
+                            d.receiver
+                                .as_ref()
+                                .is_some_and(|r| self.fn_mutates_const_param(d, &r.name, depth + 1))
+                        }))
+                {
+                    return true;
+                }
+                if !matching.is_empty() {
+                    for (i, a) in cr.args.iter().enumerate() {
+                        if !arg_reaches_alias(a) {
+                            continue;
+                        }
+                        if matching.iter().any(|d| match d.params.get(i) {
+                            Some(p) => self.fn_mutates_const_param(d, &p.name, depth + 1),
+                            None => true,
+                        }) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                cr.args.iter().any(&arg_reaches_alias)
+            }
+            _ => cr.args.iter().any(&arg_reaches_alias),
         }
     }
 
@@ -1705,7 +3375,38 @@ impl<'a> Checker<'a> {
     // Returns (LOAN-ESCAPE + move marking)
     // -----------------------------------------------------------------------
 
-    pub(crate) fn process_return(&mut self, st: &mut FnState, values: &[Expr]) {
+    pub(crate) fn process_return(&mut self, st: &mut FnState, values: &[Expr], span: Span) {
+        if values.is_empty() {
+            // Bare `return` in a function with named results implicitly
+            // returns every named result binding (`st.named_results`).
+            for name in st.named_results.clone() {
+                let is_loan_escape = st.borrow_bindings.contains(&name)
+                    || st
+                        .loans
+                        .iter()
+                        .any(|l| matches!(&l.target, LoanTarget::MapSlot { binding, .. } if binding == &name))
+                    || st
+                        .env
+                        .get(&name)
+                        .is_some_and(|b| matches!(b.shape, TypeShape::BorrowHandle(_)));
+                if is_loan_escape {
+                    let msg = "a borrow cannot be returned from a function".to_string();
+                    let notes = vec![
+                        format!(
+                            "`{}` holds a loan whose window ends when this function exits — Tier 0 keeps every loan function-local (O2): that is why there are no lifetime annotations to write",
+                            name
+                        ),
+                        "make the mutation a method on the owner so the loan stays in one frame, return the index and let the caller do the access, or return a copy (Go-heap reads are copies, O9)".to_string(),
+                        "a lifetime parameter is NOT offered on purpose: the language has none".to_string(),
+                    ];
+                    self.diags.push(
+                        Diagnostic::error("HYB-E3104", self.path.clone(), span, msg)
+                            .with_notes(notes),
+                    );
+                }
+            }
+            return;
+        }
         // N1: `return nil` under a non-nilable declared result is a compile
         // error (HYB-E4001). `error` results resolve to Unknown today, so
         // `return 0, nil` stays legal (the nil's target did not resolve).
@@ -1724,8 +3425,18 @@ impl<'a> Checker<'a> {
             // nils (`return jobT{m: nil}`) carries its own type context
             // (HYB-E4001).
             self.check_composite_nils(st, v);
+            let is_bound_borrow = match unwrap_parens(v) {
+                Expr::Ident { name, .. } => {
+                    st.borrow_bindings.contains(name)
+                        || st
+                            .loans
+                            .iter()
+                            .any(|l| matches!(&l.target, LoanTarget::MapSlot { binding, .. } if binding == name))
+                }
+                _ => false,
+            };
             // O2/LOAN-ESCAPE: a borrow returned from a function
-            if as_addr_of(v).is_some() || contains_addr_of_in_literal(v) {
+            if as_addr_of(v).is_some() || contains_addr_of_in_literal(v) || is_bound_borrow {
                 let msg = "a borrow cannot be returned from a function".to_string();
                 let notes = vec![
                     format!(
@@ -1894,10 +3605,20 @@ fn collect_capture_idents_expr(
                 out.push(name.clone());
             }
         }
-        Expr::FnLit { params, body, .. } => {
+        Expr::FnLit {
+            params,
+            results,
+            body,
+            ..
+        } => {
             let mut nested = bound.clone();
             for p in params {
                 nested.insert(p.name.clone());
+            }
+            for r in results {
+                if let Some(name) = &r.name {
+                    nested.insert(name.clone());
+                }
             }
             collect_capture_idents_block(body, &mut nested, out);
         }
@@ -2005,8 +3726,8 @@ impl<'a> Checker<'a> {
         for (sname, fields) in decls {
             for (fname, fty) in fields {
                 let shape = self.shape_of_type(&fty);
-                match &shape {
-                    TypeShape::BorrowHandle(_) => {
+                match field_borrow_kind(&shape) {
+                    Some("borrow-handle") => {
                         let msg = format!(
                             "struct field `{}.{}` has borrow-handle type `{}`",
                             sname,
@@ -2023,7 +3744,7 @@ impl<'a> Checker<'a> {
                                 .with_notes(notes),
                         );
                     }
-                    TypeShape::Pointer(inner) if !matches!(**inner, TypeShape::Atomic) => {
+                    Some("pointer") => {
                         // O12's own example (`cur &node`): pointer fields are
                         // borrows — store an id or the value instead.
                         let msg = format!(
@@ -2075,7 +3796,18 @@ impl<'a> Checker<'a> {
             managed_taint: false,
             moved: None,
             non_owned_origin,
+            slot_loan: false,
         }
+    }
+}
+
+fn field_borrow_kind(shape: &TypeShape) -> Option<&'static str> {
+    match shape {
+        TypeShape::BorrowHandle(_) => Some("borrow-handle"),
+        TypeShape::Pointer(inner) if !matches!(**inner, TypeShape::Atomic) => Some("pointer"),
+        TypeShape::Slice(elem) | TypeShape::Array(elem) => field_borrow_kind(elem),
+        TypeShape::Map(k, v) => field_borrow_kind(k).or_else(|| field_borrow_kind(v)),
+        _ => None,
     }
 }
 
@@ -2090,6 +3822,9 @@ mod tests {
 
     #[test]
     fn multi_return_assign_preserves_second_result_shape_and_rejects_spawn() {
+        // Fixture seam-fix for #134: `n` is only stored to (a bare `=`
+        // target is not a Go read), so `_ = n` keeps the snippet a valid
+        // program and the E3001 spawn check first.
         let r = check(
             "fn make_pair() (int, map[string]int) {\n\
                m := map[string]int{\"init\": 0}\n\
@@ -2100,6 +3835,7 @@ mod tests {
                m := map[string]int{\"init\": 0}\n\
                n := 0\n\
                n, m = make_pair()\n\
+               _ = n\n\
                task worker(m)\n\
              }",
         );
@@ -2300,6 +4036,155 @@ mod tests {
                const local_k = 7\n\
                task worker(move k)\n\
                task worker(move local_k)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn param_may_share_peer_survived_inner_shadow_rejects_with_e3004() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder, done chan int) {\n\
+               h.m[\"worker\"] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn outer(h holder, done chan int) {\n\
+               h2 := h\n\
+               if true {\n\
+                 h := holder{m: map[string]int{\"fresh\": 0}}\n\
+                 _ = h\n\
+                 task worker(move h2, done)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 when moving parameter may-share peer after inner shadow, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn param_may_share_peer_survived_parallel_redefine_rejects_with_e3004() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder, done chan int) {\n\
+               h.m[\"worker\"] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn outer(h holder, done chan int) {\n\
+               h2 := h\n\
+               h, tag := holder{m: map[string]int{\"fresh\": 0}}, 1\n\
+               _ = h\n\
+               _ = tag\n\
+               task worker(move h2, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 when moving parameter may-share peer after multi-define, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn multi_return_define_from_param_rejects_may_share_move_with_e3004() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn alias_pair(h holder) (holder, bool) {\n\
+               return h, true\n\
+             }\n\
+             fn worker(h holder, done chan int) {\n\
+               h.m[\"worker\"] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn outer(h holder, done chan int) {\n\
+               h2, ok := alias_pair(h)\n\
+               _ = ok\n\
+               task worker(move h2, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 for multi-return may-share peer of parameter, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn multi_return_assign_from_param_rejects_may_share_move_with_e3004() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn alias_pair(h holder) (holder, bool) {\n\
+               return h, true\n\
+             }\n\
+             fn worker(h holder, done chan int) {\n\
+               h.m[\"worker\"] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn outer(h holder, done chan int) {\n\
+               h2 := holder{m: map[string]int{\"fresh\": 0}}\n\
+               ok := false\n\
+               h2, ok = alias_pair(h)\n\
+               _ = ok\n\
+               task worker(move h2, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 for multi-return rebind may-share peer of parameter, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn comma_ok_map_lookup_on_param_rejects_move_with_e3004() {
+        let r = check(
+            "fn worker(m map[string]int, done chan int) {\n\
+               m[\"worker\"] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn outer(buckets map[string]map[string]int, done chan int) {\n\
+               m, ok := buckets[\"k\"]\n\
+               _ = ok\n\
+               task worker(move m, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 for comma-ok map lookup on non-owned parameter, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn multi_return_value_only_args_accept_move_control() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn pair(x int) (int, bool) {\n\
+               return x, true\n\
+             }\n\
+             fn make_holder(seed int) (holder, bool) {\n\
+               return holder{m: map[string]int{\"k\": seed}}, true\n\
+             }\n\
+             fn worker(h holder, done chan int) {\n\
+               h.m[\"worker\"] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn outer(seed int, done chan int) {\n\
+               n, ok1 := pair(42)\n\
+               _ = n\n\
+               _ = ok1\n\
+               h2, ok2 := make_holder(seed)\n\
+               _ = ok2\n\
+               task worker(move h2, done)\n\
              }",
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
