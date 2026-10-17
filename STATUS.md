@@ -1,12 +1,12 @@
 # STATUS (for the human — 15 lines max)
 
-- Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-13: **both P0 queue leaders landed (#306, #374) + the first wildcard spike is race-verified (PR #379, W-015)**
-- **#306 landed** (duongynhi000005-oss, fixes #305): if-init eval order aligned with go/spec + same-stmt/package-handle consume & loans (E3003 A1b/A7, E3101 A2, E3102 A3) — 7/7 issue repros reject with exact family codes, 5/5 legal twins accept; loans.rs merge conflict resolved preserving both root_span and main's check_call_const_writes
-- **#374 landed** (Anekenonso, fixes **#361 P0**): wrapped-move expressions (`box{m: move m}.m`, `[]map[string]int{move m}[0]`, `(move s)[0:2]`), GC-field moves through wrappers (E3004 O5.4), may-share rebind origin materialization, and const-composite `move` now report precise E3006 — 4/4 previously-accepting shapes now reject; 5/5 positive controls clean
-- **W-015 SPIKE (PR #379, branch spike/w015-split-fork-join)**: `split s at mid into left, right { ... }` blocks — 3-index full slice expressions parse; E3105 exclusivity + E3106 split-out; forks are fresh roots (no alias/may_share edges); disjointness = Go's own capacity-clip guarantee, zero runtime
-- **Race verification (the M1 evidence)**: emitted Go under `go run -race` x3 — ZERO reports, output `1 14`; corpus 53 + 5 unit pins; VERDICTS.md conflict markers from cbe3f4f resolved (both registration rows kept)
-- Suites at close: cargo workspace **596/0** · corpus **53/53** · differential **FULL (16+37)** · main CI green on the #374 merge (8a114b67)
-- Wildcard M1 verdicts still due **2026-11-01** in discussion #365 — W-015 now has a running artifact to weigh; W-005 (message isolation) is the recommended next spike
-- Wave-2 landing queue continues: #230 (nested closures), #251 (named results), #244, #240/#245, #247, #296, #311/#302, #234, then the const family and emit-lowering batch; new arrivals #366–#377 (sarkermy1125-ship-it tools/fuzz batch), #373 (loop fresh-copy), #364 (docs)
-- Standing work: old-queue rebase assists (#67/#88/#93/#106/#197/#198/#99/#223), tools/kaggle batch, CI registration checks (#325/#330/#333)
-- Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
+- Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-15: 8 parallel-agent landings (#244 #240 #296 #234 #312 #319 #398 #410), 13 credit closes, cargo 675/0, corpus 55/55, differential FULL
+- Landing highlights: #244 match some(v)/some(x) Tier-0 tracking (closes #243 P0); #240 copy() 4-hole family (dup-pair credit to #245); #234 loop-backedge lexical shadow scoping; #398 field-store may_share (reopened after a wrong close, then landed); #410 unpack/comma-ok param peers
+- MAIN BUG fixed: VERDICTS.md carried a live conflict block from cbe3f4f (ea6c62b) — unblocked #387's guard leg
+- Method note: parallel agents triage/validate, maintainer re-verifies on CURRENT main before every merge (caught: #401/#408 subsumed by newer landings; #398 wrongly closed then reopened+landed); stale-based takes are never force-merged
+- Next queue: **#395 (fixes #393) leads** — both live shapes re-confirmed on current main, needs the wholesale-splice recipe (base 8 merges old; worklog has it); then validated READY: #420 (receive E2008), #424 (for-in E2009 + void-call port), #422 XOR #418 (defer; #418 covers #415+#438), emit batch #298/#285/#283/#280/#289/#287/#247, const #208/#236/#290/#235, tools batch #364/#383/#388/#403/#316/#325/#333/#387 + #423/#299
+- NEEDS-INTEGRATION (recipes in worklog): #288/#300/#297/#291/#232 (const ports), #242 (loans/closures rebase); closes pending: #413/#414/#426/#427 (credit-noted); #402 NOT READY (foreign-syntax fixture — author should rewrite)
+- Old-queue recon banked (2-e): 34 REVIVE-EXTRACT with graft points, 3 rebase-assists (#262/#267/#270 — #270's base IS current main), 2 docs-trivial (#275/#314)
+- Wildcard spike PRs #405/#381/#384/#370/#416/#336 await recon + ledger attach; M1 verdicts land 2026-11-01 in #365 (artifacts: #379 W-015, #412 W-005 CONDITIONAL)
+- Standing: old-queue rebase assists, tools/kaggle batch, CI approvals stay per-landing (1 approve per landing, 8 this session); last review gate G3 PASSED 2026-10-13
+- PR #267 closeout: current-main integration validated (56 corpus files; parse_all 4/4 passed; atomic-pointer fixture renumbered to 56); remote CI and maintainer merge remain external gates.

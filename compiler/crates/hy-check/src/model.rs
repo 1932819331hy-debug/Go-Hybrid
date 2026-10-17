@@ -240,6 +240,13 @@ pub(crate) struct FnState {
     /// return-site nil checks). Empty for closure bodies (fn literals
     /// carry no result types on the AST surface yet).
     pub result_shapes: Vec<TypeShape>,
+    /// Declared named result bindings (`fn f() (out map[string]int)`), in
+    /// signature order. A bare `return` reads and returns each named result.
+    pub named_results: Vec<String>,
+    /// Bindings currently holding a function-local `&...` borrow (or a
+    /// composite literal containing `&...`), for O2 `LOAN-ESCAPE` on
+    /// named-result / variable returns (`out = &x; return` / `return out`).
+    pub borrow_bindings: HashSet<String>,
 }
 
 impl FnState {
@@ -262,12 +269,31 @@ impl FnState {
                 inner_root_moves.push((root, mv));
             }
         }
+        let popped_scope = self.scopes.last().cloned().unwrap_or_default();
         for a in self.may_share.keys() {
             if let Some(mv) = self.env_lookup(a).and_then(|b| b.moved.clone()) {
                 for peer in self.share_group(a) {
                     let root = crate::freeze::resolve_alias(self, &peer);
-                    inner_root_moves.push((peer, mv.clone()));
-                    inner_root_moves.push((root, mv.clone()));
+                    if !popped_scope.contains_key(&peer) {
+                        inner_root_moves.push((peer, mv.clone()));
+                    }
+                    if !popped_scope.contains_key(&root) {
+                        inner_root_moves.push((root, mv.clone()));
+                    }
+                }
+            }
+        }
+        // Preserve may-share relationships established inside the block between
+        // outer bindings that were NOT shadowed in `popped_scope` (#238: e.g.
+        // `if true { copy(dst, src) }` or `if true { tmp := src; copy(dst, tmp) }`).
+        let mut inner_outer_shares: Vec<(String, String)> = Vec::new();
+        for a in self.may_share.keys() {
+            if popped_scope.contains_key(a) {
+                continue;
+            }
+            for b in self.share_group(a) {
+                if !popped_scope.contains_key(&b) {
+                    inner_outer_shares.push((a.clone(), b));
                 }
             }
         }
@@ -276,11 +302,21 @@ impl FnState {
             self.aliases = outer_aliases;
             if let Some(outer_share) = self.share_scopes.pop() {
                 self.may_share = outer_share;
+                for (a, b) in inner_outer_shares {
+                    self.share_edge(&a, &b);
+                }
             }
             for (root, mv) in inner_root_moves {
                 if let Some(br) = self.env_lookup_mut(&root) {
                     if br.moved.is_none() {
-                        br.moved = Some(mv);
+                        br.moved = Some(mv.clone());
+                    }
+                }
+                for peer in self.share_group(&root) {
+                    if let Some(bp) = self.env_lookup_mut(&peer) {
+                        if bp.moved.is_none() {
+                            bp.moved = Some(mv.clone());
+                        }
                     }
                 }
             }
@@ -604,6 +640,55 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
         Expr::SliceLit { items, .. } => {
             for it in items {
                 collect_ref_roots(it, out);
+            }
+        }
+        Expr::AddrOf { operand, .. } => collect_ref_roots(operand, out),
+        Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        } => collect_ref_roots(operand, out),
+        _ => {}
+    }
+}
+
+/// Collect root identifiers that are explicitly borrowed via address-of (`&x`) inside composite literals
+/// (e.g. `[]*T{&x}`, `map[K]*T{"k": &x}`, nested composite literals).
+/// Ordinary calls, binary operations, indexing, and fields do not propagate borrow roots into results.
+pub(crate) fn collect_addr_of_roots(e: &Expr, out: &mut Vec<String>) {
+    match unwrap_parens(e) {
+        Expr::AddrOf { operand, .. } => {
+            if let Some(id) = operand.root_ident() {
+                out.push(id.to_string());
+            }
+            collect_addr_of_roots(operand, out);
+        }
+        Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        } => {
+            if let Some(id) = operand.root_ident() {
+                out.push(id.to_string());
+            }
+            collect_addr_of_roots(operand, out);
+        }
+        Expr::Try { operand, .. } => collect_addr_of_roots(operand, out),
+        Expr::Move { operand, .. } => collect_addr_of_roots(operand, out),
+        Expr::StructLit { fields, .. } => {
+            for f in fields {
+                collect_addr_of_roots(&f.value, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                collect_addr_of_roots(k, out);
+                collect_addr_of_roots(v, out);
+            }
+        }
+        Expr::SliceLit { items, .. } => {
+            for it in items {
+                collect_addr_of_roots(it, out);
             }
         }
         _ => {}

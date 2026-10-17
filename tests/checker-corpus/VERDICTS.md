@@ -85,7 +85,9 @@ renumbered).
 | 32 | 32-closure-local-alias-move-reject | REJECT | A1b | a local rebind inside a closure (`alias := m`, where `m` is a captured outer map) is an alias of non-owned state, but `check_closure_boundaries` called `define_binding` without `record_alias` or `record_may_share`, wiping origin and alias links — before the fix `task worker(move alias, done)` was accepted with 0 diagnostics while `go run -race` produced concurrent map writes (issue #137) |
 
 
-**Distribution: ACCEPT 10 · ACCEPT-MANAGED 2 · REJECT 24 — 36 programs.**
+| 56 | 56-atomic-pointer-fail-closed-reject | REJECT | FC | GUARANTEES row 11: unproven atomic.pointer[T] crossing a task boundary fails closed with HYB-E3005; regression pin for existing behavior. |
+
+**Distribution: ACCEPT 14 · ACCEPT-MANAGED 2 · REJECT 40 — 56 programs.**
 | 36 | 36-closure-capture-move | REJECT | A1b | a closure that captures a reference-bearing outer binding is a live ALIAS of its storage: `ch <- move a` transfers the map, but a later `f()` writes through the capture — on main the program was ACCEPT with 0 diagnostics while the receiver and the closure wrote the same map (`go run -race` WARNING: DATA RACE, issue #109); the fix links the closure binding to its captures with may-share edges so the move freezes `f` (alias-read twin of 20's alias-write form; accept/precision side pinned in hy-check/tests/capture_freeze.rs) |
 | 37 | 37-a3-interproc-window | REJECT | A3 | the insert that invalidates the live `&m["a"]` slot loan is spelled one FRAME away — `bump(m, "fresh")` inserts in its own frame while main's non-lexical window is live — the same runtime event as 08's direct insert (which rejects HYB-E3102); on main this form was ACCEPT with 0 diagnostics while the direct twin rejected (issue #111, with alias and closure-body siblings plus a wrong-result runtime proof: a helper delete resurrected by the loan's store-back); the fix matches A3 events across share-group peers, callee parameters (bounded, fail-closed), and closure call sites (legal twins pinned in hy-check/tests/a3_interproc.rs) |
 
@@ -118,6 +120,7 @@ direction: a primitive-element slice copies by value and shares nothing.
 | 43 | 43-copy-ref-element-alias-freeze | REJECT | A1b | `copy(dst, src)` on a `[]map[...]` makes `dst[i]` and `src[i]` the same map; `task worker(move dst, done)` did not freeze `src`, so the later write through `src` was use-after-move (issue #178; the root cause is a missing `copy` arm in `process_call`, plus `make([]T, n)` dropping its element shape) |
 | 44 | 44-copy-primitive-element-control | ACCEPT | — | the FALSE-POSITIVE GUARD for 43: `copy(dst, src)` on `[]int` copies by value and shares no GC storage, so no may-share edge may be recorded |
 | 45 | 45-composite-literal-embeds-shared-map | REJECT | A1c | O4.6 deep sendability: a fresh `[]T{shared}` composite literal embedding a live shared map at a spawn is not laundered by the wrap (PR #176, maintainer-integrated as #45) |
+| 53 | 53-array-slice-backing-freeze | REJECT | A1b | slicing an addressable array (`s := a[:]` on `[4]int`, also `b.data[:]`, `append(a[0:1], x)`, overlapping windows) shares the array's backing storage even when the element is a primitive; `shape_may_share` only recurses into reference elements, so `move s` froze `s` and not `a`, `hyb check` reported 0 diagnostics, and `go run -race` reported `WARNING: DATA RACE` on `s[0]` vs `a[0]`. A value copy (`b := a`) and `clone(a)[:]` stay unlinked |
 
 **Distribution: ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 34 — 49 programs.**
 
@@ -592,26 +595,6 @@ composite-`const` locals, select-receive names and match bindings stay
 outside this registration (the same Go error family, tracked separately);
 unread `for ... in` bindings are handled at emission (issue #139).
 
-<<<<<<< HEAD
-## Additive corpus registration — 2026-10-17: shadowed predeclared types (#326)
-
-One case derived from issue #326 before running this fixture. It pins the
-soundness rule that user-defined structs or type aliases shadowing predeclared
-primitive names (e.g. `struct rune { m map[string]string }`) must resolve to the
-user struct rather than falling through to primitive type shape. When passed
-across tasks, non-sendable contents (such as maps or slices) must be rejected
-with `HYB-E3001` (A1c sendability).
-
-| # | program | verdict | rule | diagnostic | rationale |
-|---|---------|---------|------|------------|-----------|
-| 52 | 52-shadow-predeclared-struct-reject | REJECT | A1c | `HYB-E3001` | `struct rune { m map[string]string }` passed across tasks must reject because the shadowed struct contains a mutable map |
-
-With this addition the registered corpus is **51 programs:
-ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 36** (harness recompute: 51/51
-verdict agreement; tripwire 2/51 = 3.9% verdict-level, 3/51 = 5.9%
-as-written — not fired).
-
-=======
 ## Additive corpus registration — 2026-10-17: 3-argument slice `make` (#353)
 
 One case added WITH its fix: `make([]T, len, cap)` is valid Go, was
@@ -626,23 +609,35 @@ remaining rejection.
 |---|---------|---------|------|------------|-----------|
 | 51 | 51-make-slice-cap | ACCEPT | — | — | `make([]int, 3, 10)` is valid Go; zero check-sites, a fresh local |
 
-With this addition the corpus on disk is **51 programs: ACCEPT 13 ·
-ACCEPT-MANAGED 2 · REJECT 36** (recomputed from the files'
+With this addition the corpus on disk stood at **51 programs:
+ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 36** (recomputed from the files'
 `EXPECTED-VERDICT` markers; #50 carries its registration with its own fix
-PR).
->>>>>>> main
+PR; the registration below raises the total to 52).
 
-## Additive corpus registration — 2026-10-17: atomic pointer fail-closed (#267)
+## Additive corpus registration — 2026-10-17: shadowed predeclared types (#326)
 
-This case pins the existing fail-closed rule for `sync/atomic` pointer values:
-the pointer swap is synchronized, but its mutable pointee is not automatically
-safe to share across task boundaries. `atomic.pointer[holder]` therefore
-requires rejection with `HYB-E3005` until the pointee shape is proven sendable.
+One case derived from issue #326 before running this fixture. It pins the
+soundness rule that user-defined structs or type aliases shadowing predeclared
+primitive names (e.g. `struct rune { m map[string]string }`) must resolve to the
+user struct rather than falling through to primitive type shape. When passed
+across tasks, non-sendable contents (such as maps or slices) must be rejected
+with `HYB-E3001` (A1c sendability).
 
 | # | program | verdict | rule | diagnostic | rationale |
 |---|---------|---------|------|------------|-----------|
-| 53 | 53-atomic-pointer-fail-closed-reject | REJECT | FC | `HYB-E3005` | Atomic pointer synchronization does not make the mutable pointee safe to share across tasks |
+| 52 | 52-shadow-predeclared-struct-reject | REJECT | A1c | `HYB-E3001` | `struct rune { m map[string]string }` passed across tasks must reject because the shadowed struct contains a mutable map |
 
-With this addition the checker corpus has **53 programs: ACCEPT 13 ·
-ACCEPT-MANAGED 2 · REJECT 38** (recomputed from the `EXPECTED-VERDICT`
-markers; the parser inventory is updated to 53).
+With this addition the registered corpus is **52 programs:
+ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 37** (harness recompute: 52/52
+verdict agreement; tripwire 2/52 = 3.8% verdict-level, 3/52 = 5.8%
+as-written — not fired).
+
+## Additive corpus registration — 2026-10-17: field store materializes may_share (#392)
+
+`h.m = shared` never created the edge from the composite to the live RHS root,
+so `move h` froze `h` but not `shared` and the emitted Go raced.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 54 | 54-field-store-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `var h holder; h.m = shared` then `task worker(move h)` then a write to `shared` |
+| 55 | 55-field-store-fresh-at-spawn | ACCEPT | — | — | the over-rejection guard: a FRESH map literal stored into the field shares nothing |

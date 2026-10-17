@@ -350,11 +350,33 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         );
     }
 
-    // N1: the declared result shapes (return-site nil checks, HYB-E4001).
-    st.result_shapes = f.results.iter().map(|r| ck.shape_of_type(&r.ty)).collect();
+    // N1: the declared result shapes (return-site nil checks, HYB-E4001),
+    // plus named result bindings (`fn f() (out map[string]int)`), which are
+    // function-scoped mutable local variables in Go and returned by bare `return`.
+    for r in &f.results {
+        let shape = ck.shape_of_type(&r.ty);
+        if let Some(name) = &r.name {
+            if name != "_" {
+                st.env.insert(
+                    name.clone(),
+                    Binding {
+                        shape: shape.clone(),
+                        ty: Some(r.ty.clone()),
+                        immutable: false,
+                        managed_taint: false,
+                        moved: None,
+                        non_owned_origin: None,
+                        slot_loan: false,
+                    },
+                );
+                st.named_results.push(name.clone());
+            }
+        }
+        st.result_shapes.push(shape);
+    }
 
     // Pass A: indices, structural extents, last-use map.
-    let flat = walk::flatten(body);
+    let flat = walk::flatten_with_results(body, &st.named_results);
     st.last_use = flat.last_use.clone();
 
     let mut active_loops: Vec<(
@@ -394,6 +416,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             };
                             ck.define_binding(&mut st, n, shape, None, false, managed);
                         }
+                    }
+                    walk::ScopeEvent::MatchBind { name, subject } => {
+                        ck.bind_match_arm(&mut st, name, subject, managed);
                     }
                 }
             }
@@ -502,7 +527,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // A1b/A7: use-after-move on this statement's own uses (checked
         // BEFORE this statement marks any new transfers).
         let mut uses = Vec::new();
-        walk::own_uses(stmt, &mut uses);
+        walk::own_uses_with_results(stmt, &st.named_results, &mut uses);
         ck.check_uses(&st, &uses);
         // T24: no address-of on a map-slot loan (HYB-E3104).
         ck.check_addr_of_loan(&st, &uses);
@@ -569,7 +594,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 ck.mark_slot_loans_assign(&mut st, targets, *op, values);
             }
 
-            Stmt::Return { values, .. } => ck.process_return(&mut st, values),
+            Stmt::Return { values, span } => ck.process_return(&mut st, values, *span),
 
             // O4.0 check-site: every task argument (HYB-E3001) + the
             // spawn-callee proof: the callee must resolve to a declared
@@ -719,6 +744,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 &st,
                 outer_depth,
                 &flat.stmts[for_idx..=loop_end],
+                &flat.events,
                 lbody,
                 &pre_moved,
                 &mut reported_backedge,
@@ -3084,6 +3110,128 @@ mod tests {
              }",
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn named_result_bindings_and_bare_return_soundness() {
+        // 1. Named result `(out map[string]int)` shadowing a file-level
+        // `const out = 0` must classify as a shared map at `task worker(out)`
+        // (HYB-E3001), never fall back to the primitive file const.
+        let r1 = check(
+            "const out = 0\n\
+             fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn run() (out map[string]int) {\n\
+               out = map[string]int{\"k\": 0}\n\
+               task worker(out)\n\
+               out[\"k\"] = 2\n\
+               return out\n\
+             }",
+        );
+        assert_eq!(r1.verdict, Verdict::Reject, "{:?}", r1.diagnostics);
+        assert!(r1.diagnostics.iter().any(|d| d.code == "HYB-E3001"));
+
+        // 2. Direct move `task worker(move out)` freezes `out` and rejects
+        // subsequent writes (`out["k"] = 2`) and bare `return` (HYB-E3003).
+        let r2 = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn run() (out map[string]int) {\n\
+               out = map[string]int{\"k\": 0}\n\
+               task worker(move out)\n\
+               out[\"k\"] = 2\n\
+               return\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
+        assert!(r2.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 3. Alias move `out = m; task worker(move m); return` rejects bare
+        // `return` of the frozen named result alias `out` (HYB-E3003).
+        let r3 = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn run() (out map[string]int) {\n\
+               m := map[string]int{\"k\": 0}\n\
+               out = m\n\
+               task worker(move m)\n\
+               return\n\
+             }",
+        );
+        assert_eq!(r3.verdict, Verdict::Reject, "{:?}", r3.diagnostics);
+        assert!(r3.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 4. Assigning a parameter `p` to a named result `out = p` preserves
+        // `non_owned_origin` and rejects `task worker(move out)` with HYB-E3004.
+        let r4 = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn run(p map[string]int) (out map[string]int) {\n\
+               out = p\n\
+               task worker(move out)\n\
+               return map[string]int{\"k\": 0}\n\
+             }",
+        );
+        assert_eq!(r4.verdict, Verdict::Reject, "{:?}", r4.diagnostics);
+        assert!(r4.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
+
+        // 5. Bare `return` of a named result holding `&m[1]` extends the A3
+        // slot-loan window to `return` (HYB-E3102 on `m[2] = 20`) and rejects
+        // the escaping borrow with HYB-E3104.
+        let r5 = check(
+            "type int_ptr = *int\n\
+             fn bad() (out int_ptr) {\n\
+               m := map[int]int{1: 10}\n\
+               out = &m[1]\n\
+               m[2] = 20\n\
+               return\n\
+             }",
+        );
+        assert_eq!(r5.verdict, Verdict::Reject, "{:?}", r5.diagnostics);
+        assert!(r5.diagnostics.iter().any(|d| d.code == "HYB-E3102"));
+        assert!(r5.diagnostics.iter().any(|d| d.code == "HYB-E3104"));
+
+        // 6. Closure with named result `(out map[string]int)` tracks `out` at
+        // boundaries (HYB-E3001 on unmoved spawn, HYB-E3003 on post-move bare return).
+        let r6 = check(
+            "const out = 0\n\
+             fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               f := fn() (out map[string]int) {\n\
+                 out = map[string]int{\"k\": 0}\n\
+                 task worker(out)\n\
+                 return\n\
+               }\n\
+               _ = f()\n\
+             }",
+        );
+        assert_eq!(r6.verdict, Verdict::Reject, "{:?}", r6.diagnostics);
+        assert!(r6.diagnostics.iter().any(|d| d.code == "HYB-E3001"));
+
+        // 7. Assigning `nil` (`HYB-E4001`) or receiving an incompatible
+        // channel element (`HYB-E3011`) into a named result binding rejects.
+        let r7_nil = check(
+            "fn bad_nil() (out map[string]int) {\n\
+               out = nil\n\
+               return\n\
+             }",
+        );
+        assert_eq!(r7_nil.verdict, Verdict::Reject, "{:?}", r7_nil.diagnostics);
+        assert!(r7_nil.diagnostics.iter().any(|d| d.code == "HYB-E4001"));
+
+        let r7_chan = check(
+            "fn bad_recv(ch chan string) (out int) {\n\
+               out = <-ch\n\
+               return\n\
+             }",
+        );
+        assert_eq!(r7_chan.verdict, Verdict::Reject, "{:?}", r7_chan.diagnostics);
+        assert!(r7_chan.diagnostics.iter().any(|d| d.code == "HYB-E3011"));
+
+        // 8. Positive controls: unmoved named results with bare `return` stay accepted.
+        let r8 = check(
+            "fn ok() (out map[string]int) {\n\
+               out = map[string]int{\"k\": 1}\n\
+               return\n\
+             }",
+        );
+        assert_eq!(r8.verdict, Verdict::Accept, "{:?}", r8.diagnostics);
     }
 
     // -----------------------------------------------------------------------

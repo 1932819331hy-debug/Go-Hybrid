@@ -510,6 +510,7 @@ impl<'a> Checker<'a> {
         st: &FnState,
         outer_depth: usize,
         loop_stmts: &[(&hy_syntax::Stmt, usize)],
+        events: &std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>>,
         loop_body: &hy_syntax::Block,
         pre_moved: &HashSet<String>,
         reported_backedge: &mut HashSet<String>,
@@ -562,21 +563,89 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        for (i, (stmt, _)) in loop_stmts.iter().enumerate() {
+        let mut shadow_scopes: Vec<HashSet<String>> = vec![HashSet::new()];
+        if let Some((_, hy_syntax::Stmt::For { kind, .. })) = loop_stmts.first().map(|(s, idx)| (*idx, *s)) {
+            match kind {
+                hy_syntax::ForKind::Range { var, .. } => {
+                    shadow_scopes[0].insert(var.clone());
+                }
+                hy_syntax::ForKind::Iterate { vars, .. } => {
+                    for v in vars {
+                        shadow_scopes[0].insert(v.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for (i, (stmt, stmt_idx)) in loop_stmts.iter().enumerate() {
+            if i > 0 {
+                if let Some(evs) = events.get(stmt_idx) {
+                    for ev in evs {
+                        match ev {
+                            crate::walk::ScopeEvent::Push => shadow_scopes.push(HashSet::new()),
+                            crate::walk::ScopeEvent::Pop => {
+                                if shadow_scopes.len() > 1 {
+                                    shadow_scopes.pop();
+                                }
+                            }
+                            crate::walk::ScopeEvent::SelectRecv { names, .. } => {
+                                if let Some(top) = shadow_scopes.last_mut() {
+                                    for n in names.iter() {
+                                        top.insert(n.clone());
+                                    }
+                                }
+                            }
+                            crate::walk::ScopeEvent::MatchBind { name, .. } => {
+                                if let Some(top) = shadow_scopes.last_mut() {
+                                    top.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                if let hy_syntax::Stmt::For { kind, .. } = stmt {
+                    if let Some(top) = shadow_scopes.last_mut() {
+                        match kind {
+                            hy_syntax::ForKind::Range { var, .. } => {
+                                top.insert(var.clone());
+                            }
+                            hy_syntax::ForKind::Iterate { vars, .. } => {
+                                for v in vars {
+                                    top.insert(v.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
             let mut uses = Vec::new();
             if i == 0 {
-                if let hy_syntax::Stmt::For {
-                    kind: hy_syntax::ForKind::While { cond },
-                    ..
-                } = stmt
-                {
-                    crate::walk::expr_uses(cond, &mut uses);
+                match stmt {
+                    hy_syntax::Stmt::For {
+                        kind: hy_syntax::ForKind::While { cond },
+                        ..
+                    } => {
+                        crate::walk::expr_uses(cond, &mut uses);
+                    }
+                    hy_syntax::Stmt::For {
+                        kind: hy_syntax::ForKind::Range { hi, .. },
+                        ..
+                    } => {
+                        crate::walk::expr_uses(hi, &mut uses);
+                    }
+                    _ => {}
                 }
             } else {
                 crate::walk::own_uses(stmt, &mut uses);
             }
 
             for u in &uses {
+                if shadow_scopes.iter().any(|s| s.contains(&u.name)) {
+                    continue;
+                }
                 let moved = match self.lookup_binding(&iter_st, &u.name) {
                     Some(b) => b.moved.clone(),
                     None => continue,
@@ -604,10 +673,9 @@ impl<'a> Checker<'a> {
 
             if i > 0 {
                 if let hy_syntax::Stmt::Local(l) = stmt {
-                    for name in &l.names {
-                        iter_st.aliases.remove(name);
-                        if let Some(b) = iter_st.env_lookup_mut(name) {
-                            b.moved = None;
+                    if let Some(top) = shadow_scopes.last_mut() {
+                        for name in &l.names {
+                            top.insert(name.clone());
                         }
                     }
                 }
