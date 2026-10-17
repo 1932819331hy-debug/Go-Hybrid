@@ -332,3 +332,15 @@ fn controls_default_int_and_untyped_consts_accept() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+#[test]
+fn untyped_constant_expression_overflow_is_rejected() {
+    let r = check(
+        "fn main() {\n    x := 9223372036854775807 + 1\n    fmt.println(\"{x}\")\n}\n",
+    );
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "default-int constant expressions must retain the main-branch ConstFold check"
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
