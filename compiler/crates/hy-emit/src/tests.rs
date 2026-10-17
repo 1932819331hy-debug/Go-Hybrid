@@ -2252,7 +2252,6 @@ fn slot_loan_parallel_define_assign_and_try_in_place() {
     );
 }
 
-
 #[test]
 fn task_preserves_variadic_spread() {
     let go = emit(
@@ -2329,4 +2328,26 @@ fn task_with_try_args_hoists_in_order_before_spawn() {
     assert!(first_at < second_at, "first try must evaluate before second try");
     assert!(second_at < spawn_at, "tries must evaluate before goroutine spawn");
     assert!(go.contains("go worker(hyT0, hyT2)"), "arguments substituted with temps:\n{}", go);
+}
+
+#[test]
+fn parenthesized_slot_loan_lowers_to_copy_and_storeback() {
+    let go = emit(
+        "struct svc {\n    count int\n}\n\nfn main() {\n    m := map[string]svc{\"a\": svc{count: 1}}\n    s := (&m[\"a\"])\n    s.count = 2\n    s = &(m[\"a\"])\n    s.count = 3\n}\n",
+    );
+    assert!(
+        go.contains("s := m[\"a\"]"),
+        "expected parenthesized slot loan to lower to copy read, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("m[\"a\"] = s"),
+        "expected parenthesized slot loan to emit store-back, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("&m[\"a\"]") && !go.contains("&(m[\"a\"])"),
+        "expected no raw address-of map index in emitted Go, got:\n{}",
+        go
+    );
 }
