@@ -1056,3 +1056,272 @@ fn probe_local_fresh_call_accepts() {
         r.diagnostics
     );
 }
+
+const PROBE_CONDITIONAL_PARAM_FRESH: &str = "\
+fn relay(a map[string]int, flag bool) (map[string]int, int) {
+    if flag { a = map[string]int{\"fresh\": 1} }
+    return a, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    x, n := relay(a, false)
+    _ = n
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    x[\"k\"] = 2
+    <-done
+}
+";
+
+#[test]
+fn probe_conditional_param_fresh_rejects_e3003() {
+    let r = check(PROBE_CONDITIONAL_PARAM_FRESH);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(
+        codes(&r).contains(&"HYB-E3003".to_string()),
+        "conditional_param_fresh must reject with HYB-E3003: {:?}",
+        r.diagnostics
+    );
+}
+
+const PROBE_ZERO_LOOP_PARAM: &str = "\
+fn relay(a map[string]int) (map[string]int, int) {
+    for i in 0..0 { _ = i
+        a = map[string]int{\"fresh\": 1}
+    }
+    return a, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    x, n := relay(a)
+    _ = n
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    x[\"k\"] = 2
+    <-done
+}
+";
+
+#[test]
+fn probe_zero_loop_param_rejects_e3003() {
+    let r = check(PROBE_ZERO_LOOP_PARAM);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(
+        codes(&r).contains(&"HYB-E3003".to_string()),
+        "zero_loop_param must reject with HYB-E3003: {:?}",
+        r.diagnostics
+    );
+}
+
+const PROBE_IF_INIT_PARAM_SHADOW: &str = "\
+fn relay(a map[string]int, flag bool) (map[string]int, int) {
+    if a := map[string]int{\"fresh\": 1}; flag { _ = a }
+    return a, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    x, n := relay(a, true)
+    _ = n
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    x[\"k\"] = 2
+    <-done
+}
+";
+
+#[test]
+fn probe_if_init_param_shadow_rejects_e3003() {
+    let r = check(PROBE_IF_INIT_PARAM_SHADOW);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(
+        codes(&r).contains(&"HYB-E3003".to_string()),
+        "if_init_param_shadow must reject with HYB-E3003: {:?}",
+        r.diagnostics
+    );
+}
+
+const PROBE_LOCAL_CALLABLE_SHADOW: &str = "\
+fn pick(a map[string]int) (map[string]int, int) {
+    return map[string]int{\"fresh\": 1}, 0
+}
+fn relay(a map[string]int) (map[string]int, int) {
+    pick := fn(m map[string]int) (map[string]int, int) { return m, 0 }
+    x, n := pick(a)
+    _ = n
+    return x, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    x, n := relay(a)
+    _ = n
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    x[\"k\"] = 2
+    <-done
+}
+";
+
+#[test]
+fn probe_local_callable_shadow_rejects_e3003() {
+    let r = check(PROBE_LOCAL_CALLABLE_SHADOW);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(
+        codes(&r).contains(&"HYB-E3003".to_string()),
+        "local_callable_shadow must reject with HYB-E3003: {:?}",
+        r.diagnostics
+    );
+}
+
+const PROBE_LOOP_FIVE_STEPS: &str = "\
+fn relay(a map[string]int) (map[string]int, int) {
+    x0 := map[string]int{\"fresh\": 0}
+    x1 := map[string]int{\"fresh\": 1}
+    x2 := map[string]int{\"fresh\": 2}
+    x3 := map[string]int{\"fresh\": 3}
+    x4 := map[string]int{\"fresh\": 4}
+    for i in 0..5 {
+        _ = i
+        x0 = x1
+        x1 = x2
+        x2 = x3
+        x3 = x4
+        x4 = a
+    }
+    return x0, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    x, n := relay(a)
+    _ = n
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    x[\"k\"] = 2
+    <-done
+}
+";
+
+#[test]
+fn probe_loop_five_steps_rejects_e3003() {
+    let r = check(PROBE_LOOP_FIVE_STEPS);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(
+        codes(&r).contains(&"HYB-E3003".to_string()),
+        "loop_five_steps must reject with HYB-E3003: {:?}",
+        r.diagnostics
+    );
+}
+
+const PROBE_LOOP_BREAK_EXIT: &str = "\
+fn relay(a map[string]int, flag bool) (map[string]int, int) {
+    x := map[string]int{\"fresh\": 1}
+    for i in 0..1 {
+        _ = i
+        x = a
+        if flag { break }
+        x = map[string]int{\"fresh\": 2}
+    }
+    return x, 0
+}
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    x, n := relay(a, true)
+    _ = n
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    x[\"k\"] = 2
+    <-done
+}
+";
+
+#[test]
+fn probe_loop_break_exit_rejects_e3003() {
+    let r = check(PROBE_LOOP_BREAK_EXIT);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(
+        codes(&r).contains(&"HYB-E3003".to_string()),
+        "loop_break_exit must reject with HYB-E3003: {:?}",
+        r.diagnostics
+    );
+}
+
+const PROBE_FRESH_CALLS_INDEPENDENT: &str = "\
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+fn fresh() map[string]int {
+    return map[string]int{\"k\": 0}
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    b := map[string]int{\"k\": 1}
+    a, b = fresh(), fresh()
+    done := make(chan bool, 1)
+    task worker(move a, done)
+    b[\"k\"] = 2
+    <-done
+}
+";
+
+#[test]
+fn probe_fresh_calls_independent_accepts() {
+    let r = check(PROBE_FRESH_CALLS_INDEPENDENT);
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "two distinct fresh() calls must not share storage: {:?}",
+        r.diagnostics
+    );
+}
+
+const PROBE_SCALAR_COPY_ASSIGNMENT: &str = "\
+fn worker(m map[string]int, done chan<- bool) {
+    m[\"k\"] = 1
+    done <- true
+}
+fn main() {
+    a := map[string]int{\"k\": 0}
+    n := 0
+    x := map[string]int{\"k\": 1}
+    n, x = len(a), a
+    done := make(chan bool, 1)
+    task worker(move x, done)
+    _ = n + 1
+    <-done
+}
+";
+
+#[test]
+fn probe_scalar_copy_assignment_accepts() {
+    let r = check(PROBE_SCALAR_COPY_ASSIGNMENT);
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "scalar copy target n must not be linked to x: {:?}",
+        r.diagnostics
+    );
+}

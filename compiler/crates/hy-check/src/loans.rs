@@ -106,6 +106,7 @@ struct ReturnSlotCtx<'c> {
     slot_idx: usize,
     param_names: &'c HashSet<String>,
     visited_fns: &'c mut HashSet<String>,
+    break_stack: Vec<Vec<HashMap<String, HashSet<String>>>>,
 }
 
 impl<'a> Checker<'a> {
@@ -1211,22 +1212,29 @@ impl<'a> Checker<'a> {
         };
         if let Expr::Call { callee, args, .. } = call_expr {
             if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-                if let Some(f) = self.fns.get(name.as_str()) {
-                    if let Some(body) = &f.body {
-                        if !visited_fns.contains(name.as_str()) {
-                            visited_fns.insert(name.clone());
-                            let callee_param_names: HashSet<String> =
-                                f.params.iter().map(|p| p.name.clone()).collect();
-                            let mut slots = Vec::with_capacity(n_slots);
-                            for slot_i in 0..n_slots {
-                                let mut callee_local_roots = HashMap::new();
-                                let mut callee_declared = HashSet::new();
-                                let mut returned_params = HashSet::new();
-                                let mut ctx = ReturnSlotCtx {
-                                    slot_idx: slot_i,
-                                    param_names: &callee_param_names,
-                                    visited_fns,
-                                };
+                if !local_roots.contains_key(name.as_str()) {
+                    if let Some(f) = self.fns.get(name.as_str()) {
+                        if let Some(body) = &f.body {
+                            if !visited_fns.contains(name.as_str()) {
+                                visited_fns.insert(name.clone());
+                                let callee_param_names: HashSet<String> =
+                                    f.params.iter().map(|p| p.name.clone()).collect();
+                                let mut slots = Vec::with_capacity(n_slots);
+                                for slot_i in 0..n_slots {
+                                    let mut callee_local_roots = HashMap::new();
+                                    for p in &f.params {
+                                        let mut s = HashSet::new();
+                                        s.insert(p.name.clone());
+                                        callee_local_roots.insert(p.name.clone(), s);
+                                    }
+                                    let mut callee_declared = HashSet::new();
+                                    let mut returned_params = HashSet::new();
+                                    let mut ctx = ReturnSlotCtx {
+                                        slot_idx: slot_i,
+                                        param_names: &callee_param_names,
+                                        visited_fns,
+                                        break_stack: Vec::new(),
+                                    };
                                 self.collect_block_return_slot_param_names(
                                     body,
                                     &mut ctx,
@@ -1255,6 +1263,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
         }
         let whole = self.resolve_expr_param_roots(val, param_names, local_roots);
         vec![whole; n_slots]
@@ -1359,8 +1368,9 @@ impl<'a> Checker<'a> {
                 otherwise,
                 ..
             } => {
+                let pre_if_scope = local_roots.clone();
+                let mut init_declared = HashSet::new();
                 if let Some(init_stmt) = init {
-                    let mut init_declared = HashSet::new();
                     self.collect_stmt_return_slot_param_names(
                         init_stmt,
                         ctx,
@@ -1462,12 +1472,27 @@ impl<'a> Checker<'a> {
                     }
                     *local_roots = merged;
                 }
+
+                for k in init_declared {
+                    if let Some(orig) = pre_if_scope.get(&k) {
+                        local_roots.insert(k, orig.clone());
+                    } else {
+                        local_roots.remove(&k);
+                    }
+                }
             }
             Stmt::For { body, .. } => {
                 let pre_for = local_roots.clone();
                 let mut current_roots = local_roots.clone();
-                for _iter in 0..4 {
+                ctx.break_stack.push(Vec::new());
+
+                let max_iters = (current_roots.len() + 1).max(32);
+                let mut converged = false;
+                for _iter in 0..max_iters {
                     let prev = current_roots.clone();
+                    if let Some(top) = ctx.break_stack.last_mut() {
+                        top.clear();
+                    }
                     let mut inner_declared = HashSet::new();
                     self.collect_block_return_slot_param_names(
                         body,
@@ -1490,7 +1515,21 @@ impl<'a> Checker<'a> {
                             .extend(v.iter().cloned());
                     }
                     if current_roots == prev {
+                        converged = true;
                         break;
+                    }
+                }
+                if !converged {
+                    for (k, v) in &mut current_roots {
+                        if pre_for.get(k) != Some(v) {
+                            v.extend(ctx.param_names.iter().cloned());
+                        }
+                    }
+                }
+                let break_states = ctx.break_stack.pop().unwrap_or_default();
+                for bs in break_states {
+                    for (k, v) in bs {
+                        current_roots.entry(k).or_default().extend(v);
                     }
                 }
                 for (k, v) in pre_for {
@@ -1576,6 +1615,11 @@ impl<'a> Checker<'a> {
                 }
                 *local_roots = merged;
             }
+            Stmt::Break { .. } => {
+                if let Some(top) = ctx.break_stack.last_mut() {
+                    top.push(local_roots.clone());
+                }
+            }
             _ => {}
         }
     }
@@ -1641,6 +1685,11 @@ impl<'a> Checker<'a> {
                             let param_names: HashSet<String> =
                                 f.params.iter().map(|p| p.name.clone()).collect();
                             let mut local_roots = HashMap::new();
+                            for p in &f.params {
+                                let mut s = HashSet::new();
+                                s.insert(p.name.clone());
+                                local_roots.insert(p.name.clone(), s);
+                            }
                             let mut returned_params = HashSet::new();
                             let mut declared = HashSet::new();
                             let mut visited_fns = HashSet::new();
@@ -1649,6 +1698,7 @@ impl<'a> Checker<'a> {
                                 slot_idx,
                                 param_names: &param_names,
                                 visited_fns: &mut visited_fns,
+                                break_stack: Vec::new(),
                             };
                             self.collect_block_return_slot_param_names(
                                 body,
@@ -2380,10 +2430,19 @@ impl<'a> Checker<'a> {
                 if plans[idx_a].is_const || plans[idx_b].is_const {
                     continue;
                 }
+                if !self.shape_may_share(&plans[idx_a].shape)
+                    || !self.shape_may_share(&plans[idx_b].shape)
+                {
+                    continue;
+                }
                 let mut shared = false;
                 let mut identical = false;
                 for ra in &plans[idx_a].pre_roots {
+                    let Some(ba) = self.lookup_binding(st, ra) else { continue; };
+                    if !self.shape_may_share(&ba.shape) { continue; };
                     for rb in &plans[idx_b].pre_roots {
+                        let Some(bb) = self.lookup_binding(st, rb) else { continue; };
+                        if !self.shape_may_share(&bb.shape) { continue; };
                         if ra == rb {
                             shared = true;
                             identical = true;
@@ -2526,6 +2585,11 @@ impl<'a> Checker<'a> {
             }
             if last_plan_for_name.get(name_a.as_str()) != Some(&idx_a)
                 || last_plan_for_name.get(name_b.as_str()) != Some(&idx_b)
+            {
+                continue;
+            }
+            if !self.shape_may_share(&plans[idx_a].shape)
+                || !self.shape_may_share(&plans[idx_b].shape)
             {
                 continue;
             }

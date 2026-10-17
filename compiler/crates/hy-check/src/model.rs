@@ -576,7 +576,6 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
         Expr::Field { base, .. } => collect_ref_roots(base, out),
         Expr::Index { base, .. } => collect_ref_roots(base, out),
         Expr::Call { callee, args, .. } => {
-            collect_ref_roots(callee, out);
             for a in args {
                 collect_ref_roots(&a.value, out);
             }
