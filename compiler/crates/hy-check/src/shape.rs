@@ -301,7 +301,7 @@ impl<'a> Checker<'a> {
                     // the type argument; defaults Unknown (fail-closed at
                     // boundaries, O4.9). See the TECH DEBT note in foreign.rs.
                     "make" => self.make_shape(args),
-                    "append" => args
+                    "append" | "some" => args
                         .first()
                         .map(|a| self.shape_of_expr(st, &a.value))
                         .unwrap_or(TypeShape::Unknown),
@@ -550,6 +550,9 @@ impl<'a> Checker<'a> {
                             elem: Box::new(elem),
                             span: *span,
                         });
+                    }
+                    if name == "make" {
+                        return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
                     }
                     let head = Self::base_named_type_str(name);
                     self.fns
@@ -1227,5 +1230,83 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
         assert_eq!(r.diagnostics[0].code, "HYB-E5001");
+    }
+    #[test]
+    fn make_map_preserves_value_shape_across_index_hop() {
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"w\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               mm := make(map[string]map[string]int{})\n\
+               mm[\"a\"] = map[string]int{\"k\": 1}\n\
+               x := mm[\"a\"]\n\
+               var m2 map[string]int = x\n\
+               task worker(move m2, done)\n\
+               x[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn make_map_preserves_non_owned_origin_across_index_store_and_hop() {
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"w\"] = 1\n done <- true }\n\
+             fn spawn_it(p map[string]int, done chan<- bool) {\n\
+               mm := make(map[string]map[string]int{})\n\
+               mm[\"a\"] = p\n\
+               x := mm[\"a\"]\n\
+               var m2 map[string]int = x\n\
+               task worker(move m2, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3004");
+    }
+
+    #[test]
+    fn scope_pop_propagates_move_across_restored_may_share_peers() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(m map[string]int, done chan<- bool) { m[\"w\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               m := map[string]int{\"k\": 0}\n\
+               h := holder{m: m}\n\
+               if true {\n\
+                 h := 1\n\
+                 fmt.println(h)\n\
+                 task worker(move m, done)\n\
+               }\n\
+               h.m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn self_shadowed_composite_define_preserves_may_share_and_outer_move() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder, done chan<- bool) { h.m[\"w\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               m := map[string]int{\"k\": 0}\n\
+               h := holder{m: m}\n\
+               if true {\n\
+                 h := h\n\
+                 task worker(move h, done)\n\
+                 m[\"k\"] = 1\n\
+               }\n\
+               m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
     }
 }

@@ -249,6 +249,28 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
         check_stmt_own_uses(ck, st, stmt, managed);
     }
 
+    // #238: `copy(dst, src)` inside a closure body duplicates reference-bearing
+    // slice elements, so `dst` and `src` share mutable GC storage and a later
+    // `move` of either inside the closure must freeze the other (O5.2) and
+    // inherit non-owned capture/parameter origin (O5.1 / O5.4).
+    let mut calls = Vec::new();
+    if let Stmt::For {
+        kind: Iterate { expr, .. },
+        ..
+    } = stmt
+    {
+        crate::walk::expr_calls(expr, &mut calls);
+    } else {
+        crate::walk::own_calls(stmt, &mut calls);
+    }
+    for cr in &calls {
+        if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
+            if name == "copy" {
+                ck.record_copy_may_share(st, cr);
+            }
+        }
+    }
+
     match stmt {
         Stmt::Local(l) => {
             for v in &l.values {
@@ -528,11 +550,18 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 for (s, idx) in flat_body.stmts {
                     loop_stmts.push((s, idx + 1));
                 }
+                let loop_events: std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>> =
+                    flat_body
+                        .events
+                        .into_iter()
+                        .map(|(k, v)| (k + 1, v))
+                        .collect();
                 let mut reported_backedge = std::collections::HashSet::new();
                 ck.check_loop_backedge(
                     st,
                     outer_depth,
                     &loop_stmts,
+                    &loop_events,
                     body,
                     &pre_moved,
                     &mut reported_backedge,
@@ -549,6 +578,13 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             ck.check_match(st, subject, arms, *span);
             for arm in arms {
                 st.scope_push();
+                if let hy_syntax::MatchPattern::Path {
+                    binding: Some(name),
+                    ..
+                } = &arm.pattern
+                {
+                    ck.bind_match_arm(st, name, subject, managed);
+                }
                 check_body_boundaries(ck, st, &arm.body, managed, nested);
                 st.scope_pop();
             }

@@ -417,6 +417,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             ck.define_binding(&mut st, n, shape, None, false, managed);
                         }
                     }
+                    walk::ScopeEvent::MatchBind { name, subject } => {
+                        ck.bind_match_arm(&mut st, name, subject, managed);
+                    }
                 }
             }
         }
@@ -741,6 +744,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 &st,
                 outer_depth,
                 &flat.stmts[for_idx..=loop_end],
+                &flat.events,
                 lbody,
                 &pre_moved,
                 &mut reported_backedge,

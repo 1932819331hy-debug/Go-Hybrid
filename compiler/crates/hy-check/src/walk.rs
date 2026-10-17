@@ -35,6 +35,10 @@ pub(crate) enum ScopeEvent<'a> {
         names: &'a [String],
         chan: &'a Expr,
     },
+    MatchBind {
+        name: &'a str,
+        subject: &'a Expr,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -184,9 +188,33 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt, named_results: &[String]
             scoped_block(out, body, named_results);
             out.managed_end.insert(idx, out.next.saturating_sub(1));
         }
-        Stmt::Match { arms, .. } => {
+        Stmt::Match { subject, arms, .. } => {
             for arm in arms {
-                scoped_block(out, &arm.body, named_results);
+                let first = out.next;
+                let mut ran = false;
+                for s in &arm.body.stmts {
+                    if !ran {
+                        out.mark_event(first, ScopeEvent::Push);
+                        if let hy_syntax::MatchPattern::Path {
+                            binding: Some(name),
+                            ..
+                        } = &arm.pattern
+                        {
+                            out.mark_event(
+                                first,
+                                ScopeEvent::MatchBind {
+                                    name: name.as_str(),
+                                    subject,
+                                },
+                            );
+                        }
+                        ran = true;
+                    }
+                    walk_one(out, s, named_results);
+                }
+                if ran {
+                    out.mark_event(out.next, ScopeEvent::Pop);
+                }
             }
         }
         Stmt::Block { block, .. } => scoped_block(out, block, named_results),
@@ -315,7 +343,19 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
             expr_uses(subject, out);
             for arm in arms {
                 if let Some(g) = &arm.guard {
-                    expr_uses(g, out);
+                    let bound_name = match &arm.pattern {
+                        hy_syntax::MatchPattern::Path {
+                            binding: Some(n), ..
+                        } => Some(n.as_str()),
+                        _ => None,
+                    };
+                    let mut g_uses = Vec::new();
+                    expr_uses(g, &mut g_uses);
+                    for u in g_uses {
+                        if Some(u.name.as_str()) != bound_name {
+                            out.push(u);
+                        }
+                    }
                 }
             }
         }
@@ -767,6 +807,12 @@ pub(crate) fn expr_path(expr: &Expr) -> Option<String> {
         Expr::Index { base, .. } => expr_path(base),
         Expr::Paren { inner, .. } => expr_path(inner),
         Expr::Try { operand, .. } => expr_path(operand),
+        Expr::Call { callee, args, .. }
+            if matches!(crate::model::unwrap_parens(callee), Expr::Ident { name, .. } if name == "some")
+                && args.len() == 1 =>
+        {
+            expr_path(&args[0].value)
+        }
         _ => None,
     }
 }
