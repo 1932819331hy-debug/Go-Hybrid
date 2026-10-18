@@ -46,6 +46,7 @@ type sample struct {
 	First string
 	NativeMS float64
 	InProcessMS float64
+	ExperimentalReusedMS float64
 }
 
 type report struct {
@@ -55,9 +56,9 @@ type report struct {
 	CPUs, GOMAXPROCS, Files, Edits, Warmup int
 	FixtureSHA256, WASMSHA256, NativeSHA256 string
 	WASMBytes, NativeBytes int
-	ColdWASMInitMS float64
-	Native, InProcess statistics
-	NativeOverInProcessP50 float64
+	ColdWASMInitMS, ColdReusedInitMS float64
+	Native, InProcess, ReusedGuest statistics
+	NativeOverInProcessP50, NativeOverReusedP50 float64
 	Samples []sample
 	Limitations []string
 }
@@ -155,52 +156,86 @@ func execute(cfg settings) (*report, error) {
 	engine, err := analyzer.GetEngine(cfg.wasm)
 	if err != nil { return nil, fmt.Errorf("cold WASM init: %w", err) }
 	coldMS := float64(time.Since(coldStart).Nanoseconds()) / 1e6
+	reused,coldReusedMS,err:=newExperimentalGuest(cfg.wasm)
+	if err!=nil {return nil,fmt.Errorf("initialize experimental guest: %w",err)}
+	defer reused.Close()
+	// Mixed-verdict controls expose simple cross-request state residue.
+	checkOpposite:=func() error {
+		other:="tests/checker-corpus/09-a3-map-slot-valid.hy"
+		if expected=="accept" {other="tests/checker-corpus/08-a3-map-slot-invalidated.hy"}
+		file:=filepath.Join(cfg.root,other)
+		data,err:=os.ReadFile(file)
+		if err!=nil {return err}
+		want,err:=expectedVerdict(string(data))
+		if err!=nil {return err}
+		n,_,err:=nativeCheck(cfg.native,file)
+		if err!=nil {return err}
+		w,_,err:=wasmCheck(engine,string(data))
+		if err!=nil {return err}
+		e,_,err:=reused.Check(string(data))
+		if err!=nil {return err}
+		if err:=comparable(n,w,want);err!=nil {return err}
+		return comparable(n,e,want)
+	}
+	if err:=checkOpposite();err!=nil {return nil,fmt.Errorf("before-run cross-verdict control: %w",err)}
 	for i:=0; i<cfg.warmup; i++ {
 		src := editedSource(template, -i-1)
 		if err := os.WriteFile(paths[0], []byte(src), 0600); err != nil { return nil, err }
 		n, _, err := nativeCheck(cfg.native, paths[0]); if err != nil { return nil, err }
 		w, _, err := wasmCheck(engine, src); if err != nil { return nil, err }
+		e, _, err := reused.Check(src); if err != nil { return nil, err }
 		if err := comparable(n,w,expected); err != nil { return nil, fmt.Errorf("warmup %d: %w", i, err) }
+		if err := comparable(n,e,expected); err != nil { return nil, fmt.Errorf("reused warmup %d: %w", i, err) }
 	}
 	samples := make([]sample, 0, cfg.edits)
 	nativeTimes := make([]float64, 0, cfg.edits)
 	wasmTimes := make([]float64, 0, cfg.edits)
+	reusedTimes := make([]float64, 0, cfg.edits)
 	for i:=0; i<cfg.edits; i++ {
 		index := i % cfg.files
 		src := editedSource(template, i+1)
 		if err := os.WriteFile(paths[index], []byte(src), 0600); err != nil { return nil, err }
-		var n,w *analyzer.CheckOutput
-		var nt,wt float64
-		first := "native"
-		if i%2 == 0 {
-			n,nt,err = nativeCheck(cfg.native, paths[index]); if err != nil { return nil, fmt.Errorf("edit %d native: %w", i+1,err) }
-			w,wt,err = wasmCheck(engine,src); if err != nil { return nil, fmt.Errorf("edit %d embedded: %w", i+1,err) }
-		} else {
-			first = "embedded"
-			w,wt,err = wasmCheck(engine,src); if err != nil { return nil, fmt.Errorf("edit %d embedded: %w", i+1,err) }
-			n,nt,err = nativeCheck(cfg.native, paths[index]); if err != nil { return nil, fmt.Errorf("edit %d native: %w", i+1,err) }
+		var n,w,e *analyzer.CheckOutput
+		var nt,wt,et float64
+		order:=[][3]int{{0,1,2},{1,2,0},{2,0,1}}[i%3]
+		first:=[]string{"native","embedded","experimental-reused"}[order[0]]
+		for _,mode:=range order {
+			switch mode {
+			case 0:
+				n,nt,err=nativeCheck(cfg.native,paths[index])
+			case 1:
+				w,wt,err=wasmCheck(engine,src)
+			case 2:
+				e,et,err=reused.Check(src)
+			}
+			if err!=nil {return nil,fmt.Errorf("edit %d request path %d: %w",i+1,mode,err)}
 		}
-		if err := comparable(n,w,expected); err != nil { return nil, fmt.Errorf("edit %d mismatch: %w", i+1,err) }
-		samples = append(samples, sample{Edit:i+1, File:filepath.Base(paths[index]), First:first, NativeMS:nt, InProcessMS:wt})
-		nativeTimes = append(nativeTimes, nt)
-		wasmTimes = append(wasmTimes, wt)
+		if err:=comparable(n,w,expected);err!=nil {return nil,fmt.Errorf("edit %d public path: %w",i+1,err)}
+		if err:=comparable(n,e,expected);err!=nil {return nil,fmt.Errorf("edit %d reused guest: %w",i+1,err)}
+		samples=append(samples,sample{Edit:i+1,File:filepath.Base(paths[index]),First:first,NativeMS:nt,InProcessMS:wt,ExperimentalReusedMS:et})
+		nativeTimes=append(nativeTimes,nt)
+		wasmTimes=append(wasmTimes,wt)
+		reusedTimes=append(reusedTimes,et)
 	}
+	if err:=checkOpposite();err!=nil {return nil,fmt.Errorf("after-run cross-verdict control: %w",err)}
 	r := &report{
 		Kind:"single-file-after-write request proxy, NOT gopls/LSP",
 		TimestampUTC:time.Now().UTC().Format(time.RFC3339),
 		OS:runtime.GOOS, Arch:runtime.GOARCH, Go:runtime.Version(), CPUs:runtime.NumCPU(), GOMAXPROCS:runtime.GOMAXPROCS(0),
 		Files:cfg.files, Edits:cfg.edits, Warmup:cfg.warmup,
 		FixtureSHA256:fixtureHash, WASMSHA256:wasmHash, NativeSHA256:nativeHash, WASMBytes:wasmSize, NativeBytes:nativeSize,
-		ColdWASMInitMS:coldMS, Native:summarize(nativeTimes), InProcess:summarize(wasmTimes), Samples:samples,
+		ColdWASMInitMS:coldMS, ColdReusedInitMS:coldReusedMS,Native:summarize(nativeTimes), InProcess:summarize(wasmTimes),ReusedGuest:summarize(reusedTimes),Samples:samples,
 		Limitations:[]string{
 			"Not stock gopls, not unsaved buffers, not editor keystroke-to-diagnostic latency.",
 			"Each request checks the edited file only, not all 25 workspace files.",
 			"Durations begin after the write; native includes subprocess, file read and envelope decode; embedded receives in-memory source bytes.",
 			"Cold WASM initialization is separate from warm Engine.Check timings.",
+			"The experimental reused guest is strictly sequential and not a production instance pool; cancellation, concurrency and lifetime safety remain unproven.",
 			"One fixture and one CI machine are insufficient for population-level performance or memory claims.",
 		},
 	}
 	if r.InProcess.P50 > 0 { r.NativeOverInProcessP50=r.Native.P50/r.InProcess.P50 }
+	if r.ReusedGuest.P50 > 0 {r.NativeOverReusedP50=r.Native.P50/r.ReusedGuest.P50}
 	if cfg.output != "" {
 		b, err := json.MarshalIndent(r,"","  ")
 		if err != nil { return nil, err }
@@ -234,5 +269,7 @@ func main() {
 	fmt.Printf("Native subprocess+decode: p50 %.3f ms p95 %.3f ms p99 %.3f ms\n",r.Native.P50,r.Native.P95,r.Native.P99)
 	fmt.Printf("Real public Engine.Check: p50 %.3f ms p95 %.3f ms p99 %.3f ms\n",r.InProcess.P50,r.InProcess.P95,r.InProcess.P99)
 	fmt.Printf("Native/embedded p50 ratio %.3fx (above 1: embedded faster)\n",r.NativeOverInProcessP50)
+	fmt.Printf("EXPERIMENTAL sequential reused guest: p50 %.3f ms p95 %.3f ms p99 %.3f ms; cold init %.3f ms\n",r.ReusedGuest.P50,r.ReusedGuest.P95,r.ReusedGuest.P99,r.ColdReusedInitMS)
+	fmt.Printf("Native/experimental reused p50 %.3fx (research only)\n",r.NativeOverReusedP50)
 	fmt.Println("No stock gopls, whole-package latency, or production memory footprint claim.")
 }
