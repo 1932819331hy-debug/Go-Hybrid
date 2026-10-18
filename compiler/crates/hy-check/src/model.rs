@@ -191,8 +191,14 @@ pub(crate) enum LoanTarget {
     /// O7/A2: borrow-mode loan on a boundary handle binding.
     Handle { handle: String },
     /// O8/A3: unique loan on one map slot; `binding` is the defined name
-    /// (for last-use computation), `path` is the base map path ("e.services").
-    MapSlot { binding: String, path: String },
+    /// (for last-use computation), `path` is the base map path ("e.services"),
+    /// `key` the literal index when it provably names one slot (see
+    /// `walk::addr_of_index_slot_key`); `None` may alias any slot of `path`.
+    MapSlot {
+        binding: String,
+        path: String,
+        key: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]

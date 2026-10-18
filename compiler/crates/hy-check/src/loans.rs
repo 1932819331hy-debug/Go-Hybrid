@@ -284,9 +284,11 @@ impl<'a> Checker<'a> {
                     // A3: map delete / clear is a map mutation
                     self.check_delete_conflict(st, cr, idx);
                 }
-                if name == "delete" || name == "copy" || name == "clear" {
+                if matches!(name.as_str(), "delete" | "copy" | "clear" | "append") {
                     // T22 (#123/#188): a delete, copy, or clear mutates its first
                     // argument — a `const` root is frozen like an index write.
+                    // `append` writes in place into the destination's spare
+                    // capacity, so a reslice of a `const` is frozen too.
                     self.check_delete_const(st, cr, &HashSet::new());
                 }
                 self.check_call_const_writes(st, cr, &HashSet::new());
@@ -427,6 +429,53 @@ impl<'a> Checker<'a> {
                 loan_last
             ),
             "a rehash may move the slot — reorder so the slot mutation finishes before any insert/delete on the same map (corpus 09 is the legal twin), or copy-out / modify / store-back (reads are copies, O9)".to_string(),
+        ];
+        self.diags
+            .push(Diagnostic::error("HYB-E3102", self.path.clone(), span, msg).with_notes(notes));
+    }
+
+    /// O8 uniqueness: a live slot loan is the only access path to its slot.
+    /// The emitter lowers the loan to copy-out / store-back, so a second loan
+    /// on (or a field store through) a slot that may be the same slot is
+    /// overwritten by, or overwrites, the loan's store-back. `owner` is the
+    /// binding being (re)loaned, whose own earlier loan does not conflict.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_o8_alias_if_live(
+        &mut self,
+        st: &FnState,
+        path: &str,
+        key: Option<&str>,
+        owner: Option<&str>,
+        span: Span,
+        idx: usize,
+        what: &str,
+    ) {
+        let Some(loan) = st.loans.iter().find(|l| {
+            matches!(&l.target, LoanTarget::MapSlot { binding, path: p, key: k }
+                if owner != Some(binding.as_str())
+                    && a3_paths_conflict(st, p, path)
+                    && !matches!((k.as_deref(), key), (Some(a), Some(b)) if a != b))
+                && l.created <= idx
+                && idx <= l.last
+        }) else {
+            return;
+        };
+        let LoanTarget::MapSlot { binding, .. } = &loan.target else {
+            unreachable!("filtered above");
+        };
+        let msg = format!(
+            "{} on `{}` aliases the live slot loan `{}`",
+            what, path, binding
+        );
+        let notes = vec![
+            format!(
+                "{} ({}:{}) is a unique loan on a slot of `{}`, live from creation to its last use (O8, non-lexical window ending at statement {})",
+                loan.desc, self.path, loan.span.start, path, loan.last
+            ),
+            format!(
+                "the loan lowers to copy-out / store-back, so this access and `{}` would silently overwrite each other — finish using `{}` first, or mutate the slot only through `{}`",
+                binding, binding, binding
+            ),
         ];
         self.diags
             .push(Diagnostic::error("HYB-E3102", self.path.clone(), span, msg).with_notes(notes));
@@ -1122,11 +1171,22 @@ impl<'a> Checker<'a> {
             for (name, val) in l.names.iter().zip(l.values.iter()) {
                 if let Some(path) = walk::addr_of_index_base_path(val) {
                     let binding = name.clone();
+                    let key = walk::addr_of_index_slot_key(val);
+                    self.emit_o8_alias_if_live(
+                        st,
+                        &path,
+                        key.as_deref(),
+                        Some(&binding),
+                        val.span(),
+                        idx,
+                        "a second slot loan",
+                    );
                     let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                     st.loans.push(Loan {
                         target: LoanTarget::MapSlot {
                             binding: binding.clone(),
                             path,
+                            key,
                         },
                         created: idx,
                         last,
@@ -4453,7 +4513,9 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    LoanTarget::MapSlot { binding, path } if a3_paths_conflict(st, path, name) => {
+                    LoanTarget::MapSlot { binding, path, key }
+                        if a3_paths_conflict(st, path, name) =>
+                    {
                         for peer in &peers {
                             let exists = st.loans.iter().any(|l| {
                                 l.created == loan.created
@@ -4461,7 +4523,7 @@ impl<'a> Checker<'a> {
                                     && l.span == loan.span
                                     && matches!(
                                         &l.target,
-                                        LoanTarget::MapSlot { binding: b, path: p }
+                                        LoanTarget::MapSlot { binding: b, path: p, .. }
                                             if b == binding && p == peer
                                     )
                             });
@@ -4470,6 +4532,7 @@ impl<'a> Checker<'a> {
                                     target: LoanTarget::MapSlot {
                                         binding: binding.clone(),
                                         path: peer.clone(),
+                                        key: key.clone(),
                                     },
                                     created: loan.created,
                                     last: loan.last,
@@ -4659,11 +4722,22 @@ impl<'a> Checker<'a> {
                 if let PlaceKind::Ident(name) = &t.kind {
                     if let Some(path) = walk::addr_of_index_base_path(v) {
                         let binding = name.clone();
+                        let key = walk::addr_of_index_slot_key(v);
+                        self.emit_o8_alias_if_live(
+                            st,
+                            &path,
+                            key.as_deref(),
+                            Some(&binding),
+                            v.span(),
+                            idx,
+                            "a second slot loan",
+                        );
                         let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                         st.loans.push(Loan {
                             target: LoanTarget::MapSlot {
                                 binding: binding.clone(),
                                 path,
+                                key,
                             },
                             created: idx,
                             last,
@@ -4711,6 +4785,17 @@ impl<'a> Checker<'a> {
                 if let Some(path) = walk::place_path(t) {
                     self.emit_a3_if_live(st, &path, t.span, idx, "insert");
                 }
+            }
+            if let Some((path, key)) = walk::place_field_store_slot(t) {
+                self.emit_o8_alias_if_live(
+                    st,
+                    &path,
+                    key.as_deref(),
+                    None,
+                    t.span,
+                    idx,
+                    "a field store",
+                );
             }
         }
 
@@ -5616,14 +5701,38 @@ impl<'a> Checker<'a> {
         let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) else {
             return;
         };
-        if name.as_str() != "delete" && name.as_str() != "copy" && name.as_str() != "clear" {
+        if !matches!(name.as_str(), "delete" | "copy" | "clear" | "append") {
             return;
         }
         let Some(first) = cr.args.first() else {
             return;
         };
+        if name.as_str() == "append" && self.append_dst_reallocates(st, &first.value) {
+            return;
+        }
         if let Some(hit) = self.const_arg_root(st, &first.value, declared) {
             self.emit_const_write_error(&hit, first.value.span());
+        }
+    }
+
+    /// `append(dst, ..)` on a `const` writes nothing back into the `const`
+    /// when `dst` has no spare capacity. A `const` composite is
+    /// literal-initialized (`cap == len`), so the `const` itself, a field or
+    /// element of it, or an open-ended tail `c[i:]` always reallocates. A
+    /// bounded reslice `c[:k]` / `c[a:b]`, or a local alias of one, may not.
+    fn append_dst_reallocates(&self, st: &FnState, dst: &Expr) -> bool {
+        let mut cur = crate::model::unwrap_parens(dst);
+        loop {
+            match cur {
+                Expr::Ident { name, .. } => {
+                    return self.lookup_binding(st, name).is_some_and(|b| b.immutable);
+                }
+                Expr::Field { base, .. } | Expr::Index { base, .. } => {
+                    cur = crate::model::unwrap_parens(base);
+                }
+                Expr::Slice { base, hi: None, .. } => cur = crate::model::unwrap_parens(base),
+                _ => return false,
+            }
         }
     }
 
