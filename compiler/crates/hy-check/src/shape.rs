@@ -507,6 +507,13 @@ impl<'a> Checker<'a> {
                     vec![(**v).clone()]
                 }
             }
+            TypeShape::Struct(Some(n)) if n.starts_with("set[") => {
+                let elem_str = n
+                    .strip_prefix("set[")
+                    .and_then(|s| s.strip_suffix(']'))
+                    .unwrap_or("any");
+                vec![self.named_shape(elem_str)]
+            }
             _ => vec![TypeShape::Unknown; n_vars.max(1)],
         }
     }

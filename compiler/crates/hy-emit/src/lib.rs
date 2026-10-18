@@ -53,6 +53,28 @@ const OPTION_PRELUDE: &str = concat!(
     "func some[v any](val v) option[v] {\n",
     "\treturn option[v]{val: val, ok: true}\n",
     "}\n",
+    "\n",
+    "func (o option[v]) unwrap() v {\n",
+    "\tif !o.ok {\n",
+    "\t\tpanic(\"HY-PANIC/unwrap-none\")\n",
+    "\t}\n",
+    "\treturn o.val\n",
+    "}\n",
+    "\n",
+    "func (o option[v]) or(defaultVal v) v {\n",
+    "\tif !o.ok {\n",
+    "\t\treturn defaultVal\n",
+    "\t}\n",
+    "\treturn o.val\n",
+    "}\n",
+    "\n",
+    "func (o option[v]) is_some() bool {\n",
+    "\treturn o.ok\n",
+    "}\n",
+    "\n",
+    "func (o option[v]) is_none() bool {\n",
+    "\treturn !o.ok\n",
+    "}\n",
 );
 
 const SET_PRELUDE: &str = concat!(
@@ -79,7 +101,7 @@ const SET_PRELUDE: &str = concat!(
     "\tdelete(s.m, v)\n",
     "}\n",
     "\n",
-    "func (s *set[t]) len() int {\n",
+    "func (s set[t]) len() int {\n",
     "\treturn len(s.m)\n",
     "}\n",
 );
@@ -183,6 +205,8 @@ pub enum BindingKind {
     /// Bound to a channel (param type or `make(chan …)`) — single-var
     /// `for v in ch` ranges the VALUE directly; slices/maps need `_, v`.
     Chan,
+    /// Bound to a set (`set[T]`) — `len(s)` / `delete(s, v)` / `for v in s`.
+    Set,
     /// Our own struct / plain value — members emit verbatim.
     Plain,
 }
@@ -686,7 +710,10 @@ impl Emitter {
         }
         let body = &self.body;
         let needs_option = body.contains("option[") || body.contains("some(");
-        let needs_set = body.contains("set[");
+        let needs_set = body.contains("set[")
+            || body.contains(".remove(")
+            || body.contains(".contains(")
+            || body.contains(".insert(");
         let needs_pop = body.contains("hy_pop(");
         if needs_option || needs_set || needs_pop {
             out.push('\n');
@@ -1096,6 +1123,9 @@ impl Emitter {
             TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
             _ => return None,
         };
+        if name.starts_with("set[") || name == "set" {
+            return Some(BindingKind::Set);
+        }
         if name.is_empty() || !name.contains('.') {
             return None;
         }

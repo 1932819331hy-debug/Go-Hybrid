@@ -1029,6 +1029,12 @@ impl Emitter {
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
+        let e = Self::peel_parens(e);
+        if let Expr::StructLit { ty: Some(t), .. } = e {
+            if let Some(kind) = self.binding_kind_of_ty(t) {
+                return kind;
+            }
+        }
         let (call, args) = match e {
             Expr::Try { operand, .. } => match operand.as_ref() {
                 Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
@@ -1101,6 +1107,37 @@ impl Emitter {
             Expr::Paren { inner, .. } => self.is_channel_expr(inner),
             Expr::Call { .. } | Expr::Try { .. } => {
                 self.binding_kind_of(e) == BindingKind::Chan
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether an expression evaluates to a set (`set[T]`). Set ranges in
+    /// Go iterate over the underlying map (`s.m`).
+    pub(crate) fn is_set_expr(&self, e: &Expr) -> bool {
+        let e = Self::peel_parens(e);
+        match e {
+            Expr::Ident { name, .. } => {
+                matches!(self.bindings.get(name), Some(BindingKind::Set))
+            }
+            Expr::StructLit { ty: Some(t), .. } => match t {
+                TypeExpr::Named { name, .. } => name.starts_with("set[") || name == "set",
+                _ => false,
+            },
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: vn, .. } = base.as_ref() {
+                    if let Some(sn) = self.var_struct.get(vn) {
+                        if let Some(fields) = self.struct_fields.get(sn) {
+                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                                return fty.starts_with("set[") || fty == "set";
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            Expr::Call { .. } | Expr::Try { .. } => {
+                self.binding_kind_of(e) == BindingKind::Set
             }
             _ => false,
         }
@@ -1712,7 +1749,14 @@ impl Emitter {
                         // Drop the binding to `for range e`, completing the
                         // unread-binding lowering from issue #139.
                         let read = vars[0] != "_" && crate::rangebind::body_reads(body, &vars[0]);
-                        if !read {
+                        if self.is_set_expr(expr) {
+                            self.shadow_local_names(vars);
+                            if !read {
+                                format!("for range {}.m {{", e)
+                            } else {
+                                format!("for {} := range {}.m {{", vars[0], e)
+                            }
+                        } else if !read {
                             self.shadow_local_names(vars);
                             format!("for range {} {{", e)
                         } else {
@@ -1752,6 +1796,11 @@ impl Emitter {
                         if self.is_channel_expr(expr) {
                             return Err(EmitError::unsupported(
                                 "cannot range over channel with two iteration variables: channels permit only one iteration variable (SPEC-LANGUAGE.md LX13)",
+                            ));
+                        }
+                        if self.is_set_expr(expr) {
+                            return Err(EmitError::unsupported(
+                                "cannot range over set with two iteration variables: sets permit only one iteration variable (SPEC-LANGUAGE.md T9)",
                             ));
                         }
                         self.shadow_local_names(vars);
