@@ -1148,6 +1148,11 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
+                if name == "pop" && args.is_empty() {
+                    if let OpKind::Slice(elem) = bk {
+                        return Some(vec![*elem]);
+                    }
+                }
                 let head = Checker::base_named_type_str(name);
                 if let Some(sname) = self.struct_name(&bk) {
                     if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
@@ -1616,6 +1621,8 @@ impl<'a> Collector<'a> {
                             "only function-typed struct fields or declared methods can be called",
                         );
                     }
+                } else if name == "pop" {
+                    self.check_slice_pop_operands(base, &bk, args, span);
                 }
             }
             _ => {
@@ -1633,6 +1640,70 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+        }
+    }
+
+    fn is_addressable_slice_pop_base(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Ident { .. } => true,
+            Expr::Field { base, .. } => {
+                matches!(self.kind_of_expr(base), OpKind::Pointer(_))
+                    || self.is_addressable_slice_pop_base(base)
+            }
+            Expr::Index { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Slice(_) => true,
+                OpKind::Array(_) => self.is_addressable_slice_pop_base(base),
+                OpKind::Pointer(inner) if matches!(*inner, OpKind::Array(_)) => true,
+                OpKind::Unknown => self.is_addressable_slice_pop_base(base),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn check_slice_pop_operands(&mut self, base: &Expr, bk: &OpKind, args: &[CallArg], span: Span) {
+        match bk {
+            OpKind::Slice(_) => {
+                if !args.is_empty() {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "slice `.pop()` takes 0 arguments, found {} in `{}.pop(...)` (HYB-E2005)",
+                            args.len(),
+                            base.render()
+                        ),
+                        "call `.pop()` with no arguments: `x := s.pop()`",
+                    );
+                }
+                if !self.is_addressable_slice_pop_base(base) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "cannot call `.pop()` on non-addressable slice expression `{}` — `.pop()` mutates the slice header in place (HYB-E1002)",
+                            base.render()
+                        ),
+                        "bind the slice to a local variable first (`s := ...; x := s.pop()`)",
+                    );
+                }
+            }
+            OpKind::Int
+            | OpKind::Float
+            | OpKind::Bool
+            | OpKind::Str
+            | OpKind::Array(_)
+            | OpKind::Map(_, _)
+            | OpKind::Chan(_) => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot call `.pop()` on `{}` (type `{}`) — `.pop()` is only defined on slices `[]T` (HYB-E1002)",
+                        base.render(),
+                        bk.label()
+                    ),
+                    "`.pop()` is a slice operation (`[]T`); fixed-size arrays, maps, channels, and primitives do not support `.pop()`",
+                );
+            }
+            _ => {}
         }
     }
 
