@@ -1,6 +1,8 @@
 package analyzer
 
 import (
+	"context"
+	"errors"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -116,6 +118,69 @@ func TestContextLogConcurrentAccess(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestContextLogSnapshotDoesNotAliasCallerOrStoredSlices(t *testing.T) {
+	original := PassContextLog{
+		PkgPath: "example.org/test",
+		GoFiles: []string{"main.go"},
+		OtherFiles: []string{"other.hy"},
+		IgnoredFiles: []string{"ignored.hy"},
+		FoundHyFiles: []string{"DirScan:other.hy"},
+	}
+	setLastContextLog(original)
+
+	// The setter must not retain the input slices (which are owned by a pass).
+	original.GoFiles[0] = "caller-mutated.go"
+	original.OtherFiles[0] = "caller-mutated.hy"
+	original.IgnoredFiles[0] = "caller-mutated.hy"
+	original.FoundHyFiles[0] = "caller-mutated.hy"
+
+	first := LastContextLogSnapshot()
+	if first.GoFiles[0] != "main.go" || first.OtherFiles[0] != "other.hy" ||
+		first.IgnoredFiles[0] != "ignored.hy" || first.FoundHyFiles[0] != "DirScan:other.hy" {
+		t.Fatalf("input slices leaked into saved observation: %+v", first)
+	}
+
+	// The snapshot must not expose shared backing arrays, even to other readers.
+	first.GoFiles[0] = "snapshot-mutated.go"
+	first.OtherFiles[0] = "snapshot-mutated.hy"
+	first.IgnoredFiles[0] = "snapshot-mutated.hy"
+	first.FoundHyFiles[0] = "snapshot-mutated.hy"
+	second := LastContextLogSnapshot()
+	if second.GoFiles[0] != "main.go" || second.OtherFiles[0] != "other.hy" ||
+		second.IgnoredFiles[0] != "ignored.hy" || second.FoundHyFiles[0] != "DirScan:other.hy" {
+		t.Fatalf("snapshot mutated shared observation: %+v", second)
+	}
+}
+
+func TestEngineCheckContextIsCancellableAndDoesNotPoisonRuntime(t *testing.T) {
+	engine, err := GetEngine("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile("../../tests/checker-corpus/02-shared-map-managed.hy")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := engine.CheckContext(cancelled, string(source)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled request must fail closed: %v", err)
+	}
+	if _, err := engine.CheckContext(nil, string(source)); err == nil {
+		t.Fatal("nil request context should return an error, not panic")
+	}
+
+	// A completed request must still be possible using the same compiled runtime.
+	out, err := engine.CheckContext(context.Background(), string(source))
+	if err != nil {
+		t.Fatalf("cancelled request poisoned shared runtime: %v", err)
+	}
+	if out.Summary.Verdict != "accept" || out.Summary.Warnings < 1 {
+		t.Fatalf("unexpected result after cancelling previous check: %+v", out)
+	}
 }
 
 func TestAnalyzerDirectInvocation(t *testing.T) {
