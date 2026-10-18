@@ -882,3 +882,22 @@ accepted so the rule cannot degrade into "never take an address".
 
 (Registered as 65/66: PR #436 authored them as 61/62, but 61–64 were taken
 by the string-escape/shadowing/send waves before it landed. G0st13.)
+
+## Additive corpus registration — 2026-10-18: task spawn boundary soundness (issue #5)
+
+Corpus 25 pins the spawn-callee proof with a map-capturing closure; this
+fixture pins the scalar-capture twin: a closure that WRITES a captured
+`int` binding, spawned as a task, with main still reading the binding
+after the spawn. A checker that special-cased copyable payloads (or
+ignored the post-spawn read) would pass every row above and still accept
+a real race.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 67 | 67-adversarial-race-spawn | REJECT | A1c | `HYB-E3001` | `x := 42; task fn() { x = 100 }(); fmt.println("{x}")` — the spawned callee is a closure that writes its captured binding while main reads it (A5's spawn-callee proof) |
+
+(Registered as 67: PR #402 authored the adversarial intent in non-Hybrid
+pseudo-syntax — `func main`, `var x: int = 42`, `spawn fn(){}()`,
+`print(x)` — which does not parse on main; the maintainer integration
+translated it to Hybrid's grammar with the intent unchanged.
+KonstantinPythonLab.)

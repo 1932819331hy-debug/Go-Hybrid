@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 100 programs** — ACCEPT 32 · ACCEPT-MANAGED 2 ·
-REJECT 66 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 101 programs** — ACCEPT 32 · ACCEPT-MANAGED 2 ·
+REJECT 67 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -20,7 +20,7 @@ the new fixtures.
 
 The prose below is the original pre-registration statement, kept as written
 on its date: the corpora sizes it names (18, 20) are what the corpus held
-then, not today's 100. The dated tripwire baseline is preserved as historical
+then, not today's 101. The dated tripwire baseline is preserved as historical
 for the same reason.
 
 18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
@@ -131,3 +131,15 @@ field-access check produces. Rules live in
 
 With this registration the corpus is **100 programs: ACCEPT 32 ·
 ACCEPT-MANAGED 2 · REJECT 66**.
+`67-adversarial-race-spawn.hy` — KonstantinPythonLab (PR #402, issue #5):
+the task-spawn-boundary adversarial — a closure that WRITES a captured
+mutable binding, spawned as a task, with main still reading the binding
+after the spawn. The maintainer integration translated the PR's pseudo-
+syntax (`func main`, `var x: int = 42`, `spawn fn(){}()`, `print`) to
+Hybrid's actual grammar (`fn main`, `x := 42`, `task fn() { ... }()`,
+`fmt.println("{x}")`) with the adversarial intent unchanged; the checker
+rejects at [S1] with A1c/HYB-E3001 (the spawn-callee proof: closures share
+every capture with the new task).
+
+With this registration the corpus is **101 programs: ACCEPT 32 ·
+ACCEPT-MANAGED 2 · REJECT 67**.
