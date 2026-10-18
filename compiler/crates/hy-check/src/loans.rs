@@ -1609,6 +1609,7 @@ impl<'a> Checker<'a> {
                     // target's default int type in emitted Go (the emitted
                     // Go declaration is `int` when no ascription is present).
                     self.check_default_int_overflow(name, value, Some(st));
+                    self.check_default_float_overflow(name, value, Some(st));
                 }
                 // N1: a bare `nil` initializer under a non-nilable
                 // ascription is a compile error (HYB-E4001) — the SPEC's own
@@ -6957,7 +6958,7 @@ impl<'a> Checker<'a> {
     /// The declared type of an assignment place, when it resolves (drives
     /// HYB-E6002 constant overflow checks on assignment targets).
     // ponytail: resolves direct ident, index, and struct field targets via package struct definitions.
-    fn place_target_ty(&self, st: &FnState, p: &Place) -> Option<hy_syntax::TypeExpr> {
+    pub(crate) fn place_target_ty(&self, st: &FnState, p: &Place) -> Option<hy_syntax::TypeExpr> {
         enum Step<'a> {
             Index,
             Field(&'a str),

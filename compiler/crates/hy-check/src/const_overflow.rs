@@ -37,6 +37,42 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
+        if ty_name == "float32" || ty_name == "float64" {
+            if let Some(f) = self.const_float_fold(value, st) {
+                let overflows = if ty_name == "float32" {
+                    (f as f32).is_infinite()
+                } else {
+                    f.is_infinite()
+                };
+                if overflows {
+                    let span = value.span();
+                    let msg = format!(
+                        "constant `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
+                        value.render(),
+                        ty_name,
+                        name
+                    );
+                    let notes = vec![
+                        format!(
+                            "why: Go rejects a constant initializer that overflows `{}` (`cannot use {} as {} value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #683)",
+                            ty_name, value.render(), ty_name
+                        ),
+                        format!(
+                            "fix: use a finite `{}` value in range",
+                            ty_name
+                        ),
+                        format!(
+                            "note: the declared type was written here ({})",
+                            span_hint(*ty_span)
+                        ),
+                    ];
+                    self.diags.push(
+                        Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                    );
+                }
+            }
+            return;
+        }
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
@@ -140,13 +176,50 @@ impl<'a> Checker<'a> {
         ty: &TypeExpr,
         value: &Expr,
     ) {
+        let resolved = self.resolve_type_alias(ty);
         let TypeExpr::Named {
             name: ty_name,
             span: ty_span,
-        } = ty
+        } = &resolved
         else {
             return;
         };
+        if ty_name == "float32" || ty_name == "float64" {
+            if let Some(f) = self.const_float_fold(value, None) {
+                let overflows = if ty_name == "float32" {
+                    (f as f32).is_infinite()
+                } else {
+                    f.is_infinite()
+                };
+                if overflows {
+                    let span = value.span();
+                    let msg = format!(
+                        "constant `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
+                        value.render(),
+                        ty_name,
+                        target
+                    );
+                    let notes = vec![
+                        format!(
+                            "why: Go rejects a constant assignment that overflows `{}` (`cannot use {} as {} value in assignment (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #683)",
+                            ty_name, value.render(), ty_name
+                        ),
+                        format!(
+                            "fix: use a finite `{}` value in range",
+                            ty_name
+                        ),
+                        format!(
+                            "note: the declared type was written here ({})",
+                            span_hint(*ty_span)
+                        ),
+                    ];
+                    self.diags.push(
+                        Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                    );
+                }
+            }
+            return;
+        }
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
@@ -270,6 +343,44 @@ impl<'a> Checker<'a> {
         self.diags.push(
             Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
         );
+    }
+
+    /// Check untyped float constants in variable declarations without an explicit
+    /// type. Go gives these declarations the default `float64` type.
+    pub(crate) fn check_default_float_overflow(
+        &mut self,
+        name: &str,
+        value: &Expr,
+        st: Option<&FnState>,
+    ) {
+        if !is_float_const_expr(value, &self.const_values, 0, st) {
+            return;
+        }
+        if let Some(f) = self.const_float_fold(value, st) {
+            if f.is_infinite() {
+                let span = value.span();
+                let msg = format!(
+                    "constant expression `{}` overflows default type `float64` of `{}` (HYB-E6002)",
+                    value.render(),
+                    name
+                );
+                let notes = vec![
+                    format!(
+                        "why: Go assigns default type `float64` to an untyped float constant in a variable declaration and rejects values outside float64's range (`cannot use {} as float64 value in assignment (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #683)",
+                        value.render()
+                    ),
+                    "fix: use a finite `float64` value in range, or declare an explicit type".to_string(),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                );
+            }
+        }
+    }
+
+    /// Fold a constant float expression (literals, identifiers, unary, binary).
+    pub(crate) fn const_float_fold(&self, e: &Expr, st: Option<&FnState>) -> Option<f64> {
+        const_float_fold_with(e, &self.const_values, 0, st)
     }
 
     // -----------------------------------------------------------------------
@@ -1187,6 +1298,112 @@ pub(crate) fn const_float_value(e: &Expr) -> Option<f64> {
             ..
         } => const_float_value(operand).map(|v| -v),
         _ => None,
+    }
+}
+
+/// Fold a float constant expression, resolving identifiers via `consts`.
+pub(crate) fn const_float_fold_with(
+    e: &Expr,
+    consts: &HashMap<String, &Expr>,
+    depth: u32,
+    st: Option<&FnState>,
+) -> Option<f64> {
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Float(s),
+            ..
+        } => {
+            let clean: String = s.chars().filter(|c| *c != '_').collect();
+            clean.parse::<f64>().ok()
+        }
+        Expr::Lit {
+            kind: LitKind::Int(s),
+            ..
+        } => {
+            let clean: String = s.chars().filter(|c| *c != '_').collect();
+            if let Some(ConstInt::Value(v)) = parse_int_lit(s) {
+                Some(v as f64)
+            } else if let Ok(f) = clean.parse::<f64>() {
+                Some(f)
+            } else {
+                None
+            }
+        }
+        Expr::Lit {
+            kind: LitKind::Char(c),
+            ..
+        } => Some(*c as u32 as f64),
+        Expr::Ident { name, .. } => {
+            if let Some(st) = st {
+                if st.env_lookup(name).is_some() {
+                    return None;
+                }
+            }
+            if depth < 16 {
+                if let Some(v) = consts.get(name) {
+                    return const_float_fold_with(v, consts, depth + 1, None);
+                }
+            }
+            None
+        }
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => const_float_fold_with(operand, consts, depth + 1, st).map(|v| -v),
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let l = const_float_fold_with(lhs, consts, depth + 1, st)?;
+            let r = const_float_fold_with(rhs, consts, depth + 1, st)?;
+            match op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                BinOp::Div => {
+                    if r == 0.0 {
+                        None
+                    } else {
+                        Some(l / r)
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Returns true if `e` is an untyped float constant expression (contains at least one float literal or float const).
+fn is_float_const_expr(
+    e: &Expr,
+    consts: &HashMap<String, &Expr>,
+    depth: u32,
+    st: Option<&FnState>,
+) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Float(_),
+            ..
+        } => true,
+        Expr::Lit { .. } => false,
+        Expr::Ident { name, .. } => {
+            if let Some(st) = st {
+                if st.env_lookup(name).is_some() {
+                    return false;
+                }
+            }
+            if depth < 16 {
+                if let Some(v) = consts.get(name) {
+                    return is_float_const_expr(v, consts, depth + 1, None);
+                }
+            }
+            false
+        }
+        Expr::Unary { operand, .. } => is_float_const_expr(operand, consts, depth + 1, st),
+        Expr::Binary { lhs, rhs, .. } => {
+            is_float_const_expr(lhs, consts, depth + 1, st)
+                || is_float_const_expr(rhs, consts, depth + 1, st)
+        }
+        _ => false,
     }
 }
 
