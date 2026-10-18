@@ -664,6 +664,17 @@ impl<'a> Checker<'a> {
                     if name == "make" {
                         return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
                     }
+                    if args.len() == 1 {
+                        let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
+                            || crate::const_init::is_conversion_type_name(name)
+                            || self.type_aliases.contains_key(name);
+                        if is_type_name && !self.fns.contains_key(name.as_str()) {
+                            return Some(TypeExpr::Named {
+                                name: name.clone(),
+                                span: *span,
+                            });
+                        }
+                    }
                     let head = Self::base_named_type_str(name);
                     self.fns
                         .get(name.as_str())

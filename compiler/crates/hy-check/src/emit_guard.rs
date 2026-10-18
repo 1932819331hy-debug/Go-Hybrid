@@ -299,6 +299,13 @@ impl<'a> Checker<'a> {
             PlaceKind::Index { base, index } => {
                 self.check_place_emit_guard(st, base);
                 self.check_expr_emit_guard(st, index);
+                if let Some(base_ty) = self.place_target_ty(st, base) {
+                    let resolved = self.resolve_type_alias(&base_ty);
+                    if let TypeExpr::Map { key, .. } = resolved {
+                        let key_ty = self.resolve_type_alias(&key);
+                        self.check_const_overflow_init("map index", &key_ty, index, Some(st));
+                    }
+                }
             }
             PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
                 self.check_place_emit_guard(st, base)
@@ -316,6 +323,7 @@ impl<'a> Checker<'a> {
                     BinOp::Shl | BinOp::Shr => self.check_negative_shift(rhs, *span),
                     _ => {}
                 }
+                self.check_binary_const_overflow(st, *op, lhs, rhs);
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
@@ -327,6 +335,13 @@ impl<'a> Checker<'a> {
             Expr::Index { base, index, .. } => {
                 self.check_expr_emit_guard(st, base);
                 self.check_expr_emit_guard(st, index);
+                if let Some(base_ty) = self.ty_of_expr(st, base) {
+                    let resolved = self.resolve_type_alias(&base_ty);
+                    if let TypeExpr::Map { key, .. } = resolved {
+                        let key_ty = self.resolve_type_alias(&key);
+                        self.check_const_overflow_init("map index", &key_ty, index, Some(st));
+                    }
+                }
             }
             Expr::Slice { base, lo, hi, .. } => {
                 self.check_expr_emit_guard(st, base);
@@ -460,7 +475,7 @@ impl<'a> Checker<'a> {
     fn check_call_const_overflow(&mut self, st: &FnState, callee: &Expr, args: &[CallArg]) {
         let unwrapped = crate::model::unwrap_parens(callee);
 
-        // 1. Built-in: append(slice, items...)
+        // 1. Built-in: append(slice, items...) and delete(map, key)
         if let Expr::Ident { name, .. } = unwrapped {
             if name == "append" {
                 if let Some(first_arg) = args.first() {
@@ -474,8 +489,26 @@ impl<'a> Checker<'a> {
                     if let Some(elem_ty) = elem_ty {
                         for a in &args[1..] {
                             if !a.spread {
-                                self.check_const_overflow_init("argument of append", &elem_ty, &a.value, None);
+                                self.check_const_overflow_init("argument of append", &elem_ty, &a.value, Some(st));
                             }
+                        }
+                    }
+                }
+                return;
+            }
+            if name == "delete" {
+                if let Some(first_arg) = args.first() {
+                    if let Some(key_arg) = args.get(1) {
+                        let key_ty = self
+                            .ty_of_expr(st, &first_arg.value)
+                            .map(|t| self.resolve_type_alias(&t))
+                            .and_then(|t| match t {
+                                TypeExpr::Map { key, .. } => Some(*key),
+                                _ => None,
+                            });
+                        if let Some(key_ty) = key_ty {
+                            let resolved_key = self.resolve_type_alias(&key_ty);
+                            self.check_const_overflow_init("argument to delete", &resolved_key, &key_arg.value, Some(st));
                         }
                     }
                 }
@@ -1570,6 +1603,27 @@ impl<'a> Checker<'a> {
     fn stmt_ends_before(stmt: &Stmt, pos: hy_diag::Pos) -> bool {
         let s = Self::stmt_span(stmt);
         (s.end.line, s.end.col) <= (pos.line, pos.col)
+    }
+
+    fn check_binary_const_overflow(&mut self, st: &FnState, op: BinOp, lhs: &Expr, rhs: &Expr) {
+        if matches!(op, BinOp::Shl | BinOp::Shr) {
+            return;
+        }
+
+        let desc = match op {
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => "comparison",
+            _ => "binary expression",
+        };
+
+        if let Some(lhs_ty) = self.ty_of_expr(st, lhs) {
+            let resolved = self.resolve_type_alias(&lhs_ty);
+            self.check_const_overflow_init(desc, &resolved, rhs, Some(st));
+        }
+
+        if let Some(rhs_ty) = self.ty_of_expr(st, rhs) {
+            let resolved = self.resolve_type_alias(&rhs_ty);
+            self.check_const_overflow_init(desc, &resolved, lhs, Some(st));
+        }
     }
 }
 

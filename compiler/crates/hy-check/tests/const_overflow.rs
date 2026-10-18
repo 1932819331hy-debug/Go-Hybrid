@@ -955,6 +955,7 @@ fn aliased_return_overflow_is_rejected() {
     assert_eq!(r.verdict, Verdict::Reject);
 }
 
+#[test]
 fn chan_send_int8_overflow_is_rejected() {
     let src = "
 fn worker(ch chan int8) {
@@ -1081,6 +1082,7 @@ fn worker(ch chan int8) {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
 #[test]
 fn char_constant_overflow_is_rejected() {
     let r = check(OVERFLOW_CHAR_INT8);
@@ -1115,6 +1117,198 @@ fn char_constant_fits_accepts() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+#[test]
+fn binary_comparison_int8_overflow_rhs_rejected() {
+    let src = "
+fn check(x int8) bool {
+    return x == 300
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for x == 300 under int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn binary_comparison_int8_overflow_lhs_rejected() {
+    let src = "
+fn check(x int8) bool {
+    return 300 == x
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for 300 == x under int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn binary_comparison_less_than_overflow_rejected() {
+    let src = "
+fn check(x int8) bool {
+    return x < 300
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for x < 300 under int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn binary_comparison_float_truncation_rejected() {
+    let src = "
+fn check(x int8) bool {
+    return x == 2.5
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for x == 2.5 under int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn binary_arithmetic_overflow_rejected() {
+    let src = "
+fn add(x int8) int8 {
+    return x + 300
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for x + 300 under int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn binary_arithmetic_sub_overflow_lhs_rejected() {
+    let src = "
+fn sub(x int8) int8 {
+    return 300 - x
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for 300 - x under int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_index_read_overflow_rejected() {
+    let src = "
+fn get(m map[int8]string) string {
+    return m[300]
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for m[300] under map[int8]string, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_index_write_overflow_rejected() {
+    let src = "
+fn set(m map[int8]string) {
+    m[300] = \"hello\"
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for m[300] = \"hello\" under map[int8]string, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn delete_builtin_overflow_rejected() {
+    let src = "
+fn del(m map[int8]string) {
+    delete(m, 300)
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for delete(m, 300) under map[int8]string, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn primitive_conversion_comparison_overflow_rejected() {
+    let src = "
+fn check(x int) bool {
+    return int8(x) == 300
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for int8(x) == 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn comparison_and_map_fitting_values_accept() {
+    let src = "
+fn check(x int8, m map[int8]string) bool {
+    if x == 100 {
+        _ = m[100]
+        delete(m, 100)
+        return true
+    }
+    return false
+}
+";
+    let r = check(src);
+    assert!(
+        error_codes(&r).is_empty(),
+        "expected valid int8 values to accept cleanly, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
 // ---------------------------------------------------------------------------
 // PR #297 (issue #228 family D): default-int overflow at untyped var decls
 // and >i128 literals failing open. Integrated on current main: parse_int_lit
