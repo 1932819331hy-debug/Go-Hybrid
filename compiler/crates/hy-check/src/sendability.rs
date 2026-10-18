@@ -626,18 +626,46 @@ impl<'a> Checker<'a> {
         callee: &Expr,
         argc: usize,
     ) -> Option<Vec<TypeShape>> {
-        let name = match unwrap_parens(callee) {
-            Expr::Ident { name, .. } => name,
-            _ => return None,
-        };
-        if self.lookup_binding(st, name).is_some() {
-            return None; // shadowed by a local binding — not a static fn call
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if self.lookup_binding(st, name).is_some() {
+                    return None; // shadowed by a local binding — not a static fn call
+                }
+                let f = self.fns.get(name)?;
+                if f.params.len() != argc {
+                    return None;
+                }
+                Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+            }
+            Expr::FnLit { params, .. } => {
+                if params.len() != argc {
+                    return None;
+                }
+                Some(params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+            }
+            Expr::Field {
+                base,
+                name: method_name,
+                ..
+            } => {
+                let recv_base = match self.shape_of_expr(st, base) {
+                    TypeShape::Struct(Some(s)) => Some(s),
+                    TypeShape::Pointer(inner) => match *inner {
+                        TypeShape::Struct(Some(s)) => Some(s),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let f = recv_base.and_then(|rb| {
+                    self.method_decls.get(&(rb, method_name.clone())).copied()
+                })?;
+                if f.params.len() != argc {
+                    return None;
+                }
+                Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+            }
+            _ => None,
         }
-        let f = self.fns.get(name)?;
-        if f.params.len() != argc {
-            return None;
-        }
-        Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
     }
 
     /// Could a value of shape `got` legitimately occupy a slot of shape
@@ -1219,7 +1247,21 @@ impl<'a> Checker<'a> {
                 None
             };
 
-            match self.classify_value(st, v) {
+            let is_auto_addressed = code == "HYB-E3001"
+                && matches!(target_shapes.and_then(|ts| ts.get(vi)), Some(TypeShape::Pointer(_)))
+                && !matches!(self.shape_of_expr(st, v), TypeShape::Pointer(_))
+                && matches!(
+                    crate::model::unwrap_parens(v),
+                    Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
+                );
+
+            let outcome = if is_auto_addressed {
+                self.classify_addr_of(st, v, crate::model::unwrap_parens(v))
+            } else {
+                self.classify_value(st, v)
+            };
+
+            match outcome {
                 Outcome::Ok => {
                     if let Some((got, want)) = send_elem_mismatch {
                         self.emit_chan_elem_mismatch_send(
