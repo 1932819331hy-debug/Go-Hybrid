@@ -82,6 +82,38 @@ jobs:
           set -euo pipefail
           go run ./cmd/editbench -root ../.. -files 25 -edits 100 -warmup 10 \
             -output "$RUNNER_TEMP/w012-edit-benchmark.json"
+      - name: Measure opt-in WASM cache in two separate Go processes
+        working-directory: spikes/w012-analyzer
+        env:
+          HYBRID_W012_CACHE_DIR: ${{ runner.temp }}/w012-wazero-compilation-cache
+        run: |
+          set -euo pipefail
+          mkdir -p "$HYBRID_W012_CACHE_DIR"
+          go build -o "$RUNNER_TEMP/w012-editbench" ./cmd/editbench
+          "$RUNNER_TEMP/w012-editbench" -root ../.. -files 2 -edits 2 -warmup 1 \
+            -output "$RUNNER_TEMP/w012-cold-cache-first.json"
+          "$RUNNER_TEMP/w012-editbench" -root ../.. -files 2 -edits 2 -warmup 1 \
+            -output "$RUNNER_TEMP/w012-cold-cache-second.json"
+          python3 - <<'PY'
+          import json, os
+          root = os.environ["RUNNER_TEMP"]
+          with open(os.path.join(root, "w012-cold-cache-first.json")) as f: first = json.load(f)
+          with open(os.path.join(root, "w012-cold-cache-second.json")) as f: second = json.load(f)
+          assert first["WASMSHA256"] == second["WASMSHA256"]
+          assert first["NativeSHA256"] == second["NativeSHA256"]
+          print("CROSS-PROCESS WASM FILESYSTEM CACHE, experimental only")
+          print("first cold Engine.GetEngine:", first["ColdWASMInitMS"], "ms")
+          print("second cold Engine.GetEngine:", second["ColdWASMInitMS"], "ms")
+          print("No speed threshold asserted; compare host-specific raw samples.")
+          PY
+      - name: Publish cross-process cache timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: w012-cross-process-cache-timings
+          path: ${{ runner.temp }}/w012-cold-cache-*.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Publish raw request latency samples
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
