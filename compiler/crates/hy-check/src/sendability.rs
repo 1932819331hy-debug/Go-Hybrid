@@ -626,18 +626,46 @@ impl<'a> Checker<'a> {
         callee: &Expr,
         argc: usize,
     ) -> Option<Vec<TypeShape>> {
-        let name = match unwrap_parens(callee) {
-            Expr::Ident { name, .. } => name,
-            _ => return None,
-        };
-        if self.lookup_binding(st, name).is_some() {
-            return None; // shadowed by a local binding — not a static fn call
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if self.lookup_binding(st, name).is_some() {
+                    return None; // shadowed by a local binding — not a static fn call
+                }
+                let f = self.fns.get(name)?;
+                if f.params.len() != argc {
+                    return None;
+                }
+                Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+            }
+            Expr::FnLit { params, .. } => {
+                if params.len() != argc {
+                    return None;
+                }
+                Some(params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+            }
+            Expr::Field {
+                base,
+                name: method_name,
+                ..
+            } => {
+                let recv_base = match self.shape_of_expr(st, base) {
+                    TypeShape::Struct(Some(s)) => Some(s),
+                    TypeShape::Pointer(inner) => match *inner {
+                        TypeShape::Struct(Some(s)) => Some(s),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let f = recv_base.and_then(|rb| {
+                    self.method_decls.get(&(rb, method_name.clone())).copied()
+                })?;
+                if f.params.len() != argc {
+                    return None;
+                }
+                Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+            }
+            _ => None,
         }
-        let f = self.fns.get(name)?;
-        if f.params.len() != argc {
-            return None;
-        }
-        Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
     }
 
     /// Could a value of shape `got` legitimately occupy a slot of shape
@@ -907,6 +935,29 @@ impl<'a> Checker<'a> {
             .push(Diagnostic::error("HYB-E4001", self.path.clone(), span, msg).with_notes(notes));
     }
 
+    /// Emit HYB-E4003: an UNTYPED nil declaration — `var x = nil` / `x := nil`
+    /// / `let x = nil` (no ascription). The E4001 sites all require a declared
+    /// type to prove the nil against; with no ascription there is no type at
+    /// all, `shape_of_expr(nil)` is Unknown, and the checker used to accept the
+    /// declaration — then the emitter emitted `var x = nil`, which Go rejects
+    /// outright (`use of untyped nil in variable declaration`). nil has exactly
+    /// two homes (N1): `error` and the foreign-Go perimeter, and both must be
+    /// visible in a DECLARED type — an untyped nil can never name either.
+    pub(crate) fn emit_untyped_nil_decl_error(&mut self, name: &str, span: Span) {
+        let msg = format!(
+            "`{}` is declared from an untyped `nil`: Go rejects the emitted declaration (`use of untyped nil in variable declaration`)",
+            name
+        );
+        let notes = vec![
+            "why: nil has exactly two homes (N1) — `error` and the foreign-Go perimeter (N2) — and both must be visible in a DECLARED type; an untyped nil can never name either, so the emitted `var x = nil` fails `go build`".to_string(),
+            "fix: declare the nil home explicitly — `var e error = nil` (error's zero value) or `var h Foreign.handle = nil` at the foreign perimeter (N1/N2)".to_string(),
+            "fix: declare the binding without an initializer — the zero value of the intended type IS the value (N3): `var ch chan int` (zero channel), `var s []int` (zero slice), `var m map[string]int` (zero map)".to_string(),
+            "fix: if absence is the meaning, use `option[T]` — its zero value is `none` (N3)".to_string(),
+        ];
+        self.diags
+            .push(Diagnostic::error("HYB-E4003", self.path.clone(), span, msg).with_notes(notes));
+    }
+
     /// N1 for composite literals: `job{m: nil}` with a map-typed field used
     /// to pass the checker — classify_composite has no per-field type
     /// context, so the bare-nil check at the five direct-flow sites never
@@ -971,21 +1022,12 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::SliceLit { elem, items, .. } => {
-                if let Some(ety) = elem {
-                    let eshape = self.shape_of_type(ety);
-                    let ety_text = ety.render();
-                    for it in items {
-                        if Checker::is_nil_literal(it) && !Checker::is_nilable_shape(&eshape) {
-                            self.emit_nil_type_error_text(
-                                &eshape,
-                                ety_text.clone(),
-                                it.span(),
-                                &format!("the element slot `{}`", ety_text),
-                            );
-                            continue;
-                        }
-                        self.check_composite_nils(st, it);
-                    }
+                let elem_ty = value
+                    .as_array_lit()
+                    .map(|(_, inner_elem, _)| inner_elem)
+                    .or(elem.as_deref());
+                if let Some(ety) = elem_ty {
+                    self.check_composite_nils_items(st, ety, items);
                 } else {
                     for it in items {
                         self.check_composite_nils(st, it);
@@ -993,6 +1035,37 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn check_composite_nils_items(&mut self, st: &FnState, ety: &TypeExpr, items: &[Expr]) {
+        let eshape = self.shape_of_type(ety);
+        let ety_text = ety.render();
+        for it in items {
+            if Checker::is_nil_literal(it) && !Checker::is_nilable_shape(&eshape) {
+                self.emit_nil_type_error_text(
+                    &eshape,
+                    ety_text.clone(),
+                    it.span(),
+                    &format!("the element slot `{}`", ety_text),
+                );
+                continue;
+            }
+            if let Expr::SliceLit {
+                elem: None,
+                items: sub_items,
+                ..
+            } = unwrap_parens(it)
+            {
+                let resolved = self.resolve_type_alias(ety);
+                if let TypeExpr::Slice { elem: sub_ety, .. }
+                | TypeExpr::Array { elem: sub_ety, .. } = &resolved
+                {
+                    self.check_composite_nils_items(st, sub_ety, sub_items);
+                    continue;
+                }
+            }
+            self.check_composite_nils(st, it);
         }
     }
 
@@ -1174,7 +1247,21 @@ impl<'a> Checker<'a> {
                 None
             };
 
-            match self.classify_value(st, v) {
+            let is_auto_addressed = code == "HYB-E3001"
+                && matches!(target_shapes.and_then(|ts| ts.get(vi)), Some(TypeShape::Pointer(_)))
+                && !matches!(self.shape_of_expr(st, v), TypeShape::Pointer(_))
+                && matches!(
+                    crate::model::unwrap_parens(v),
+                    Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
+                );
+
+            let outcome = if is_auto_addressed {
+                self.classify_addr_of(st, v, crate::model::unwrap_parens(v))
+            } else {
+                self.classify_value(st, v)
+            };
+
+            match outcome {
                 Outcome::Ok => {
                     if let Some((got, want)) = send_elem_mismatch {
                         self.emit_chan_elem_mismatch_send(
@@ -1755,13 +1842,28 @@ impl<'a> Checker<'a> {
             }
             Expr::StructLit { ty, .. } => ty.clone(),
             Expr::SliceLit {
-                elem: Some(e),
+                elem: Some(el),
+                items,
                 span,
-                ..
-            } => Some(TypeExpr::Slice {
-                elem: e.clone(),
-                span: *span,
-            }),
+            } => {
+                if let Some((len_opt, inner_elem, arr_ty)) = expr.as_array_lit() {
+                    if len_opt.is_some() {
+                        return Some(arr_ty.clone());
+                    }
+                    return Some(TypeExpr::Array {
+                        len: Some(Box::new(Expr::Lit {
+                            kind: hy_syntax::LitKind::Int(items.len().to_string()),
+                            span: *span,
+                        })),
+                        elem: Box::new(inner_elem.clone()),
+                        span: *span,
+                    });
+                }
+                Some(TypeExpr::Slice {
+                    elem: el.clone(),
+                    span: *span,
+                })
+            }
             Expr::MapLit {
                 key, value, span, ..
             } => Some(TypeExpr::Map {

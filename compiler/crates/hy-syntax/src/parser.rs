@@ -1887,7 +1887,8 @@ impl Parser {
     }
 
     /// Operand-start `[`: `[]T{…}` typed slice literal, `[]T` type-as-value
-    /// (make argument), or `[a, b, c]` untyped composite literal.
+    /// (make argument), `[N]T{…}` / `[...]T{…}` typed array composite literal,
+    /// or `[a, b, c]` untyped composite literal.
     fn parse_bracket_literal(&mut self, start: usize) -> PResult<Expr> {
         self.bump(); // [
         if self.eat_punct("]") {
@@ -1916,16 +1917,79 @@ impl Parser {
                     span: self.span_from(start),
                 })
             }
+        } else if self.eat_punct("...") {
+            self.expect_punct("]")?;
+            let inner_elem = Box::new(self.parse_type()?);
+            let ty_span = self.span_from(start);
+            self.expect_punct("{")?;
+            let mut items = Vec::new();
+            while !self.at_punct("}") && !self.at_eof() {
+                items.push(self.parse_expr(true)?);
+                if !self.at_punct(",") && !self.at_punct("}") {
+                    return self.err("expected ',' or '}' in array literal");
+                }
+                self.eat_punct(",");
+            }
+            self.expect_punct("}")?;
+            Ok(Expr::SliceLit {
+                elem: Some(Box::new(TypeExpr::Array {
+                    len: None,
+                    elem: inner_elem,
+                    span: ty_span,
+                })),
+                items,
+                span: self.span_from(start),
+            })
         } else {
             let mut items = Vec::new();
+            let mut trailing_comma = false;
             while !self.at_punct("]") && !self.at_eof() {
                 items.push(self.parse_expr(true)?);
                 if !self.at_punct(",") && !self.at_punct("]") {
                     return self.err("expected ',' or ']' in composite literal");
                 }
-                self.eat_punct(",");
+                trailing_comma = self.eat_punct(",");
             }
             self.expect_punct("]")?;
+            // Issue #643 (SPEC T6): `[N]T{…}` array composite literal.
+            // When `[` held a single expression `N` with no trailing comma and
+            // `]` is immediately followed on the same line by a type `T` and `{`,
+            // parse the construct as a typed array composite literal.
+            if items.len() == 1
+                && !trailing_comma
+                && self.same_line_as_prev()
+                && self.is_type_start()
+            {
+                let saved_pos = self.pos;
+                let saved_diags = self.diags.len();
+                if let Ok(inner_elem) = self.parse_type() {
+                    if self.at_punct("{") {
+                        let ty_span = self.span_from(start);
+                        let len_expr = items.pop().expect("single array length expr");
+                        self.bump(); // {
+                        let mut arr_items = Vec::new();
+                        while !self.at_punct("}") && !self.at_eof() {
+                            arr_items.push(self.parse_expr(true)?);
+                            if !self.at_punct(",") && !self.at_punct("}") {
+                                return self.err("expected ',' or '}' in array literal");
+                            }
+                            self.eat_punct(",");
+                        }
+                        self.expect_punct("}")?;
+                        return Ok(Expr::SliceLit {
+                            elem: Some(Box::new(TypeExpr::Array {
+                                len: Some(Box::new(len_expr)),
+                                elem: Box::new(inner_elem),
+                                span: ty_span,
+                            })),
+                            items: arr_items,
+                            span: self.span_from(start),
+                        });
+                    }
+                }
+                self.pos = saved_pos;
+                self.diags.truncate(saved_diags);
+            }
             Ok(Expr::SliceLit {
                 elem: None,
                 items,
@@ -1964,6 +2028,27 @@ impl Parser {
 
     fn parse_struct_lit(&mut self, ty: Option<TypeExpr>, start: usize) -> PResult<Expr> {
         self.expect_punct("{")?;
+        // Type-elided positional composite literal `{1, 2}` inside a nested
+        // array/slice/map literal (`[2][2]int{{1, 2}, {3, 4}}`).
+        if ty.is_none()
+            && !self.at_punct("}")
+            && !(matches!(self.cur(), Tok::Ident(_)) && matches!(self.nth(1), Tok::Punct(":")))
+        {
+            let mut items = Vec::new();
+            while !self.at_punct("}") && !self.at_eof() {
+                items.push(self.parse_expr(true)?);
+                if !self.at_punct(",") && !self.at_punct("}") {
+                    return self.err("expected ',' or '}' in composite literal");
+                }
+                self.eat_punct(",");
+            }
+            self.expect_punct("}")?;
+            return Ok(Expr::SliceLit {
+                elem: None,
+                items,
+                span: self.span_from(start),
+            });
+        }
         let mut fields = Vec::new();
         while !self.at_punct("}") && !self.at_eof() {
             let fstart = self.pos;
@@ -2029,6 +2114,11 @@ impl Parser {
             }
             match self.cur() {
                 Tok::Punct(".") => {
+                    // Newline sensitivity (#659): a `.` that opens a new line
+                    // must not fold into the expression on the previous line.
+                    if !self.same_line_as_prev() {
+                        break;
+                    }
                     self.bump();
                     let name = self.expect_ident()?;
                     let span = self.span_to_prev(e.span().start);
@@ -3930,4 +4020,117 @@ fn main() {
         );
     }
 
+    #[test]
+    fn array_composite_literals_parse_and_distinguish_from_slices() {
+        let src = r#"
+const n = 2
+struct pair {
+    a int
+    b int
 }
+fn main() {
+    a := [3]int{1, 2, 3}
+    b := [...]int{1, 2, 3}
+    c := [3]int{}
+    d := [n + 1]int{1, 2, 3}
+    e := [2][2]int{{1, 2}, {3, 4}}
+    f := [2]pair{{a: 1, b: 2}, {a: 3, b: 4}}
+    g := [][2]int{{1, 2}}
+    h := [1, 2, 3]
+    i := []int{1, 2, 3}
+}
+"#;
+        let file = parse_src(src);
+        let body = file.fns().next().unwrap().body.as_ref().unwrap();
+        let expr_at = |idx: usize| -> &Expr {
+            let Stmt::Local(l) = &body.stmts[idx] else {
+                panic!("expected Local at {idx}");
+            };
+            &l.values[0]
+        };
+
+        // a := [3]int{1, 2, 3}
+        let (len_a, elem_a, _) = expr_at(0).as_array_lit().expect("[3]int{...} is array lit");
+        assert!(len_a.is_some());
+        assert_eq!(elem_a.render(), "int");
+        assert_eq!(expr_at(0).render(), "[3]int{...}");
+
+        // b := [...]int{1, 2, 3}
+        let (len_b, elem_b, _) = expr_at(1)
+            .as_array_lit()
+            .expect("[...]int{...} is array lit");
+        assert!(len_b.is_none());
+        assert_eq!(elem_b.render(), "int");
+        assert_eq!(expr_at(1).render(), "[...]int{...}");
+
+        // c := [3]int{}
+        assert!(expr_at(2).as_array_lit().is_some());
+        assert_eq!(expr_at(2).render(), "[3]int{...}");
+
+        // d := [n + 1]int{1, 2, 3}
+        let (len_d, _, _) = expr_at(3).as_array_lit().expect("[n + 1]int{...} is array lit");
+        assert_eq!(len_d.unwrap().render(), "n + 1");
+
+        // e := [2][2]int{{1, 2}, {3, 4}}
+        let (_, elem_e, _) = expr_at(4)
+            .as_array_lit()
+            .expect("[2][2]int{...} is array lit");
+        assert_eq!(elem_e.render(), "[2]int");
+
+        // f := [2]pair{{a: 1, b: 2}, {a: 3, b: 4}}
+        let (_, elem_f, _) = expr_at(5).as_array_lit().expect("[2]pair{...} is array lit");
+        assert_eq!(elem_f.render(), "pair");
+
+        // g := [][2]int{{1, 2}} — outer is a SLICE of arrays, not an array lit!
+        assert!(expr_at(6).as_array_lit().is_none());
+
+        // h := [1, 2, 3] and i := []int{1, 2, 3} — slice literals
+        assert!(expr_at(7).as_array_lit().is_none());
+        assert!(expr_at(8).as_array_lit().is_none());
+    }
+
+    #[test]
+    fn float_trailing_dot_parses_as_statement_without_cross_line_folding_issue_659() {
+        let src = r#"
+package main
+
+import "fmt"
+
+fn main() {
+    var scale f64 = 2.
+    fmt.println(scale)
+    fmt.println(scale * 3.0)
+}
+"#;
+        let f = parse_src(src);
+        let main_fn = f.decls.iter().find_map(|d| match d {
+            Decl::Fn(f) if f.name == "main" => Some(f),
+            _ => None,
+        }).expect("main fn decl");
+        let body = main_fn.body.as_ref().expect("main body");
+        assert_eq!(body.stmts.len(), 3, "must have 3 statements, not 2 folded statements: {:?}", body.stmts);
+        assert!(
+            matches!(&body.stmts[0], Stmt::Local(LocalDecl { kind: LocalKind::Var, names, values, .. })
+                if names == &["scale"] && matches!(values.first(), Some(Expr::Lit { kind: LitKind::Float(s), .. }) if s == "2.")),
+            "first statement is var scale f64 = 2., got {:?}", body.stmts[0]
+        );
+        assert!(
+            matches!(&body.stmts[1], Stmt::Expr { expr: Expr::Call { .. }, .. }),
+            "second statement is fmt.println(scale)"
+        );
+        assert!(
+            matches!(&body.stmts[2], Stmt::Expr { expr: Expr::Call { .. }, .. }),
+            "third statement is fmt.println(scale * 3.0)"
+        );
+    }
+
+    #[test]
+    fn line_leading_dot_does_not_fold_into_previous_statement_issue_659() {
+        // A newline-separated `.` must not fold into the previous expression statement
+        let src = "fn main() {\n    x := 1\n    .foo\n}";
+        let r = parse_file("t.hy", src);
+        assert!(r.is_err(), "leading dot on new line must not fold into statement");
+    }
+
+}
+

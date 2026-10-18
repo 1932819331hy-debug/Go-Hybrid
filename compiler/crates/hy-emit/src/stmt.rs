@@ -124,7 +124,7 @@ impl Emitter {
                 // HYB-E3010; this guards closure bodies).
                 match label {
                     Some(_) => {
-                        if self.for_depth == 0 && self.loop_labels.is_empty() {
+                        if self.loop_labels.is_empty() {
                             return Err(EmitError::unsupported(
                                 "`break loop` with no enclosing loop in this function or closure \
                                  — the loop label would have no target (LX14)",
@@ -148,7 +148,7 @@ impl Emitter {
             Stmt::Continue { label, .. } => {
                 match label {
                     Some(_) => {
-                        if self.for_depth == 0 && self.loop_labels.is_empty() {
+                        if self.loop_labels.is_empty() {
                             return Err(EmitError::unsupported(
                                 "`continue loop` with no enclosing loop in this function or \
                                  closure — the loop label would have no target (LX14)",
@@ -273,7 +273,15 @@ impl Emitter {
             LocalKind::Var => {
                 let ty = l.ty.as_ref().map(|t| self.type_text(t));
                 match (&ty, l.values.first()) {
-                    (Some(t), None) => self.push(&format!("var {} {}", l.names.join(", "), t)),
+                    // N5: a zero map (or a struct carrying one) allocates
+                    // at its declaration (zeroinit.rs, issue #645).
+                    (Some(t), None) => match l.ty.as_ref().and_then(|ty| self.n5_zero_init(ty)) {
+                        Some(init) => {
+                            let inits = vec![init; l.names.len()].join(", ");
+                            self.push(&format!("var {} {} = {}", l.names.join(", "), t, inits))
+                        }
+                        None => self.push(&format!("var {} {}", l.names.join(", "), t)),
+                    },
                     (Some(t), Some(v)) => {
                         self.hoist_tries_expr(v)?;
                         let e = self.emit_expr(v, 0)?;
@@ -385,7 +393,7 @@ impl Emitter {
                         self.emit_slot_loan_place(operand, name, rest)?;
                     val_texts.push(read_place);
                     if name != "_" {
-                        new_loans.push((name.clone(), write_place));
+                        new_loans.push((name.clone(), format!("{} = {}", write_place, name)));
                     }
                 } else {
                     val_texts.push(self.emit_expr(v, 0)?);
@@ -1007,28 +1015,38 @@ impl Emitter {
     /// Binding hints from the defining values (see `BindingKind`).
     fn hint_from_values(&mut self, names: &[String], values: &[Expr]) {
         let single_hint = if names.len() == 1 && values.len() == 1 && names[0] != "_" {
-            Some((
-                self.binding_kind_of(&values[0]),
-                self.expr_is_pointer(&values[0]),
-            ))
+            Some(self.binding_kind_of(&values[0]))
         } else {
             None
         };
+        let ptr_flags: Vec<bool> = if names.len() == values.len() {
+            values.iter().map(|v| self.expr_is_pointer(v)).collect()
+        } else {
+            Vec::new()
+        };
         self.shadow_local_names(names);
-        if let Some((kind, is_ptr)) = single_hint {
+        if let Some(kind) = single_hint {
             if kind != BindingKind::Plain {
                 self.bindings.insert(names[0].clone(), kind);
-            }
-            if is_ptr {
-                self.pointer_vars.insert(names[0].clone());
             }
             if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
                 self.register_var_ty(&names[0], t);
             }
         }
+        for (name, is_ptr) in names.iter().zip(ptr_flags) {
+            if name != "_" && is_ptr {
+                self.pointer_vars.insert(name.clone());
+            }
+        }
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
+        let e = Self::peel_parens(e);
+        if let Expr::StructLit { ty: Some(t), .. } = e {
+            if let Some(kind) = self.binding_kind_of_ty(t) {
+                return kind;
+            }
+        }
         let (call, args) = match e {
             Expr::Try { operand, .. } => match operand.as_ref() {
                 Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
@@ -1101,6 +1119,37 @@ impl Emitter {
             Expr::Paren { inner, .. } => self.is_channel_expr(inner),
             Expr::Call { .. } | Expr::Try { .. } => {
                 self.binding_kind_of(e) == BindingKind::Chan
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether an expression evaluates to a set (`set[T]`). Set ranges in
+    /// Go iterate over the underlying map (`s.m`).
+    pub(crate) fn is_set_expr(&self, e: &Expr) -> bool {
+        let e = Self::peel_parens(e);
+        match e {
+            Expr::Ident { name, .. } => {
+                matches!(self.bindings.get(name), Some(BindingKind::Set))
+            }
+            Expr::StructLit { ty: Some(t), .. } => match t {
+                TypeExpr::Named { name, .. } => name.starts_with("set[") || name == "set",
+                _ => false,
+            },
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: vn, .. } = base.as_ref() {
+                    if let Some(sn) = self.var_struct.get(vn) {
+                        if let Some(fields) = self.struct_fields.get(sn) {
+                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                                return fty.starts_with("set[") || fty == "set";
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            Expr::Call { .. } | Expr::Try { .. } => {
+                self.binding_kind_of(e) == BindingKind::Set
             }
             _ => false,
         }
@@ -1184,9 +1233,19 @@ impl Emitter {
                 if let Some(operand) = Self::as_slot_loan_operand(v) {
                     let (read_place, write_place) =
                         self.emit_slot_loan_place(operand, name, rest)?;
-                    rhs_texts.push(read_place);
-                    if name != "_" {
-                        new_loans.push((name.clone(), write_place));
+                    if self.pointer_vars.contains(name) {
+                        // A pointer-typed target (`var x *T`, a `*T` param,
+                        // `x := &T{}`) keeps its Go type: point it at a copy
+                        // of the slot and store the pointee back.
+                        let copy = self.next_temp("hyLoan");
+                        self.push(&format!("{} := {}", copy, read_place));
+                        rhs_texts.push(format!("&{}", copy));
+                        new_loans.push((name.clone(), format!("{} = *{}", write_place, name)));
+                    } else {
+                        rhs_texts.push(read_place);
+                        if name != "_" {
+                            new_loans.push((name.clone(), format!("{} = {}", write_place, name)));
+                        }
                     }
                 } else {
                     rhs_texts.push(self.emit_expr(v, 0)?);
@@ -1198,12 +1257,17 @@ impl Emitter {
             }
             return Ok(());
         }
-        if targets.len() == 1 && values.len() == 1 && op == AssignOp::Assign {
-            if let PlaceKind::Ident(name) = &targets[0].kind {
-                if self.expr_is_pointer(&values[0]) {
-                    self.pointer_vars.insert(name.clone());
-                } else {
-                    self.pointer_vars.remove(name);
+        if targets.len() == values.len() && op == AssignOp::Assign {
+            let ptr_flags: Vec<bool> = values.iter().map(|v| self.expr_is_pointer(v)).collect();
+            for (t, is_ptr) in targets.iter().zip(ptr_flags) {
+                if let PlaceKind::Ident(name) = &t.kind {
+                    if name != "_" {
+                        if is_ptr {
+                            self.pointer_vars.insert(name.clone());
+                        } else {
+                            self.pointer_vars.remove(name);
+                        }
+                    }
                 }
             }
         }
@@ -1348,8 +1412,8 @@ impl Emitter {
                 self.hoist_tries_expr(cond)?;
                 self.emit_if_at(None, cond, then, otherwise, true)?;
                 let frame = self.loan_frames.pop().unwrap_or_default();
-                for (name, place) in frame {
-                    self.push(&format!("{} = {}", place, name));
+                for (_, store) in frame {
+                    self.push(&store);
                 }
                 self.indent -= 1;
                 self.push("}");
@@ -1556,12 +1620,12 @@ impl Emitter {
             if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
                 continue;
             }
-            for (name, place) in frame {
-                stores.push((name.clone(), place.clone()));
+            for entry in frame {
+                stores.push(entry.clone());
             }
         }
-        for (name, place) in stores {
-            self.push(&format!("{} = {}", place, name));
+        for (_, store) in stores {
+            self.push(&store);
         }
     }
 
@@ -1574,12 +1638,12 @@ impl Emitter {
                 }
                 continue;
             }
-            for (name, place) in frame {
-                stores.push((name.clone(), place.clone()));
+            for entry in frame {
+                stores.push(entry.clone());
             }
         }
-        for (name, place) in stores {
-            self.push(&format!("{} = {}", place, name));
+        for (_, store) in stores {
+            self.push(&store);
         }
     }
 
@@ -1592,9 +1656,12 @@ impl Emitter {
 
     fn emit_for_inner(&mut self, kind: &ForKind, body: &Block) -> Result<(), EmitError> {
         // A labeled `break loop` / `continue loop` inside this loop (NOT
-        // inside a nested loop — that one labels itself) makes this loop the
+        // inside an inner loop statement — that one labels itself) makes this loop the
         // Go label target: `hyLoop:` + the for head, `break hyLoop` inside.
-        let needs_label = self.block_has_loop_break(body);
+        // SPEC LX14: `break loop` / `continue loop` binds ONLY to the nearest enclosing
+        // `loop` statement (`ForKind::Infinite`), NEVER to a `for` (range/iterate/while).
+        let is_infinite_loop = matches!(kind, ForKind::Infinite);
+        let needs_label = is_infinite_loop && self.block_has_loop_break(body);
         // Two sibling loops each owning a `break loop` would both declare
         // `hyLoop:` — Go rejects that (`label hyLoop already declared`), and
         // no emission can fix a duplicate declaration, so each labeled loop
@@ -1712,7 +1779,14 @@ impl Emitter {
                         // Drop the binding to `for range e`, completing the
                         // unread-binding lowering from issue #139.
                         let read = vars[0] != "_" && crate::rangebind::body_reads(body, &vars[0]);
-                        if !read {
+                        if self.is_set_expr(expr) {
+                            self.shadow_local_names(vars);
+                            if !read {
+                                format!("for range {}.m {{", e)
+                            } else {
+                                format!("for {} := range {}.m {{", vars[0], e)
+                            }
+                        } else if !read {
                             self.shadow_local_names(vars);
                             format!("for range {} {{", e)
                         } else {
@@ -1752,6 +1826,11 @@ impl Emitter {
                         if self.is_channel_expr(expr) {
                             return Err(EmitError::unsupported(
                                 "cannot range over channel with two iteration variables: channels permit only one iteration variable (SPEC-LANGUAGE.md LX13)",
+                            ));
+                        }
+                        if self.is_set_expr(expr) {
+                            return Err(EmitError::unsupported(
+                                "cannot range over set with two iteration variables: sets permit only one iteration variable (SPEC-LANGUAGE.md T9)",
                             ));
                         }
                         self.shadow_local_names(vars);
@@ -1838,7 +1917,13 @@ impl Emitter {
                         .map(|o| self.stmt_has_loop_break(o))
                         .unwrap_or(false)
             }
-            Stmt::For { .. } => false, // nested loop labels itself
+            Stmt::For { kind, body, .. } => {
+                if matches!(kind, ForKind::Infinite) {
+                    false // inner infinite loop owns breaks directly inside it
+                } else {
+                    self.block_has_loop_break(body)
+                }
+            }
             Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
                 self.block_has_loop_break(block)
             }
@@ -2375,8 +2460,8 @@ impl Emitter {
                 }
             }
         }
-        for (name, place) in to_flush {
-            self.push(&format!("{} = {}", place, name));
+        for (_, store) in to_flush {
+            self.push(&store);
         }
     }
 
@@ -2408,8 +2493,8 @@ impl Emitter {
                 }
             }
         }
-        for (name, place) in unused {
-            self.push(&format!("{} = {}", place, name));
+        for (_, store) in unused {
+            self.push(&store);
         }
         for (idx, st) in stmts.iter().enumerate() {
             let rest = &stmts[idx + 1..];
@@ -2470,18 +2555,18 @@ impl Emitter {
                         }
                     }
                 }
-                for (name, place) in early_flush {
+                for (name, store) in early_flush {
                     if !name.is_empty() {
-                        self.push(&format!("{} = {}", place, name));
+                        self.push(&store);
                     }
                 }
             }
         }
         let frame = self.loan_frames.pop().unwrap_or_default();
         if !stmts.iter().any(Self::stmt_terminates) {
-            for (name, place) in frame {
+            for (name, store) in frame {
                 if !name.is_empty() {
-                    self.push(&format!("{} = {}", place, name));
+                    self.push(&store);
                 }
             }
         }
@@ -2824,9 +2909,14 @@ impl Emitter {
             Expr::StructLit { fields, .. } => fields
                 .iter()
                 .any(|f| Self::expr_mentions_ident(&f.value, target)),
-            Expr::SliceLit { items, .. } => items
-                .iter()
-                .any(|x| Self::expr_mentions_ident(x, target)),
+            Expr::SliceLit { items, .. } => {
+                e.as_array_lit()
+                    .and_then(|(len, _, _)| len)
+                    .is_some_and(|l| Self::expr_mentions_ident(l, target))
+                    || items
+                        .iter()
+                        .any(|x| Self::expr_mentions_ident(x, target))
+            }
             Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
                 Self::expr_mentions_ident(k, target) || Self::expr_mentions_ident(v, target)
             }),

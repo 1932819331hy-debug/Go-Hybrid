@@ -44,6 +44,7 @@
 //! diagnostics are returned in source order.
 
 mod addr_loan;
+mod addressable;
 mod arith;
 mod buildable;
 mod const_overflow;
@@ -105,6 +106,7 @@ pub fn check_file(file: &File) -> CheckResult {
     build_tables(&mut ck);
     ck.check_struct_decls(); // A6: borrow-handle / pointer struct fields
     ck.check_file_const_zero_divisors(); // Issue #149/#508: constant zero divisor in file consts
+    ck.check_file_map_literal_duplicate_keys(); // Issue #687: duplicate constant keys in map literals
 
     // Issue #228 family A: value-position names nothing declares must be
     // HYB-E1001 here, not `undefined: X` at go build. Const initializers and
@@ -276,7 +278,10 @@ fn build_tables(ck: &mut Checker<'_>) {
             Decl::Const(c) => {
                 if let Some(ty) = &c.ty {
                     ck.check_type_expr(ty);
+                    ck.check_local_array_lit_len_match(ty, &c.value);
                 }
+                ck.check_expr_emit_guard(&FnState::default(), &c.value);
+                ck.check_composite_nils(&FnState::default(), &c.value);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
             }
@@ -342,6 +347,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 shape,
                 ty,
                 immutable: false,
+                is_let: false,
                 managed_taint: false,
                 moved: None,
                 non_owned_origin: Some(format!(
@@ -360,6 +366,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 shape,
                 ty: Some(p.ty.clone()),
                 immutable: false,
+                is_let: false,
                 managed_taint: false,
                 moved: None,
                 non_owned_origin: Some(format!(
@@ -384,6 +391,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         shape: shape.clone(),
                         ty: Some(r.ty.clone()),
                         immutable: false,
+                        is_let: false,
                         managed_taint: false,
                         moved: None,
                         non_owned_origin: None,
@@ -437,7 +445,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             } else {
                                 TypeShape::Primitive
                             };
-                            ck.define_binding(&mut st, n, shape, None, false, managed);
+                            ck.define_binding(&mut st, n, shape, None, false, managed, false);
                         }
                     }
                     walk::ScopeEvent::MatchBind { name, subject } => {
@@ -477,7 +485,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         if let Stmt::Break { label: Some(_), span, .. }
         | Stmt::Continue { label: Some(_), span, .. } = stmt
         {
-            if !flat.in_loop(idx) {
+            if !flat.in_infinite_loop(idx) {
                 ck.diags.push(
                     Diagnostic::error(
                         "HYB-E3010",
@@ -486,7 +494,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         "`break loop` / `continue loop` with no enclosing loop — the label has no target here (HYB-E3010)",
                     )
                     .with_notes(vec![
-                        "the `loop` label binds to the nearest enclosing `for`/`loop` (LX14); labels do not cross function or closure boundaries".to_string(),
+                        "the `loop` label binds to the nearest enclosing `loop` statement (LX14); labels do not cross function or closure boundaries".to_string(),
                         "remove the `loop` label (plain `break`/`continue` targets the innermost loop), or move this statement inside a loop".to_string(),
                     ]),
                 );
@@ -500,6 +508,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         ck.check_uses(&st, &uses);
         // T24: no address-of on a map-slot loan (HYB-E3104).
         ck.check_addr_of_loan(&st, &uses);
+        // T24 + O8: a live slot loan cannot be re-bound to a general
+        // pointer — the loan lowers to a copy + store-back (HYB-E3104).
+        ck.check_slot_loan_rebind(&st, stmt);
 
         let mut fnlits = Vec::new();
         walk::own_fnlits(stmt, &mut fnlits);
@@ -614,6 +625,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     Some(callee),
                     targets.as_deref(),
                 );
+                let cr = walk::CallRef {
+                    callee,
+                    args,
+                    span: *span,
+                };
+                ck.check_call_const_writes(&st, &cr, &std::collections::HashSet::new());
             }
 
             // O4.0 check-site: the sent value (HYB-E3002). The parser flags
@@ -672,7 +689,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
-                        ck.define_binding(&mut st, name, shape, None, false, managed);
+                        ck.define_binding(&mut st, name, shape, None, false, managed, false);
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(&mut st, name, expr);
@@ -705,7 +722,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         hi,
                         format!("the range bound `{}`", hi.render()),
                     );
-                    ck.define_binding(&mut st, var, TypeShape::Primitive, None, false, managed);
+                    ck.define_binding(&mut st, var, TypeShape::Primitive, None, false, managed, false);
                 }
                 ForKind::While { cond } => {
                     ck.mark_move_in_value(

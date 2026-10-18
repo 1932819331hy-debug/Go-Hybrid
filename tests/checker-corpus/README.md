@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 77 programs** — ACCEPT 21 · ACCEPT-MANAGED 2 ·
-REJECT 54 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 100 programs** — ACCEPT 32 · ACCEPT-MANAGED 2 ·
+REJECT 66 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -20,7 +20,7 @@ the new fixtures.
 
 The prose below is the original pre-registration statement, kept as written
 on its date: the corpora sizes it names (18, 20) are what the corpus held
-then, not today's 77. The dated tripwire baseline is preserved as historical
+then, not today's 100. The dated tripwire baseline is preserved as historical
 for the same reason.
 
 18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
@@ -62,3 +62,72 @@ surface with author credit (tests extracted to
 
 With this registration the corpus is **78 programs: ACCEPT 21 ·
 ACCEPT-MANAGED 2 · REJECT 55**.
+
+<<<<<<< HEAD
+`control-*.hy` — isHeSatoshi (PR #598): seven **negative controls** for the
+accept-side oracle wave. The Go-toolchain oracle (#577) measured a 38%
+accept-side residual on generated programs and named ten accepted-but-
+unbuildable classes to fix; fixing those means adding range, bounds and shape
+checks to more contexts, and every check added can over-reject. A corpus that
+only grows the REJECT side cannot detect that. Each control is ACCEPT today
+**and builds under `go build`**, verified before commit — an accept-side
+control that does not build would pin the wrong thing. Four fence off-by-ones
+in the const-overflow wave (the exact int8 edges `127`/`-128` in one file, the
+unsigned `255` edge, a folded constant expression `100 + 27`, and the
+in-range twin of #519's composite-literal overflow). Three are legal Go the
+wave must not confuse with the array form: `xs[300]` on a **slice** compiles
+and panics at run time while `a[300]` on `[2]int` does not, `-n` on an int8
+**variable** wraps at run time because Go does not fold it, and
+`var a [300]int8` bounds an array **length** by a count, not by the element
+type's range. Each header states what it fences and cites GUARANTEES.md Row 13
+(BUILDABLE) or the Row 16 "No claim" position for run-time panics, so a
+reviewer can see why ACCEPT is correct rather than an oversight.
+
+With this registration the corpus is **89 programs: ACCEPT 29 ·
+ACCEPT-MANAGED 2 · REJECT 58**.
+
+`*-addr-of-call-*.hy` — G0st13 (PR #436): the corpus-side pin for the
+address-of launder (#435). `collect_ref_roots` walks `AddrOf` and the
+`UnOp::Addr` spelling, so `p := keep(&h)` contributes its root and `move h`
+freezes it — the escape rejects with `HYB-E3003`. The ACCEPT control keeps a
+read-only `read(&h)` (address taken, scalar returned) legal so the rule
+cannot degrade into "never take an address". Unit tests carried in
+`hy-check/tests/addr_of_alias.rs` (reject, the direct `&h` twin, both
+controls). Registered as 65/66: the PR authored them as 61/62, but 61–64
+were taken before it landed.
+
+`conversion-arity-reject.hy`, `struct-literal-unknown-field-reject.hy`,
+`field-assign-wrong-type-reject.hy`, `struct-and-conversion-controls-accept.hy`
+— isHeSatoshi (issue #682): the U13–U16 accept-but-unbuildable type/shape gaps.
+Each of the three rejects was reproduced as a real `go build` failure against
+the emitted Go before its fixture was committed, and all three are
+`HYB-E1002` (`BUILDABLE`, Row 13). The fourth fixture is the ACCEPT half and is
+the reason the batch is safe to land: it holds the legal neighbours the new
+checks must not touch — a one-argument conversion, a variadic builtin's own
+arity, declared struct fields including a subset, an untyped int constant
+assigned to a `float64` field (which is why `Int` into a float target must stay
+allowed), a same-typed struct assignment, an `any` target, and a multi-value
+binding that is not a single-target assignment. Rules live in
+`hy-check/tests/struct_and_conversion_shape_guards.rs` (8 tests).
+
+`any-arithmetic-reject.hy`, `any-field-access-reject.hy`, `any-index-reject.hy`,
+`any-call-reject.hy`, `any-operations-controls-accept.hy` — isHeSatoshi
+(issue #682, the same report as the U13–U16 batch above): the U9–U12 operations
+on `any`. The root cause was a classification rather than a missing check: `any`
+resolved to `OpKind::Unknown`, and `Unknown` is fail-open everywhere by design
+(it means "the checker could not resolve this"). `any` is the opposite — a
+resolved type Go refuses to operate on — so it now resolves to
+`OpKind::Interface`, which puts it in the operand checks' reject set because
+those checks list the kinds they ACCEPT. All four rejects are `HYB-E1002`
+(`BUILDABLE`, Row 13) and each was reproduced as a real `go build` failure
+first. The fifth fixture is the ACCEPT half and carries the weight here: `any`
+is legal as an assignment target, a call and task-spawn argument, a container
+element and map value, a struct field type, and an `==` operand (Go converts the
+non-interface side, so only the ORDERED comparisons are illegal).
+`fmt.println(v)` is pinned explicitly because it is a Field access whose base is
+the `fmt` package rather than an interface — the first false positive a careless
+field-access check produces. Rules live in
+`hy-check/tests/any_interface_operations.rs` (7 tests).
+
+With this registration the corpus is **100 programs: ACCEPT 32 ·
+ACCEPT-MANAGED 2 · REJECT 66**.

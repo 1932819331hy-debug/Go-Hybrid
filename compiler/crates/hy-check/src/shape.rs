@@ -278,13 +278,18 @@ impl<'a> Checker<'a> {
                 Box::new(self.shape_of_type(key)),
                 Box::new(self.shape_of_type(value)),
             ),
-            Expr::SliceLit { elem, items, .. } => TypeShape::Slice(Box::new(match elem {
-                Some(t) => self.shape_of_type(t),
-                None => items
-                    .first()
-                    .map(|i| self.shape_of_expr(st, i))
-                    .unwrap_or(TypeShape::Unknown),
-            })),
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some((_, inner_elem, _)) = expr.as_array_lit() {
+                    return TypeShape::Array(Box::new(self.shape_of_type(inner_elem)));
+                }
+                TypeShape::Slice(Box::new(match elem {
+                    Some(t) => self.shape_of_type(t),
+                    None => items
+                        .first()
+                        .map(|i| self.shape_of_expr(st, i))
+                        .unwrap_or(TypeShape::Unknown),
+                }))
+            }
             // closures are unsendable values in Tier 0 (the A5 perimeter);
             // classify_value rejects FnLit literals before shape lookup —
             // this arm covers fn-typed bindings and fn-typed fields
@@ -391,6 +396,11 @@ impl<'a> Checker<'a> {
                 }
                 // Issue #411/H2: user-defined methods (`c.keys()`).
                 let recv = self.shape_of_expr(st, base);
+                if name == "pop" && args.is_empty() {
+                    if let TypeShape::Slice(elem) = &recv {
+                        return (**elem).clone();
+                    }
+                }
                 if let Some(recv_base) = self
                     .ty_of_expr(st, base)
                     .map(|t| self.resolve_type_alias(&t))
@@ -458,7 +468,7 @@ impl<'a> Checker<'a> {
             // element type decides whether a later `copy(dst, src)` shares
             // references (#178). A primitive element (`[]int`) shares
             // nothing; a reference element (`[]map[...]`) does.
-            Expr::SliceLit { elem: Some(t), .. } => {
+            Expr::SliceLit { elem: Some(t), .. } if first.value.as_array_lit().is_none() => {
                 TypeShape::Slice(Box::new(self.shape_of_type(t)))
             }
             // `make(map[K]V{})` — shape key AND value: an erasure to
@@ -506,6 +516,13 @@ impl<'a> Checker<'a> {
                 } else {
                     vec![(**v).clone()]
                 }
+            }
+            TypeShape::Struct(Some(n)) if n.starts_with("set[") => {
+                let elem_str = n
+                    .strip_prefix("set[")
+                    .and_then(|s| s.strip_suffix(']'))
+                    .unwrap_or("any");
+                vec![self.named_shape(elem_str)]
             }
             _ => vec![TypeShape::Unknown; n_vars.max(1)],
         }
@@ -594,6 +611,15 @@ impl<'a> Checker<'a> {
                 }
                 let base_ty = self.ty_of_expr(st, base)?;
                 let resolved = self.resolve_type_alias(&base_ty);
+                if name == "pop" {
+                    if let TypeExpr::Slice { elem, .. } = &resolved {
+                        return Some(TypeExpr::Fn {
+                            params: Vec::new(),
+                            results: vec![(**elem).clone()],
+                            span: *span,
+                        });
+                    }
+                }
                 let sname = Self::base_named_type(&resolved)?;
                 self.structs
                     .get(&sname)
@@ -618,12 +644,27 @@ impl<'a> Checker<'a> {
             }),
             Expr::SliceLit {
                 elem: Some(e),
+                items,
                 span,
-                ..
-            } => Some(TypeExpr::Slice {
-                elem: e.clone(),
-                span: *span,
-            }),
+            } => {
+                if let Some((len_opt, inner_elem, arr_ty)) = expr.as_array_lit() {
+                    if len_opt.is_some() {
+                        return Some(arr_ty.clone());
+                    }
+                    return Some(TypeExpr::Array {
+                        len: Some(Box::new(Expr::Lit {
+                            kind: hy_syntax::LitKind::Int(items.len().to_string()),
+                            span: *span,
+                        })),
+                        elem: Box::new(inner_elem.clone()),
+                        span: *span,
+                    });
+                }
+                Some(TypeExpr::Slice {
+                    elem: e.clone(),
+                    span: *span,
+                })
+            }
             Expr::FnLit {
                 params,
                 results,
@@ -663,6 +704,17 @@ impl<'a> Checker<'a> {
                     }
                     if name == "make" {
                         return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
+                    }
+                    if args.len() == 1 {
+                        let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
+                            || crate::const_init::is_conversion_type_name(name)
+                            || self.type_aliases.contains_key(name);
+                        if is_type_name && !self.fns.contains_key(name.as_str()) {
+                            return Some(TypeExpr::Named {
+                                name: name.clone(),
+                                span: *span,
+                            });
+                        }
                     }
                     let head = Self::base_named_type_str(name);
                     self.fns
@@ -723,6 +775,23 @@ impl<'a> Checker<'a> {
                     }
                 }
             },
+            Expr::Binary { op, lhs, rhs, .. } => {
+                if matches!(
+                    op,
+                    hy_syntax::BinOp::Add
+                        | hy_syntax::BinOp::Sub
+                        | hy_syntax::BinOp::Mul
+                        | hy_syntax::BinOp::Div
+                        | hy_syntax::BinOp::Mod
+                        | hy_syntax::BinOp::BitAnd
+                        | hy_syntax::BinOp::BitOr
+                        | hy_syntax::BinOp::BitXor
+                ) {
+                    self.ty_of_expr(st, lhs).or_else(|| self.ty_of_expr(st, rhs))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -1009,7 +1078,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn call_result_tys(&self, st: &FnState, callee: &Expr) -> Option<Vec<TypeExpr>> {
+    pub(crate) fn call_result_tys(&self, st: &FnState, callee: &Expr) -> Option<Vec<TypeExpr>> {
         match crate::model::unwrap_parens(callee) {
             Expr::FnLit { results, .. } => Some(results.iter().map(|r| r.ty.clone()).collect()),
             Expr::Ident { name, .. } => {

@@ -63,6 +63,7 @@ impl<'a> Checker<'a> {
                     let mut tmp = st.clone();
                     tmp.scope_push();
                     let immutable = l.kind == hy_syntax::LocalKind::Const;
+                    let is_let = l.kind == hy_syntax::LocalKind::Let;
                     if l.values.is_empty() {
                         let shape = l
                             .ty
@@ -77,6 +78,7 @@ impl<'a> Checker<'a> {
                                 l.ty.clone(),
                                 immutable,
                                 false,
+                                is_let,
                             );
                         }
                     } else if l.names.len() == l.values.len() {
@@ -87,7 +89,7 @@ impl<'a> Checker<'a> {
                                 (_, s) => s,
                             };
                             let ty = l.ty.clone().or_else(|| self.ty_of_expr(&tmp, val));
-                            self.define_binding(&mut tmp, name, shape, ty, immutable, false);
+                            self.define_binding(&mut tmp, name, shape, ty, immutable, false, is_let);
                         }
                     }
                     self.check_expr_recv_operands(&tmp, cond);

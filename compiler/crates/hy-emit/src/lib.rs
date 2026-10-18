@@ -33,6 +33,7 @@ use hy_syntax::*;
 mod constconv;
 mod rangebind;
 mod shapes;
+mod zeroinit;
 use shapes::{
     import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion,
 };
@@ -52,6 +53,28 @@ const OPTION_PRELUDE: &str = concat!(
     "\n",
     "func some[v any](val v) option[v] {\n",
     "\treturn option[v]{val: val, ok: true}\n",
+    "}\n",
+    "\n",
+    "func (o option[v]) unwrap() v {\n",
+    "\tif !o.ok {\n",
+    "\t\tpanic(\"HY-PANIC/unwrap-none\")\n",
+    "\t}\n",
+    "\treturn o.val\n",
+    "}\n",
+    "\n",
+    "func (o option[v]) or(defaultVal v) v {\n",
+    "\tif !o.ok {\n",
+    "\t\treturn defaultVal\n",
+    "\t}\n",
+    "\treturn o.val\n",
+    "}\n",
+    "\n",
+    "func (o option[v]) is_some() bool {\n",
+    "\treturn o.ok\n",
+    "}\n",
+    "\n",
+    "func (o option[v]) is_none() bool {\n",
+    "\treturn !o.ok\n",
     "}\n",
 );
 
@@ -79,7 +102,7 @@ const SET_PRELUDE: &str = concat!(
     "\tdelete(s.m, v)\n",
     "}\n",
     "\n",
-    "func (s *set[t]) len() int {\n",
+    "func (s set[t]) len() int {\n",
     "\treturn len(s.m)\n",
     "}\n",
 );
@@ -183,6 +206,8 @@ pub enum BindingKind {
     /// Bound to a channel (param type or `make(chan …)`) — single-var
     /// `for v in ch` ranges the VALUE directly; slices/maps need `_, v`.
     Chan,
+    /// Bound to a set (`set[T]`) — `len(s)` / `delete(s, v)` / `for v in s`.
+    Set,
     /// Our own struct / plain value — members emit verbatim.
     Plain,
 }
@@ -293,6 +318,8 @@ pub(crate) fn special_member(pkg: &str, name: &str) -> Option<MemberSpecial> {
         ("time", "hours") => Some(MemberSpecial::Duration("Hour")),
         // hex.encode → Go's EncodeToString (example 10; M5 allowlist growth).
         ("hex", "encode") => Some(MemberSpecial::Renamed("EncodeToString")),
+        // errors.wrap(err, "ctx") → fmt.Errorf("%s: %w", "ctx", err) (E2 wrap-on-demand)
+        ("errors", "wrap") => Some(MemberSpecial::ErrorsWrap),
         _ => None,
     }
 }
@@ -306,6 +333,8 @@ pub(crate) enum MemberSpecial {
     Duration(&'static str),
     /// A member Go spells differently: `hex.encode(b)` → `hex.EncodeToString(b)`.
     Renamed(&'static str),
+    /// `errors.wrap(err, msg)` → `fmt.Errorf("%s: %w", msg, err)` (E2 / Spike 5)
+    ErrorsWrap,
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +388,9 @@ pub struct Emitter {
     /// Map-slot loans (O8): `x := &m[k]` cannot be a Go map-index address,
     /// so it lowers to a COPY read now + store-back at the loan's block end
     /// (O9's honesty: Go-heap reads are copies). Frames are block-scoped:
-    /// a loan flushes at the end of the block that declared it.
+    /// a loan flushes at the end of the block that declared it. Each entry
+    /// is (loan variable, its store-back statement): `m[k] = n`, or
+    /// `m[k] = *n` when `n` is a pointer-typed binding.
     loan_frames: Vec<Vec<(String, String)>>,
     /// #546: outer slot loans handed down into the branches of an `if`
     /// whose branches spawn/send using the loan's base. Every branch body
@@ -419,6 +450,10 @@ pub struct Emitter {
     local_vars: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
     ptr_returning_fns: BTreeSet<String>,
+    /// N5 (zeroinit.rs): non-generic user struct → its declared fields,
+    /// and user type alias → its target, for zero values that allocate.
+    n5_structs: BTreeMap<String, Vec<FieldDecl>>,
+    n5_aliases: BTreeMap<String, TypeExpr>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -463,6 +498,8 @@ impl Emitter {
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
             explicit_imports: BTreeMap::new(),
+            n5_structs: BTreeMap::new(),
+            n5_aliases: BTreeMap::new(),
         }
     }
 
@@ -552,6 +589,24 @@ impl Emitter {
                         .map(|f| (f.name.clone(), base_ty_name(&f.ty).unwrap_or_default()))
                         .collect::<Vec<_>>(),
                 )),
+                _ => None,
+            })
+            .collect();
+        self.n5_structs = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Struct(s) if s.type_params.is_empty() => {
+                    Some((s.name.clone(), s.fields.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        self.n5_aliases = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::TypeAlias(t) => Some((t.name.clone(), t.ty.clone())),
                 _ => None,
             })
             .collect();
@@ -670,6 +725,9 @@ impl Emitter {
             // consumer's package path in package mode). The CODE keeps the
             // root spelling — Go's package name for those imports.
             for root in &self.imports {
+                if root == "errors" && !self.body.contains("errors.") {
+                    continue;
+                }
                 let path = if let Some(p) = self.explicit_imports.get(root) {
                     p.clone()
                 } else if shapes::RUST_CRATES
@@ -686,7 +744,10 @@ impl Emitter {
         }
         let body = &self.body;
         let needs_option = body.contains("option[") || body.contains("some(");
-        let needs_set = body.contains("set[");
+        let needs_set = body.contains("set[")
+            || body.contains(".remove(")
+            || body.contains(".contains(")
+            || body.contains(".insert(");
         let needs_pop = body.contains("hy_pop(");
         if needs_option || needs_set || needs_pop {
             out.push('\n');
@@ -1096,6 +1157,9 @@ impl Emitter {
             TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
             _ => return None,
         };
+        if name.starts_with("set[") || name == "set" {
+            return Some(BindingKind::Set);
+        }
         if name.is_empty() || !name.contains('.') {
             return None;
         }
@@ -1252,7 +1316,7 @@ impl Emitter {
                     let n = self.expr_text_static(e);
                     format!("[{}]{}", n, self.type_text(elem))
                 }
-                None => format!("[]{}", self.type_text(elem)), // [...]T → slice at emission
+                None => format!("[...]{}", self.type_text(elem)),
             },
             TypeExpr::Map { key, value, .. } => {
                 format!("map[{}]{}", self.type_text(key), self.type_text(value))

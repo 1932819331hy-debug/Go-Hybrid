@@ -76,6 +76,7 @@ enum Mode {
 struct Scan<'a> {
     path: &'a str,
     packages: &'a HashSet<String>,
+    file_decls: &'a HashSet<String>,
     allowed: &'a mut HashSet<String>,
     diags: &'a mut Vec<hy_diag::Diagnostic>,
     mode: Mode,
@@ -97,6 +98,30 @@ impl<'a> Scan<'a> {
         }
         if crate::foreign::BUILTIN_PACKAGES.contains(&name) {
             return;
+        }
+        // `parser.rs` (`fold_type_args`) folds bracketed type arguments (and
+        // single-ident index expressions before `(`) into `Expr::Ident`
+        // (`id[int](42)` -> `Ident("id[int]")`, `m[k](42)` -> `Ident("m[k]")`).
+        if let Some((head, rest)) = name.split_once('[') {
+            let head_ok = self.allowed.contains(head)
+                || self.packages.contains(head)
+                || crate::foreign::BUILTIN_PACKAGES.contains(&head);
+            if head_ok {
+                if !self.file_decls.contains(head) {
+                    if let Some(inside) = rest.strip_suffix(']') {
+                        let trimmed = inside.trim();
+                        if !trimmed.is_empty()
+                            && trimmed
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                            && !trimmed.chars().next().unwrap().is_ascii_digit()
+                        {
+                            self.ident(trimmed, span);
+                        }
+                    }
+                }
+                return;
+            }
         }
         let msg = format!(
             "`{}` is not available here — nothing declares this name in the file or this scope \
@@ -363,17 +388,57 @@ impl<'a> Scan<'a> {
                 body,
                 ..
             } => {
-                for p in params {
-                    self.define(&p.name);
-                    self.run_type(&p.ty);
-                }
-                for r in results {
-                    if let Some(n) = &r.name {
-                        self.define(n);
+                if self.mode == Mode::Collect {
+                    for p in params {
+                        self.define(&p.name);
+                        self.run_type(&p.ty);
                     }
-                    self.run_type(&r.ty);
+                    for r in results {
+                        if let Some(n) = &r.name {
+                            self.define(n);
+                        }
+                        self.run_type(&r.ty);
+                    }
+                    self.run_block(body);
+                } else {
+                    let mut fn_allowed = self.allowed.clone();
+                    {
+                        let mut collect = Scan {
+                            path: self.path,
+                            packages: self.packages,
+                            file_decls: self.file_decls,
+                            allowed: &mut fn_allowed,
+                            diags: self.diags,
+                            mode: Mode::Collect,
+                        };
+                        for p in params {
+                            collect.define(&p.name);
+                            collect.run_type(&p.ty);
+                        }
+                        for r in results {
+                            if let Some(n) = &r.name {
+                                collect.define(n);
+                            }
+                            collect.run_type(&r.ty);
+                        }
+                        collect.run_block(body);
+                    }
+                    let mut check = Scan {
+                        path: self.path,
+                        packages: self.packages,
+                        file_decls: self.file_decls,
+                        allowed: &mut fn_allowed,
+                        diags: self.diags,
+                        mode: Mode::Check,
+                    };
+                    for p in params {
+                        check.run_type(&p.ty);
+                    }
+                    for r in results {
+                        check.run_type(&r.ty);
+                    }
+                    check.run_block(body);
                 }
-                self.run_block(body);
             }
         }
     }
@@ -409,6 +474,34 @@ impl<'a> Scan<'a> {
             }
         }
     }
+}
+
+/// Top-level declaration names (functions, structs, enums, variants, type
+/// aliases, plus predeclared conversions/builtins) whose `[…]` suffix in a
+/// call is generic type instantiation rather than map/slice indexing.
+fn collect_file_decl_names(file: &hy_syntax::File) -> HashSet<String> {
+    let mut s: HashSet<String> = PREDECLARED.iter().map(|n| n.to_string()).collect();
+    for d in &file.decls {
+        match d {
+            Decl::Struct(st) => {
+                s.insert(st.name.clone());
+            }
+            Decl::Enum(e) => {
+                s.insert(e.name.clone());
+                for v in &e.variants {
+                    s.insert(v.name.clone());
+                }
+            }
+            Decl::TypeAlias(a) => {
+                s.insert(a.name.clone());
+            }
+            Decl::Fn(f) => {
+                s.insert(f.name.clone());
+            }
+            Decl::Import { .. } | Decl::Const(_) => {}
+        }
+    }
+    s
 }
 
 /// File-level tables every scope can see: predeclared names, builtin package
@@ -497,7 +590,7 @@ fn decl_signature_types<'a>(d: &'a Decl) -> Vec<&'a TypeExpr> {
                 out.push(t);
             }
         }
-        Decl::Struct(_) => {}
+        Decl::Struct(_) | Decl::Fn(_) => {}
         Decl::Enum(e) => {
             for v in &e.variants {
                 if let Some(t) = &v.payload {
@@ -506,17 +599,6 @@ fn decl_signature_types<'a>(d: &'a Decl) -> Vec<&'a TypeExpr> {
             }
         }
         Decl::TypeAlias(a) => out.push(&a.ty),
-        Decl::Fn(f) => {
-            if let Some(r) = &f.receiver {
-                out.push(&r.ty);
-            }
-            for p in &f.params {
-                out.push(&p.ty);
-            }
-            for r in &f.results {
-                out.push(&r.ty);
-            }
-        }
         Decl::Import { .. } => {}
     }
     out
@@ -529,6 +611,7 @@ impl Checker<'_> {
     /// scanned here — `check_fn_undefined_names` owns those (per-fn scope).
     pub(crate) fn check_file_undefined_names(&mut self) {
         let mut allowed = collect_file_tables(self.file);
+        let file_decls = collect_file_decl_names(self.file);
         let consts: Vec<(&Expr, Option<&TypeExpr>)> = self
             .file
             .decls
@@ -547,6 +630,15 @@ impl Checker<'_> {
                 _ => None,
             })
             .collect();
+        let fns: Vec<&FnDecl> = self
+            .file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Fn(f) => Some(f),
+                _ => None,
+            })
+            .collect();
         let types: Vec<&TypeExpr> = self
             .file
             .decls
@@ -560,6 +652,7 @@ impl Checker<'_> {
             let mut scan = Scan {
                 path,
                 packages,
+                file_decls: &file_decls,
                 allowed: &mut allowed,
                 diags,
                 mode: Mode::Check,
@@ -582,12 +675,34 @@ impl Checker<'_> {
             let mut scan = Scan {
                 path,
                 packages,
+                file_decls: &file_decls,
                 allowed: &mut struct_allowed,
                 diags,
                 mode: Mode::Check,
             };
             for f in &st_decl.fields {
                 scan.run_type(&f.ty);
+            }
+        }
+        for f_decl in fns {
+            let mut fn_allowed = allowed.clone();
+            seed_fn_scope(f_decl, &mut fn_allowed);
+            let mut scan = Scan {
+                path,
+                packages,
+                file_decls: &file_decls,
+                allowed: &mut fn_allowed,
+                diags,
+                mode: Mode::Check,
+            };
+            if let Some(r) = &f_decl.receiver {
+                scan.run_type(&r.ty);
+            }
+            for p in &f_decl.params {
+                scan.run_type(&p.ty);
+            }
+            for r in &f_decl.results {
+                scan.run_type(&r.ty);
             }
         }
     }
@@ -599,11 +714,13 @@ impl Checker<'_> {
     pub(crate) fn check_fn_undefined_names(&mut self, f: &FnDecl) {
         let Some(body) = &f.body else { return };
         let mut allowed = collect_file_tables(self.file);
+        let file_decls = collect_file_decl_names(self.file);
         seed_fn_scope(f, &mut allowed);
         {
             let mut scan = Scan {
                 path: &self.path,
                 packages: &self.packages,
+                file_decls: &file_decls,
                 allowed: &mut allowed,
                 diags: &mut self.diags,
                 mode: Mode::Collect,
@@ -613,6 +730,7 @@ impl Checker<'_> {
         let mut scan = Scan {
             path: &self.path,
             packages: &self.packages,
+            file_decls: &file_decls,
             allowed: &mut allowed,
             diags: &mut self.diags,
             mode: Mode::Check,
