@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/tetratelabs/wazero"
@@ -30,11 +31,26 @@ type Diagnostic struct {
 	Tier0Rule string `json:"tier0_rule,omitempty"`
 }
 
+type ManagedBlockAudit struct {
+	Reason   string   `json:"reason"`
+	Category string   `json:"category"`
+	Tickets  []string `json:"tickets,omitempty"`
+}
+
+type ManagedReport struct {
+	ManagedBlocks   int                 `json:"managed_blocks"`
+	SitesViaManaged int                 `json:"sites_via_managed"`
+	TotalSites      int                 `json:"total_sites"`
+	Categories      map[string]int      `json:"categories,omitempty"`
+	Blocks          []ManagedBlockAudit `json:"blocks,omitempty"`
+}
+
 type Summary struct {
-	File     string `json:"file"`
-	Verdict  string `json:"verdict"`
-	Errors   int    `json:"errors"`
-	Warnings int    `json:"warnings"`
+	File     string         `json:"file"`
+	Verdict  string         `json:"verdict"`
+	Errors   int            `json:"errors"`
+	Warnings int            `json:"warnings"`
+	Managed  *ManagedReport `json:"managed,omitempty"`
 }
 
 type CheckOutput struct {
@@ -100,7 +116,16 @@ func (e *Engine) Check(src string) (*CheckOutput, error) {
 	return &CheckOutput{Version: 1, Summary: *res.Summary, Diagnostics: res.Diagnostics}, nil
 }
 
-// PassContextLog records empirical pass inspection for research
+func (e *Engine) CheckManaged(src string) (*CheckOutput, error) {
+	engine := &WasmEngine{ctx: e.ctx, runtime: e.runtime, compiled: e.compiled}
+	res := engine.CheckSourceManaged(e.ctx, src)
+	if res.Verdict == VerdictAnalysisFailure {
+		return nil, res.Failure
+	}
+	return &CheckOutput{Version: 1, Summary: *res.Summary, Diagnostics: res.Diagnostics}, nil
+}
+
+// PassContextLog records empirical pass inspection for research.
 type PassContextLog struct {
 	PkgPath            string
 	FilesCount         int
@@ -182,7 +207,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		}
 	}
 
-	// Also inspect disk directory of first Go file to test if sibling .hy can be discovered via dir scan
+	// Also inspect disk directory of first Go file to test if sibling .hy can be discovered via dir scan.
 	if len(pass.Files) > 0 && pass.Fset != nil {
 		firstFile := pass.Fset.File(pass.Files[0].Pos())
 		if firstFile != nil {
@@ -197,7 +222,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 					if _, already := hyFiles[fullPath]; !already {
 						log.FoundHyFiles = append(log.FoundHyFiles, "DirScan:"+e.Name())
 
-						// Test pass.ReadFile contract on this unlisted sibling .hy file:
+						// Test pass.ReadFile contract on this unlisted sibling .hy file.
 						if pass.ReadFile != nil {
 							rfData, rfErr := pass.ReadFile(fullPath)
 							log.PassReadFileTested = true
@@ -208,7 +233,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 							}
 						}
 
-						// Primary read via os.ReadFile to support on-disk singlechecker execution
+						// Primary read via os.ReadFile to support on-disk singlechecker execution.
 						data, err := os.ReadFile(fullPath)
 						if err != nil {
 							return nil, fmt.Errorf("read %s: %w", fullPath, err)
@@ -222,7 +247,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 	setLastContextLog(log)
 
-	// Run Hybrid checks on found .hy files
+	// Run Hybrid checks on found .hy files.
 	for filename, content := range hyFiles {
 		out, err := engine.Check(content)
 		if err != nil {
@@ -237,6 +262,13 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 		if out.Summary.Verdict == "reject" {
 			for _, d := range out.Diagnostics {
+				// analysis.Diagnostic has no severity channel and vet treats
+				// reported diagnostics as findings. E8xxx warnings must never
+				// fail a build, so this adapter reports only hard errors.
+				if d.Severity != "error" {
+					continue
+				}
+
 				var exactPos token.Pos = token.NoPos
 				if fileToken != nil && d.Span.Start.Line > 0 {
 					if d.Span.Start.Line > fileToken.LineCount() {
@@ -244,7 +276,11 @@ func run(pass *analysis.Pass) (interface{}, error) {
 					}
 					lineStart := fileToken.LineStart(d.Span.Start.Line)
 					if lineStart.IsValid() {
-						exactPos = lineStart + token.Pos(d.Span.Start.Col-1)
+						byteOffset, err := runeColumnByteOffset(content, d.Span.Start.Line, d.Span.Start.Col)
+						if err != nil {
+							return nil, fmt.Errorf("diagnostic position outside %s: %w", filename, err)
+						}
+						exactPos = lineStart + token.Pos(byteOffset)
 					}
 				}
 
@@ -258,4 +294,24 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	}
 
 	return nil, nil
+}
+
+// Hybrid source positions are 1-based Unicode-scalar columns because the
+// Rust lexer advances over `char`. go/token positions are byte offsets. This
+// conversion keeps ASCII behavior identical while mapping non-ASCII prefixes
+// to the correct token.Pos.
+func runeColumnByteOffset(content string, line, col int) (int, error) {
+	if line < 1 || col < 1 {
+		return 0, fmt.Errorf("invalid line/column %d:%d", line, col)
+	}
+	lines := strings.Split(content, "\n")
+	if line > len(lines) {
+		return 0, fmt.Errorf("line %d exceeds %d lines", line, len(lines))
+	}
+	runes := []rune(lines[line-1])
+	runeOffset := col - 1
+	if runeOffset > len(runes) {
+		return 0, fmt.Errorf("column %d exceeds line width %d", col, len(runes)+1)
+	}
+	return len(string(runes[:runeOffset])), nil
 }
