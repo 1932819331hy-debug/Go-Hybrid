@@ -61,6 +61,13 @@ jobs:
           set -euo pipefail
           cargo build --locked --release -p hyb
           cargo build --locked --release -p hy-wasm --target wasm32-unknown-unknown
+      - name: Upload prebuilt WASM for independent Go-only consumer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: w012-prebuilt-wasm
+          path: compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm
+          if-no-files-found: error
+          retention-days: 7
       - name: Complete native and WASM envelope parity
         run: node test_wasm_parity.js
       - name: Go wrapper parity, warning preservation, and failure boundaries
@@ -83,3 +90,52 @@ jobs:
           path: ${{ runner.temp }}/w012-edit-benchmark.json
           if-no-files-found: ignore
           retention-days: 7
+
+  go-only-consumer:
+    needs: analyzer-parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source without build artifacts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Pinned Go toolchain (no Rust installation step)
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.26.9'
+          cache: false
+      - name: Retrieve WASM built by separate Rust-capable job
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: w012-prebuilt-wasm
+          path: compiler/target/wasm32-unknown-unknown/release
+      - name: Execute Hybrid analyzer using Go and precompiled WASM
+        working-directory: spikes/w012-analyzer
+        env:
+          HYBRID_WASM_PATH: ${{ github.workspace }}/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm
+          GOFLAGS: '-p=2'
+        run: |
+          set -euo pipefail
+          # Poison Rust commands: any attempt to invoke cargo/rustc by name
+          # breaks this test. This does not mean the hosted VM lacks Rust.
+          mkdir -p "$RUNNER_TEMP/forbid-rust"
+          printf '#!/bin/sh\necho RUST_TOOLCHAIN_INVOKED >&2\nexit 87\n' > "$RUNNER_TEMP/forbid-rust/cargo"
+          cp "$RUNNER_TEMP/forbid-rust/cargo" "$RUNNER_TEMP/forbid-rust/rustc"
+          chmod +x "$RUNNER_TEMP/forbid-rust/cargo" "$RUNNER_TEMP/forbid-rust/rustc"
+          export PATH="$RUNNER_TEMP/forbid-rust:$PATH"
+          test -s "$HYBRID_WASM_PATH"
+          go build -o "$RUNNER_TEMP/hybvet" ./cmd/hybvet
+          set +e
+          "$RUNNER_TEMP/hybvet" vet ./testpkg > "$RUNNER_TEMP/w012-negative.log" 2>&1
+          result=$?
+          set -e
+          if [ "$result" -eq 0 ] || ! grep -q 'HYB-E3003' "$RUNNER_TEMP/w012-negative.log"; then
+            echo "Expected invalid Hybrid source to produce HYB-E3003 without Rust" >&2
+            cat "$RUNNER_TEMP/w012-negative.log" >&2
+            exit 1
+          fi
+          # Editing only .hy must be visible on the next vet pass.
+          cp ../../tests/checker-corpus/09-a3-map-slot-valid.hy ./testpkg/sibling.hy
+          "$RUNNER_TEMP/hybvet" vet ./testpkg
+          echo "Go+prebuilt WASM check PASS; cargo/rustc not invoked."
