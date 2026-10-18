@@ -37,11 +37,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::Checker;
 
-/// One `:=`/`let` name that must be read somewhere in its function.
+/// One `:=`/`let` (or elidable `for`/`select`) name tracked for reads/writes.
 struct Define {
     name: String,
     span: Span,
     used: bool,
+    written: bool,
+    elidable: bool,
 }
 
 #[derive(Default)]
@@ -114,22 +116,91 @@ impl Collector {
         }
     }
 
-    /// Every identifier mention feeds the import-usage set.
+    /// A `for`-iterate or `select`-receive binding is elided to `_` at
+    /// emission when completely untouched, but if the body assigns to it
+    /// (`v = ...`) without ever reading it, the emitter must keep the binding
+    /// and Go rejects it as `declared and not used`.
+    fn define_elidable(&mut self, name: &str, span: Span) {
+        if name == "_" {
+            return;
+        }
+        let Some(top) = self.scopes.last_mut() else {
+            return;
+        };
+        if top.contains_key(name) {
+            return;
+        }
+        let id = self.defines.len();
+        self.defines.push(Define {
+            name: name.to_string(),
+            span,
+            used: false,
+            written: false,
+            elidable: true,
+        });
+        top.insert(name.to_string(), Some(id));
+    }
+
+    /// Every identifier mention not shadowed by a local or parameter binding
+    /// feeds the import-usage set.
     fn mention(&mut self, name: &str) {
-        self.roots.insert(name.to_string());
+        if !self
+            .scopes
+            .iter()
+            .rev()
+            .any(|layer| layer.contains_key(name))
+        {
+            self.roots.insert(name.to_string());
+        }
     }
 
     /// A read of `name`: marks the innermost checked define it resolves to.
     /// A read inside a closure resolves through the closure's scope layers
     /// to the captured outer define — exactly what Go's check counts.
     fn read(&mut self, name: &str) {
-        self.mention(name);
         for layer in self.scopes.iter().rev() {
             if let Some(entry) = layer.get(name) {
                 if let Some(id) = entry {
                     self.defines[*id].used = true;
                 }
                 return;
+            }
+        }
+        self.mention(name);
+    }
+
+    fn write(&mut self, name: &str) {
+        for layer in self.scopes.iter().rev() {
+            if let Some(entry) = layer.get(name) {
+                if let Some(id) = entry {
+                    self.defines[*id].written = true;
+                }
+                return;
+            }
+        }
+        self.mention(name);
+    }
+
+    fn check_repeated_bindings(&mut self, names: &[String], span: Span) {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for name in names {
+            if name != "_" && !seen.insert(name.as_str()) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        span,
+                        format!(
+                            "`{}` is repeated on the left of one `:=` — Go refuses `{} := ...` (repeated on left side of :=) (HYB-E1002)",
+                            name,
+                            names.join(", ")
+                        ),
+                    )
+                    .with_notes(vec![
+                        "each left-hand name must appear once; write `x, y := 1, 2`"
+                            .to_string(),
+                    ]),
+                );
             }
         }
     }
@@ -154,6 +225,11 @@ impl Collector {
         for p in &f.params {
             self.exempt(&p.name);
         }
+        for r in &f.results {
+            if let Some(name) = &r.name {
+                self.exempt(name);
+            }
+        }
         self.block_stmts(body);
         self.pop_scope();
     }
@@ -162,27 +238,7 @@ impl Collector {
         let checked = matches!(l.kind, LocalKind::Define | LocalKind::Let);
         if checked {
             // Form 3: `x, x := 1, 2` — `x repeated on left side of :=`.
-            let mut seen: HashSet<&str> = HashSet::new();
-            for name in &l.names {
-                if name != "_" && !seen.insert(name.as_str()) {
-                    self.diags.push(
-                        Diagnostic::error(
-                            "HYB-E1002",
-                            self.path.clone(),
-                            l.span,
-                            format!(
-                                "`{}` is repeated on the left of one `:=` — Go refuses `{} := ...` (repeated on left side of :=) (HYB-E1002)",
-                                name,
-                                l.names.join(", ")
-                            ),
-                        )
-                        .with_notes(vec![
-                            "each left-hand name must appear once; write `x, y := 1, 2`"
-                                .to_string(),
-                        ]),
-                    );
-                }
-            }
+            self.check_repeated_bindings(&l.names, l.span);
             // Form 1 (the `_` half): `:=` needs at least one NEW variable.
             // `_ := 5`, `_, _ := ...` and a same-scope re-define declare
             // none — Go's `no new variables on left side of :=`.
@@ -238,6 +294,8 @@ impl Collector {
                 name: name.clone(),
                 span: l.span,
                 used: false,
+                written: false,
+                elidable: false,
             });
             top.insert(name.clone(), Some(id));
         }
@@ -297,7 +355,9 @@ impl Collector {
                 }
                 self.pop_scope();
             }
-            Stmt::For { kind, body, .. } => {
+            Stmt::For {
+                kind, body, span, ..
+            } => {
                 self.push_scope();
                 match kind {
                     ForKind::While { cond } => self.expr(cond),
@@ -308,11 +368,10 @@ impl Collector {
                         self.exempt(var);
                     }
                     ForKind::Iterate { vars, expr } => {
+                        self.check_repeated_bindings(vars, *span);
                         self.expr(expr);
-                        // Unread iterate bindings are lowered to `_` at
-                        // emission (issue #139) — outside this pass.
                         for v in vars {
-                            self.exempt(v);
+                            self.define_elidable(v, *span);
                         }
                     }
                     ForKind::Infinite => {}
@@ -341,7 +400,7 @@ impl Collector {
                             self.mention(root);
                         }
                         if let Some(b) = binding {
-                            self.exempt(b);
+                            self.define_elidable(b, subject.span());
                         }
                     }
                     if let Some(g) = &arm.guard {
@@ -363,11 +422,10 @@ impl Collector {
                             self.expr(value);
                         }
                         SelectArmKind::Recv { names, chan } => {
+                            self.check_repeated_bindings(names, chan.span());
                             self.expr(chan);
-                            // Go does check select-receive names; outside
-                            // the issue's three forms (documented).
                             for n in names {
-                                self.exempt(n);
+                                self.define_elidable(n, chan.span());
                             }
                         }
                         SelectArmKind::Default => {}
@@ -388,7 +446,7 @@ impl Collector {
                 // count as a read; `x++`, `x += 1` and every non-ident
                 // target (`x[k] = v`, `x.f = v`, `&x`) read the root.
                 if matches!(op, AssignOp::Assign) {
-                    self.mention(n);
+                    self.write(n);
                 } else {
                     self.read(n);
                 }
@@ -498,6 +556,11 @@ impl Collector {
                 for p in params {
                     self.exempt(&p.name);
                 }
+                for r in results {
+                    if let Some(name) = &r.name {
+                        self.exempt(name);
+                    }
+                }
                 self.block_stmts(body);
                 self.pop_scope();
             }
@@ -582,7 +645,7 @@ impl Collector {
     /// Form 1: every checked define must be read somewhere in its function.
     fn finish(&mut self) {
         for d in &self.defines {
-            if !d.used {
+            if !d.used && (!d.elidable || d.written) {
                 self.diags.push(
                     Diagnostic::error(
                         "HYB-E1002",
