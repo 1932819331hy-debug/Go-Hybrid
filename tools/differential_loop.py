@@ -109,13 +109,28 @@ def checker_rejects(bin_path, hy_path, expected_rule):
         payload = json.loads(out)
     except json.JSONDecodeError:
         return False, "no/invalid checker JSON"
+    # Envelope validation (PR #260): a well-formed JSON scalar/list, a
+    # non-dict summary, non-list diagnostics, or non-dict diagnostic items
+    # used to escape as AttributeError tracebacks; a summary "errors" count
+    # contradicting the diagnostics was silently accepted.
+    if not isinstance(payload, dict):
+        return False, "invalid checker JSON envelope: expected an object"
     summary = payload.get("summary", {})
+    diags = payload.get("diagnostics", [])
+    if not isinstance(summary, dict) or not isinstance(diags, list) or any(
+        not isinstance(d, dict) for d in diags
+    ):
+        return False, "invalid checker JSON envelope: summary/diagnostics"
+    if "errors" in summary:
+        count = summary["errors"]
+        actual = sum(d.get("severity") == "error" for d in diags)
+        if type(count) is not int or count < 0 or count != actual:
+            return False, f"inconsistent summary errors count: {count!r} vs {actual}"
     if proc.returncode != 1:
         return False, (
             f"checker exit/verdict mismatch: exit {proc.returncode}, "
             f"verdict={summary.get('verdict')}"
         )
-    diags = payload.get("diagnostics", [])
     errors = [d for d in diags if d.get("severity") == "error"]
     first_rule = errors[0].get("tier0_rule") if errors else None
     return (
