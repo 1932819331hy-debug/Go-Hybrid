@@ -400,3 +400,36 @@ fn spread_named_args_some_slice_pop_set_and_conversion_enforce_e3012() {
     assert_eq!(e3012_count, 7, "expected 7 HYB-E3012 diagnostics, got {:?}", r.diagnostics);
 }
 
+#[test]
+fn top_level_const_alias_and_inferred_multi_param_generic_enforce_e3012() {
+    let r = check(
+        "const fwd_alias = alias\n\
+         const sc chan<- int = make(chan int, 1)\n\
+         const alias = sc\n\
+         const alias2 = alias\n\
+         fn same[t](a t, b t) {}\n\
+         fn main() {\n\
+           var rc <-chan int = alias2\n\
+           var rc2 <-chan int = fwd_alias\n\
+           same(rc, sc)\n\
+           _ = rc\n\
+           _ = rc2\n\
+         }",
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+    let e3012_count = r.diagnostics.iter().filter(|d| d.code == "HYB-E3012").count();
+    assert_eq!(e3012_count, 3, "expected 3 HYB-E3012 diagnostics, got {:?}", r.diagnostics);
+
+    // Self-referential / mutually recursive consts must terminate cleanly without hanging.
+    let _ = check(
+        "const cyc_a = cyc_b\n\
+         const cyc_b = cyc_a\n\
+         fn main() {\n\
+           var rc <-chan int = cyc_a\n\
+           _ = rc\n\
+         }",
+    );
+}
+
+
+

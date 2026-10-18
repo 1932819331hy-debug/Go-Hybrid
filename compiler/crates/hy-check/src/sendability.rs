@@ -1338,15 +1338,20 @@ impl<'a> Checker<'a> {
         }
         let fns: Vec<&'a hy_syntax::FnDecl> = self.file.fns().collect();
         for f in fns {
-            self.check_fn_close_and_range_directions(f);
+            self.check_fn_close_and_range_directions(f, &const_env);
         }
     }
 
-    fn check_fn_close_and_range_directions(&mut self, f: &hy_syntax::FnDecl) {
+    fn check_fn_close_and_range_directions(
+        &mut self,
+        f: &hy_syntax::FnDecl,
+        const_env: &ChanDirEnv,
+    ) {
         let Some(body) = &f.body else {
             return;
         };
-        let mut env = ChanDirEnv::new();
+        let mut env = const_env.clone();
+        env.push();
         env.push_results(f.results.iter().map(|r| r.ty.clone()).collect());
         if let Some(r) = &f.receiver {
             env.define(&r.name, Some(r.ty.clone()));
@@ -1363,6 +1368,7 @@ impl<'a> Checker<'a> {
             self.walk_stmt_chan_dir(stmt, &mut env);
         }
         env.pop_results();
+        env.pop();
     }
 
     fn walk_stmt_chan_dir(&mut self, stmt: &hy_syntax::Stmt, env: &mut ChanDirEnv) {
@@ -2398,6 +2404,17 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn resolve_const_dir_ty(&self, name: &str, env: &ChanDirEnv) -> Option<hy_syntax::TypeExpr> {
+        let b = self.consts.get(name)?;
+        if let Some(ty) = &b.ty {
+            return Some(ty.clone());
+        }
+        let val = self.const_values.get(name)?;
+        let mut guard_env = env.clone();
+        guard_env.define(name, None);
+        self.dir_ty_of_expr(val, &guard_env)
+    }
+
     fn dir_callee_params(
         &self,
         callee: &Expr,
@@ -2415,26 +2432,17 @@ impl<'a> Checker<'a> {
                     }
                     return None;
                 }
-                if let Some(cb) = self.consts.get(name) {
-                    if let Some(bty) = &cb.ty {
-                        if let TypeExpr::Fn { params, .. } = self.resolve_type_alias(bty) {
+                if self.consts.contains_key(name) {
+                    if let Some(bty) = self.resolve_const_dir_ty(name, env) {
+                        if let TypeExpr::Fn { params, .. } = self.resolve_type_alias(&bty) {
                             return Some(params);
-                        }
-                    }
-                    if let Some(val) = self.const_values.get(name.as_str()) {
-                        if !matches!(unwrap_parens(val), Expr::Ident { .. }) {
-                            if let Some(bty) = self.dir_ty_of_expr(val, env) {
-                                if let TypeExpr::Fn { params, .. } = self.resolve_type_alias(&bty) {
-                                    return Some(params);
-                                }
-                            }
                         }
                     }
                     return None;
                 }
                 let head = Self::base_named_type_str(name);
                 let f = self.fns.get(name.as_str()).or_else(|| self.fns.get(head))?;
-                let subst = self.fn_subst_for_call(f, name, None, args, env, false);
+                let subst = self.fn_subst_for_call(f, name, None, args, env, true);
                 Some(
                     f.params
                         .iter()
@@ -2452,7 +2460,7 @@ impl<'a> Checker<'a> {
                     if !env.is_bound(root) {
                         let full = format!("{}.{}", root, head);
                         if let Some(f) = self.fns.get(full.as_str()) {
-                            let subst = self.fn_subst_for_call(f, name, None, args, env, false);
+                            let subst = self.fn_subst_for_call(f, name, None, args, env, true);
                             return Some(
                                 f.params
                                     .iter()
@@ -2492,7 +2500,7 @@ impl<'a> Checker<'a> {
                             .and_then(|raw| self.method_decls.get(&(raw, head.to_string())))
                     })
                 {
-                    let subst = self.fn_subst_for_call(m, name, Some(&base_ty), args, env, false);
+                    let subst = self.fn_subst_for_call(m, name, Some(&base_ty), args, env, true);
                     return Some(
                         m.params
                             .iter()
@@ -2562,6 +2570,13 @@ impl<'a> Checker<'a> {
                 Expr::Ident { name, .. } => {
                     if let Some(found) = env.lookup(name) {
                         let bty = found?;
+                        if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&bty) {
+                            return Some(results);
+                        }
+                        return None;
+                    }
+                    if self.consts.contains_key(name) {
+                        let bty = self.resolve_const_dir_ty(name, env)?;
                         if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&bty) {
                             return Some(results);
                         }
@@ -2638,7 +2653,7 @@ impl<'a> Checker<'a> {
                 if let Some(found) = env.lookup(name) {
                     return found;
                 }
-                self.consts.get(name).and_then(|b| b.ty.clone())
+                self.resolve_const_dir_ty(name, env)
             }
             PlaceKind::Field { base, name } => {
                 let base_ty = self.dir_ty_of_place(base, env)?;
@@ -2674,15 +2689,8 @@ impl<'a> Checker<'a> {
                 if let Some(found) = env.lookup(name) {
                     return found;
                 }
-                if let Some(b) = self.consts.get(name) {
-                    if let Some(ty) = &b.ty {
-                        return Some(ty.clone());
-                    }
-                    if let Some(val) = self.const_values.get(name.as_str()) {
-                        if !matches!(unwrap_parens(val), Expr::Ident { .. }) {
-                            return self.dir_ty_of_expr(val, env);
-                        }
-                    }
+                if self.consts.contains_key(name) {
+                    return self.resolve_const_dir_ty(name, env);
                 }
                 let head = Self::base_named_type_str(name);
                 if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
@@ -2767,6 +2775,14 @@ impl<'a> Checker<'a> {
                 Expr::Ident { name, .. } => {
                     if let Some(bty) = env.lookup(name) {
                         if let Some(bty) = bty {
+                            if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&bty) {
+                                return results.first().cloned();
+                            }
+                        }
+                        return None;
+                    }
+                    if self.consts.contains_key(name) {
+                        if let Some(bty) = self.resolve_const_dir_ty(name, env) {
                             if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&bty) {
                                 return results.first().cloned();
                             }
@@ -2987,6 +3003,7 @@ impl<'a> Checker<'a> {
     }
 }
 
+#[derive(Clone)]
 struct ChanDirEnv {
     scopes: Vec<std::collections::HashMap<String, Option<hy_syntax::TypeExpr>>>,
     return_stack: Vec<Vec<hy_syntax::TypeExpr>>,
