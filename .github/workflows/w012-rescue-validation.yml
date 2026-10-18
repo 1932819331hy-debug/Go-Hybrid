@@ -30,12 +30,14 @@ jobs:
           echo '/usr/local/go/bin' >> "$GITHUB_PATH"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Install WASM target
+      - name: Install Rust validation components
         run: |
           set -euxo pipefail
+          rustup component add rustfmt
           rustup target add wasm32-unknown-unknown
           go version
           rustc --version
+          cargo fmt --version
 
       - name: Format and build fresh native/WASM artifacts
         run: |
