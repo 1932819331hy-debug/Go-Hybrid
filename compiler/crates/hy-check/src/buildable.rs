@@ -806,7 +806,7 @@ impl<'a> Collector<'a> {
                 self.expr(index);
                 let bk = self.kind_of_place(base);
                 let ik = self.kind_of_expr(index);
-                self.check_index_kind(&base.render(), &bk, index, &ik, p.span);
+                self.check_index_kind(&base.render(), None, &bk, index, &ik, p.span);
             }
             PlaceKind::Field { base, .. } => self.place_read(base),
             PlaceKind::AddrOf { base } => self.place_read(base),
@@ -850,7 +850,7 @@ impl<'a> Collector<'a> {
                 self.expr(index);
                 let bk = self.kind_of_expr(base);
                 let ik = self.kind_of_expr(index);
-                self.check_index_kind(&base.render(), &bk, index, &ik, *span);
+                self.check_index_kind(&base.render(), Some(base.as_ref()), &bk, index, &ik, *span);
             }
             Expr::Slice {
                 base, lo, hi, span, ..
@@ -1918,10 +1918,12 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// Family C1 (#425): `base[index]` requires a slice, array, map, or string.
+    /// Family C1 (#425, #708): `base[index]` requires a slice, array, map, or string,
+    /// and constant indices on constant strings must satisfy `0 <= index < len(base)`.
     fn check_index_kind(
         &mut self,
         base_str: &str,
+        base_expr: Option<&Expr>,
         bk: &OpKind,
         index: &Expr,
         ik: &OpKind,
@@ -1964,10 +1966,43 @@ impl<'a> Collector<'a> {
                 ),
                 "slice, array, and string indices must be integers",
             );
+        } else if needs_int_idx {
+            if let Some(v) = self.eval_const_int_at(index, span.start) {
+                if v < 0 {
+                    self.emit_e1002(
+                        index.span(),
+                        format!(
+                            "invalid index `{}` (constant `{}` must not be negative) on `{}` (HYB-E1002)",
+                            index.render(),
+                            v,
+                            bk.label()
+                        ),
+                        "slice, array, and string indices must be non-negative integers",
+                    );
+                } else if matches!(bk, OpKind::Str) {
+                    if let Some(str_len) =
+                        base_expr.and_then(|b| self.eval_const_string_len_at(b, span.start))
+                    {
+                        if v >= str_len {
+                            self.emit_e1002(
+                                index.span(),
+                                format!(
+                                    "invalid string index `{}` (out of bounds for {}-byte string `{}`) (HYB-E1002)",
+                                    index.render(),
+                                    str_len,
+                                    base_str
+                                ),
+                                "a constant index on a constant string must satisfy `0 <= index < len(s)`",
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
-    /// Family C2 (#425): `base[lo:hi]` requires a slice, array, or string.
+    /// Family C2 (#425, #708): `base[lo:hi]` requires a slice, array, or string,
+    /// and constant bounds on constant strings must satisfy `0 <= lo <= hi <= len(base)`.
     fn check_slice_kind(
         &mut self,
         base: &Expr,
@@ -1995,7 +2030,15 @@ impl<'a> Collector<'a> {
             );
             return;
         }
-        for bound in [lo, hi].into_iter().flatten() {
+        let const_str_len = if matches!(bk, OpKind::Str) {
+            self.eval_const_string_len_at(base, span.start)
+        } else {
+            None
+        };
+        let mut lo_const: Option<i128> = None;
+        let mut hi_const: Option<i128> = None;
+        for (idx, bound_opt) in [lo, hi].into_iter().enumerate() {
+            let Some(bound) = bound_opt else { continue };
             let k = self.kind_of_expr(bound);
             if !matches!(k, OpKind::Unknown | OpKind::Int) {
                 self.emit_e1002(
@@ -2007,8 +2050,98 @@ impl<'a> Collector<'a> {
                     ),
                     "slice bounds must be integers",
                 );
+            } else if let Some(v) = self.eval_const_int_at(bound, span.start) {
+                if v < 0 {
+                    self.emit_e1002(
+                        bound.span(),
+                        format!(
+                            "invalid slice index `{}` (constant `{}` must not be negative) (HYB-E1002)",
+                            bound.render(),
+                            v
+                        ),
+                        "slice bounds must be non-negative integers",
+                    );
+                } else {
+                    if let Some(str_len) = const_str_len {
+                        if v > str_len {
+                            self.emit_e1002(
+                                bound.span(),
+                                format!(
+                                    "invalid string slice bound `{}` (out of bounds for {}-byte string `{}`) (HYB-E1002)",
+                                    bound.render(),
+                                    str_len,
+                                    base.render()
+                                ),
+                                "a constant slice bound on a constant string must satisfy `0 <= bound <= len(s)`",
+                            );
+                        }
+                    }
+                    if idx == 0 {
+                        lo_const = Some(v);
+                    } else {
+                        hi_const = Some(v);
+                    }
+                }
             }
         }
+        if let (Some(lo_expr), Some(hi_expr), Some(lo_v), Some(hi_v)) =
+            (lo, hi, lo_const, hi_const)
+        {
+            if lo_v > hi_v {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "invalid slice indices: `{}` > `{}` (`{} > {}`) — Go rejects inverted constant slice bounds at compile time (HYB-E1002)",
+                        lo_expr.render(),
+                        hi_expr.render(),
+                        lo_v,
+                        hi_v
+                    ),
+                    "the lower slice bound `lo` in `x[lo:hi]` must satisfy `lo <= hi`",
+                );
+            }
+        }
+    }
+
+    fn is_non_const_local(&self, name: &str) -> bool {
+        for layer in self.scopes.iter().rev() {
+            if let Some(entry) = layer.get(name) {
+                return match entry {
+                    Some(id) => !matches!(self.defines[*id].kind, LocalKind::Const),
+                    None => true,
+                };
+            }
+        }
+        false
+    }
+
+    fn expr_has_non_const_local(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.is_non_const_local(name),
+            Expr::Unary { operand, .. } => self.expr_has_non_const_local(operand),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_has_non_const_local(lhs) || self.expr_has_non_const_local(rhs)
+            }
+            Expr::Call { callee, args, .. } => {
+                self.expr_has_non_const_local(callee)
+                    || args.iter().any(|a| self.expr_has_non_const_local(&a.value))
+            }
+            _ => false,
+        }
+    }
+
+    fn eval_const_int_at(&self, e: &Expr, use_pos: hy_diag::Pos) -> Option<i128> {
+        if self.expr_has_non_const_local(e) {
+            return None;
+        }
+        self.ck.const_int_value_at(e, use_pos, 0)
+    }
+
+    fn eval_const_string_len_at(&self, e: &Expr, use_pos: hy_diag::Pos) -> Option<i128> {
+        if self.expr_has_non_const_local(e) {
+            return None;
+        }
+        self.ck.const_string_len_at(e, use_pos, 0)
     }
 
     fn check_array_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
@@ -2649,6 +2782,49 @@ fn main() {
     close(ch)
     f := fn() int { return 7 }
     fmt.println(f())
+}
+";
+        let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Accept,
+            "unexpected diagnostics: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn rejects_constant_string_index_and_slice_bounds_708() {
+        for src in [
+            "const s = \"ab\"\nfn main() {\n    fmt.println(s[5])\n}\n",
+            "fn main() {\n    fmt.println(\"hello\"[7])\n}\n",
+            "const s = \"ab\"\nfn main() {\n    fmt.println(s[0:5])\n}\n",
+            "fn main() {\n    fmt.println(\"hello\"[1:7])\n}\n",
+            "fn main() {\n    const s = \"ab\" + \"cd\"\n    fmt.println(s[4])\n}\n",
+            "fn main() {\n    fmt.println(\"hello\"[3:2])\n}\n",
+            "fn main() {\n    fmt.println(\"hello\"[-1])\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_constant_string_bounds_controls_708() {
+        let src = "\
+const s = \"ab\"
+fn main() {
+    fmt.println(\"hello\"[4])
+    fmt.println(s[1])
+    fmt.println(\"hello\"[0:5])
+    fmt.println(\"hello\"[2:2])
+    dyn_s := \"ab\"
+    fmt.println(dyn_s[5])
 }
 ";
         let r = check(src);

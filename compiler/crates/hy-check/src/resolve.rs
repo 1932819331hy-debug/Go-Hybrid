@@ -478,12 +478,15 @@ impl<'a> Scan<'a> {
                     self.run_block(body);
                 } else {
                     let mut fn_allowed = self.allowed.clone();
+                    let mut fn_locals = self.local_decls.clone();
                     {
                         let mut collect = Scan {
                             path: self.path,
                             packages: self.packages,
                             file_decls: self.file_decls,
                             allowed: &mut fn_allowed,
+                            local_decls: &mut fn_locals,
+                            uncurated_imports: self.uncurated_imports,
                             diags: self.diags,
                             mode: Mode::Collect,
                         };
@@ -504,6 +507,8 @@ impl<'a> Scan<'a> {
                         packages: self.packages,
                         file_decls: self.file_decls,
                         allowed: &mut fn_allowed,
+                        local_decls: &mut fn_locals,
+                        uncurated_imports: self.uncurated_imports,
                         diags: self.diags,
                         mode: Mode::Check,
                     };
