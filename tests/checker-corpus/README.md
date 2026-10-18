@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 77 programs** — ACCEPT 21 · ACCEPT-MANAGED 2 ·
-REJECT 54 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 86 programs** — ACCEPT 28 · ACCEPT-MANAGED 2 ·
+REJECT 56 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -20,7 +20,7 @@ the new fixtures.
 
 The prose below is the original pre-registration statement, kept as written
 on its date: the corpora sizes it names (18, 20) are what the corpus held
-then, not today's 77. The dated tripwire baseline is preserved as historical
+then, not today's 84. The dated tripwire baseline is preserved as historical
 for the same reason.
 
 18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
@@ -62,3 +62,25 @@ surface with author credit (tests extracted to
 
 With this registration the corpus is **78 programs: ACCEPT 21 ·
 ACCEPT-MANAGED 2 · REJECT 55**.
+
+`control-*.hy` — isHeSatoshi (PR #598): seven **negative controls** for the
+accept-side oracle wave. The Go-toolchain oracle (#577) measured a 38%
+accept-side residual on generated programs and named ten accepted-but-
+unbuildable classes to fix; fixing those means adding range, bounds and shape
+checks to more contexts, and every check added can over-reject. A corpus that
+only grows the REJECT side cannot detect that. Each control is ACCEPT today
+**and builds under `go build`**, verified before commit — an accept-side
+control that does not build would pin the wrong thing. Four fence off-by-ones
+in the const-overflow wave (the exact int8 edges `127`/`-128` in one file, the
+unsigned `255` edge, a folded constant expression `100 + 27`, and the
+in-range twin of #519's composite-literal overflow). Three are legal Go the
+wave must not confuse with the array form: `xs[300]` on a **slice** compiles
+and panics at run time while `a[300]` on `[2]int` does not, `-n` on an int8
+**variable** wraps at run time because Go does not fold it, and
+`var a [300]int8` bounds an array **length** by a count, not by the element
+type's range. Each header states what it fences and cites GUARANTEES.md Row 13
+(BUILDABLE) or the Row 16 "No claim" position for run-time panics, so a
+reviewer can see why ACCEPT is correct rather than an oversight.
+
+With this registration the corpus is **86 programs: ACCEPT 28 ·
+ACCEPT-MANAGED 2 · REJECT 56**.
