@@ -293,7 +293,49 @@ impl<'a> Scan<'a> {
                 self.run_place(base);
                 self.run_expr(index);
             }
-            PlaceKind::Field { base, .. } => self.run_place(base),
+            PlaceKind::Field { base, name } => {
+                if self.mode == Mode::Check {
+                    if let PlaceKind::Ident(base_name) = &base.kind {
+                        if !self.local_decls.contains(base_name) {
+                            if self.uncurated_imports.contains(base_name)
+                                || crate::foreign::is_uncurated_go_stdlib_root(base_name)
+                            {
+                                let msg = format!(
+                                    "package `{}` is not in the M5 curated allowlist ({}) (HYB-E1001)",
+                                    base_name,
+                                    crate::foreign::CURATED_ALLOWLIST_DISPLAY
+                                );
+                                self.diags.push(
+                                    hy_diag::Diagnostic::error(
+                                        "HYB-E1001",
+                                        self.path.to_string(),
+                                        p.span,
+                                        msg,
+                                    ),
+                                );
+                                return;
+                            } else if crate::foreign::is_curated_package_root(base_name) {
+                                if !crate::foreign::is_curated_package_member(base_name, name) {
+                                    let msg = format!(
+                                        "`{}.{}` is not a resolved member of curated package `{}` (HYB-E1001)",
+                                        base_name, name, base_name
+                                    );
+                                    self.diags.push(
+                                        hy_diag::Diagnostic::error(
+                                            "HYB-E1001",
+                                            self.path.to_string(),
+                                            p.span,
+                                            msg,
+                                        ),
+                                    );
+                                }
+                                return;
+                            }
+                        }
+                    }
+                }
+                self.run_place(base);
+            }
             PlaceKind::AddrOf { base } => self.run_place(base),
         }
     }
