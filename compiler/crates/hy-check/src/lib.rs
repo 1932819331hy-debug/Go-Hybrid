@@ -510,6 +510,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // T23: a multi-value call bound to the wrong number of names
         // (`p := minmax(3, 9)`) — Go refuses the emitted binding.
         ck.check_stmt_multi_value(&st, stmt);
+        // Issue #228 family C: literal misuse in `Type(const)` conversion
+        // calls (`int8(300)` on a 64-bit target, `int("abc")`, `string(2.5)`,
+        // `[]int(3)`, …) is accepted today and then fails `go build`.
+        ck.check_stmt_type_conversions(stmt);
 
         // Calls (A2 loan windows, A7 consumes + arg lending). A for-loop
         // ITERATE expression's borrow calls get loop-extent loans: the
