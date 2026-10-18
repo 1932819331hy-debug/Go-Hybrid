@@ -103,6 +103,20 @@ func TestFailureDomainSeparation(t *testing.T) {
 	}
 	t.Logf("[PASS] Rule violation -> %s (%d diagnostics)", resInvalid.Verdict, len(resInvalid.Diagnostics))
 
+	// 2b. Invalid UTF-8 is a user-source rejection, not an infrastructure failure.
+	t.Run("InvalidUTF8_IsReject", func(t *testing.T) {
+		res := engine.CheckSource(ctx, string([]byte{0xff, 0xfe}))
+		if err := res.CheckInvariant(); err != nil {
+			t.Fatal(err)
+		}
+		if res.Verdict != VerdictReject {
+			t.Fatalf("Expected VerdictReject for invalid UTF-8, got %v (%v)", res.Verdict, res.Failure)
+		}
+		if len(res.Diagnostics) != 1 || res.Diagnostics[0].Code != "HYB-E0002" {
+			t.Fatalf("Expected one HYB-E0002 diagnostic, got %+v", res.Diagnostics)
+		}
+	})
+
 	// 3. Fault Injection 1: WASM Trap / Panic during execution
 	t.Run("Fault_WasmTrap", func(t *testing.T) {
 		mock := &MockWasmABI{
@@ -196,5 +210,36 @@ func TestFailureDomainSeparation(t *testing.T) {
 			t.Fatalf("Expected VerdictAnalysisFailure on timeout, got %v", res.Verdict)
 		}
 		t.Logf("[PASS] Fault Injection 5 (Execution Timeout) -> %s: %v", res.Verdict, res.Failure)
+	})
+
+	// 8. Successful calls release both the input and diagnostic output buffers.
+	t.Run("GuestBuffersAreFreed", func(t *testing.T) {
+		envelope := []byte(`{"diagnostics":[],"summary":{"file":"input.hy","verdict":"accept","errors":0,"warnings":0},"version":1}`)
+		var frees [][2]uint64
+		mock := &MockWasmABI{
+			Memory: make([]byte, 1024),
+			AllocFn: func(ctx context.Context, byteLen uint64) (uint32, error) {
+				return 8, nil
+			},
+			CheckFn: func(ctx context.Context, ptr, byteLen uint64) (uint64, error) {
+				return (uint64(128) << 32) | uint64(len(envelope)), nil
+			},
+			FreeFn: func(ctx context.Context, ptr, byteLen uint64) error {
+				frees = append(frees, [2]uint64{ptr, byteLen})
+				return nil
+			},
+		}
+		copy(mock.Memory[128:], envelope)
+
+		res := CheckSourceWithABI(ctx, mock, "package p")
+		if res.Verdict != VerdictAccept {
+			t.Fatalf("Expected VerdictAccept, got %v (%v)", res.Verdict, res.Failure)
+		}
+		if len(frees) != 2 {
+			t.Fatalf("Expected source and output frees, got %v", frees)
+		}
+		if frees[0][0] != 8 || frees[1][0] != 128 {
+			t.Fatalf("Unexpected freed pointers: %v", frees)
+		}
 	})
 }
