@@ -301,6 +301,10 @@ pub(crate) fn const_int_fold_with(
             Some(v) => ConstFold::Val(v),
             None => ConstFold::NotConst,
         },
+        Expr::Lit {
+            kind: LitKind::Char(c),
+            ..
+        } => ConstFold::Val(*c as i128),
         Expr::Ident { name, .. } => {
             if let Some(st) = st {
                 if st.env_lookup(name).is_some() {
