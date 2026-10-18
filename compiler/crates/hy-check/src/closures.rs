@@ -1702,6 +1702,13 @@ fn update_pre_defer_peers(
                     }
                 }
             }
+            if l.values.len() == 1 && l.names.len() > 1 {
+                for (i, j) in ck.callee_shared_return_pairs(st, &l.values[0]) {
+                    if let (Some(a), Some(b)) = (l.names.get(i), l.names.get(j)) {
+                        link_peer_nodes(peers, a, b);
+                    }
+                }
+            }
         }
         Stmt::Assign {
             targets,
@@ -1730,6 +1737,19 @@ fn update_pre_defer_peers(
                             .unwrap_or(true);
                         if may_share {
                             link_peer_nodes(peers, target, &r);
+                        }
+                    }
+                }
+            }
+            if values.len() == 1 && targets.len() > 1 {
+                for (i, j) in ck.callee_shared_return_pairs(st, &values[0]) {
+                    if let (Some(ta), Some(tb)) = (targets.get(i), targets.get(j)) {
+                        if let (
+                            hy_syntax::PlaceKind::Ident(a),
+                            hy_syntax::PlaceKind::Ident(b),
+                        ) = (&ta.kind, &tb.kind)
+                        {
+                            link_peer_nodes(peers, a, b);
                         }
                     }
                 }
