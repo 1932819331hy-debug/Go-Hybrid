@@ -115,7 +115,24 @@ type PassContextLog struct {
 	PassReadFileLen    int
 }
 
-var LastContextLog PassContextLog
+var (
+	lastContextLogMu sync.RWMutex
+	lastContextLog   PassContextLog
+)
+
+func setLastContextLog(log PassContextLog) {
+	lastContextLogMu.Lock()
+	lastContextLog = log
+	lastContextLogMu.Unlock()
+}
+
+// LastContextLogSnapshot returns the latest research observation without
+// exposing mutable shared state to concurrent analyzer runs.
+func LastContextLogSnapshot() PassContextLog {
+	lastContextLogMu.RLock()
+	defer lastContextLogMu.RUnlock()
+	return lastContextLog
+}
 
 var Analyzer = &analysis.Analyzer{
 	Name: "hybrid",
@@ -203,7 +220,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		}
 	}
 
-	LastContextLog = log
+	setLastContextLog(log)
 
 	// Run Hybrid checks on found .hy files
 	for filename, content := range hyFiles {
