@@ -2862,3 +2862,14 @@ fn f(err error) error {
     );
 }
 
+#[test]
+fn m4_initialism_mapping_for_foreign_go_names_issue_658() {
+    let go = emit(
+        "fn main() {\n    _ = io.eof\n    _ = http.status_ok\n    _ = time.rfc3339\n    _ = strings.to_valid_utf8(\"a\", \"b\")\n}\n",
+    );
+    assert!(go.contains("io.EOF"), "expected io.EOF, got:\n{}", go);
+    assert!(go.contains("http.StatusOK"), "expected http.StatusOK, got:\n{}", go);
+    assert!(go.contains("time.RFC3339"), "expected time.RFC3339, got:\n{}", go);
+    assert!(go.contains("strings.ToValidUTF8(\"a\", \"b\")"), "expected strings.ToValidUTF8, got:\n{}", go);
+}
+

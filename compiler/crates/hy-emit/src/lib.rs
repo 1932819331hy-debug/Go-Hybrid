@@ -242,11 +242,78 @@ const GO_BUILTIN_TYPES: &[&str] = &[
     "complex128",
 ];
 
-/// snake_case → Go exported name (`read_all` → `ReadAll`, `args` → `Args`).
+/// Standard Go initialisms (SPEC M4: `io.eof` → `io.EOF`,
+/// `http.status_ok` → `http.StatusOK`, `time.rfc3339` → `time.RFC3339`,
+/// `strings.to_valid_utf8` → `strings.ToValidUTF8`).
+fn go_initialism(seg: &str) -> Option<&'static str> {
+    Some(match seg {
+        "acl" => "ACL",
+        "api" => "API",
+        "ascii" => "ASCII",
+        "cpu" => "CPU",
+        "crlf" => "CRLF",
+        "css" => "CSS",
+        "dns" => "DNS",
+        "eof" => "EOF",
+        "guid" => "GUID",
+        "html" => "HTML",
+        "http" => "HTTP",
+        "https" => "HTTPS",
+        "id" => "ID",
+        "ip" => "IP",
+        "ipv4" => "IPv4",
+        "ipv6" => "IPv6",
+        "json" => "JSON",
+        "lhs" => "LHS",
+        "ok" => "OK",
+        "qps" => "QPS",
+        "ram" => "RAM",
+        "rfc822" => "RFC822",
+        "rfc822z" => "RFC822Z",
+        "rfc850" => "RFC850",
+        "rfc1123" => "RFC1123",
+        "rfc1123z" => "RFC1123Z",
+        "rfc3339" => "RFC3339",
+        "rhs" => "RHS",
+        "rpc" => "RPC",
+        "sha1" => "SHA1",
+        "sha256" => "SHA256",
+        "sha384" => "SHA384",
+        "sha512" => "SHA512",
+        "sla" => "SLA",
+        "smtp" => "SMTP",
+        "sql" => "SQL",
+        "ssh" => "SSH",
+        "tcp" => "TCP",
+        "tls" => "TLS",
+        "ttl" => "TTL",
+        "udp" => "UDP",
+        "ui" => "UI",
+        "uid" => "UID",
+        "uri" => "URI",
+        "url" => "URL",
+        "utf8" => "UTF8",
+        "utf16" => "UTF16",
+        "utf32" => "UTF32",
+        "uuid" => "UUID",
+        "vm" => "VM",
+        "xml" => "XML",
+        "xmpp" => "XMPP",
+        "xsrf" => "XSRF",
+        "xss" => "XSS",
+        _ => return None,
+    })
+}
+
+/// snake_case → Go exported name (`read_all` → `ReadAll`, `args` → `Args`,
+/// `eof` → `EOF`, `status_ok` → `StatusOK`).
 pub(crate) fn to_go_name(name: &str) -> String {
     name.split('_')
         .filter(|p| !p.is_empty())
         .map(|p| {
+            if let Some(init) = go_initialism(p) {
+                return init.to_string();
+            }
             let mut cs = p.chars();
             match cs.next() {
                 Some(c) => c.to_uppercase().collect::<String>() + cs.as_str(),

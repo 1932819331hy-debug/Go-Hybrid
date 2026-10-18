@@ -2431,7 +2431,7 @@ impl<'a> Collector<'a> {
             let Decl::Import { path, span } = d else {
                 continue;
             };
-            if path.starts_with("rust/") {
+            if path.starts_with("rust/") || !crate::foreign::is_curated_import(path) {
                 continue;
             }
             let root = path.rsplit('/').next().unwrap_or(path.as_str());
