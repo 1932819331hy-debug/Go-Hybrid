@@ -298,7 +298,7 @@ func TestSiblingDiagnosticsHaveStableFileOrder(t *testing.T) {
 		var filenames []string
 		pass := &analysis.Pass{
 			Analyzer: Analyzer,
-			Pkg: types.NewPackage("sample", "sample"),
+			Pkg:      types.NewPackage("sample", "sample"),
 			Fset:     fset,
 			Files:    []*ast.File{goFile},
 			Report: func(d analysis.Diagnostic) {
