@@ -401,7 +401,9 @@ impl Emitter {
                 // literal renders inline, its body keeps normal indents.
                 let main_body = std::mem::take(&mut self.body);
                 let saved_loans = std::mem::take(&mut self.loan_frames);
+                let saved_inherit = self.branch_inherit.take();
                 let body_res = self.emit_block_body(&body.stmts);
+                self.branch_inherit = saved_inherit;
                 self.loan_frames = saved_loans;
                 self.loop_labels = saved_loop_labels;
                 let closure_body = std::mem::take(&mut self.body);

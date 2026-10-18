@@ -459,11 +459,13 @@ pub struct Emitter {
     /// is (loan variable, its store-back statement): `m[k] = n`, or
     /// `m[k] = *n` when `n` is a pointer-typed binding.
     loan_frames: Vec<Vec<(String, String)>>,
-    /// #546: outer slot loans handed down into the branches of an `if`
-    /// whose branches spawn/send using the loan's base. Every branch body
-    /// of that `if` starts with these loans in its frame (and a missing
-    /// `else` gets a synthetic one), so the store-back runs on each path
-    /// before any move instead of once after the whole `if`.
+    /// #546: outer slot loans handed down into the branches/blocks of a
+    /// compound statement (`if`, `match`, `select`, `block`, `managed`, `for`)
+    /// whose body contains a concurrency boundary or invalidating write on
+    /// the loan's base map. Every branch body starts with these loans in its
+    /// frame (and a missing `else` / match fallthrough gets a synthetic
+    /// store-back), so the store-back runs on each path before any move or
+    /// delete instead of once after the whole compound statement.
     branch_inherit: Option<Vec<(String, String)>>,
     /// E11 handler contract: inside a closure that converts to a
     /// propagation-carrying target (`http.handler`), `?` fires
