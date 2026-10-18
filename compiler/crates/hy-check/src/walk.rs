@@ -817,6 +817,66 @@ pub(crate) fn expr_path(expr: &Expr) -> Option<String> {
     }
 }
 
+/// O8 slot identity: the literal key of an `&path[key]` loan when `path` is
+/// an index-free ident/field chain, so two different keys on the same base
+/// are provably distinct slots. `None` means the slot may be any slot.
+pub(crate) fn addr_of_index_slot_key(value: &Expr) -> Option<String> {
+    let Expr::Index { base, index, .. } = as_addr_of(value)? else {
+        return None;
+    };
+    if !expr_is_index_free(base) {
+        return None;
+    }
+    lit_index_key(index)
+}
+
+/// A field store `s[k].f = v` (or `s[k].f.g op= v`) writes into one slot of
+/// `s` without inserting: the base path and literal key of that slot.
+pub(crate) fn place_field_store_slot(place: &Place) -> Option<(String, Option<String>)> {
+    if !matches!(place.kind, PlaceKind::Field { .. }) {
+        return None;
+    }
+    let mut cur = place;
+    loop {
+        match &cur.kind {
+            PlaceKind::Field { base, .. } => cur = base,
+            PlaceKind::Index { base, index } => {
+                let key = if place_is_index_free(base) {
+                    lit_index_key(index)
+                } else {
+                    None
+                };
+                return Some((place_path(base)?, key));
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn lit_index_key(index: &Expr) -> Option<String> {
+    match crate::model::unwrap_parens(index) {
+        e @ Expr::Lit { .. } => Some(e.render()),
+        _ => None,
+    }
+}
+
+fn expr_is_index_free(e: &Expr) -> bool {
+    match e {
+        Expr::Ident { .. } => true,
+        Expr::Field { base, .. } => expr_is_index_free(base),
+        Expr::Paren { inner, .. } => expr_is_index_free(inner),
+        _ => false,
+    }
+}
+
+fn place_is_index_free(p: &Place) -> bool {
+    match &p.kind {
+        PlaceKind::Ident(_) => true,
+        PlaceKind::Field { base, .. } => place_is_index_free(base),
+        _ => false,
+    }
+}
+
 /// `svc := &e.services[existing]` — extract (defined-name-agnostic) the base
 /// path of an `&path[key]`-shaped value, if it is one.
 pub(crate) fn addr_of_index_base_path(value: &Expr) -> Option<String> {
