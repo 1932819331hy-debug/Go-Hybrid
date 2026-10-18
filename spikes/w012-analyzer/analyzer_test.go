@@ -219,11 +219,15 @@ func TestDeclaredHybridReadFailuresFailClosed(t *testing.T) {
 func TestDeclaredAndScannedHybridPathsAreCanonicalAndReportedOnce(t *testing.T) {
 	dir := t.TempDir()
 	hyPath := filepath.Join(dir, "bad.hy")
-	src := "package sample\\nfn check() { let x = 7; let y = move x; let z = x }\\n"
+	src := "package sample\nfn check() { let x = 7; let y = move x; let z = x }\n"
 	if err := os.WriteFile(hyPath, []byte(src), 0600); err != nil {
 		t.Fatal(err)
 	}
-	relative, err := filepath.Rel(".", hyPath)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cwd, hyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +244,7 @@ func TestDeclaredAndScannedHybridPathsAreCanonicalAndReportedOnce(t *testing.T) 
 	}
 
 	for _, tc := range []struct {
-		name string
+		name     string
 		readFile func(string) ([]byte, error)
 	}{
 		{"driver_file_reader", os.ReadFile},
@@ -248,18 +252,18 @@ func TestDeclaredAndScannedHybridPathsAreCanonicalAndReportedOnce(t *testing.T) 
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fset := token.NewFileSet()
-			goFile, err := parser.ParseFile(fset, filepath.Join(dir, "anchor.go"), "package sample\\n", 0)
+			goFile, err := parser.ParseFile(fset, filepath.Join(dir, "anchor.go"), "package sample\n", 0)
 			if err != nil {
 				t.Fatal(err)
 			}
 			var reported []analysis.Diagnostic
 			pass := &analysis.Pass{
-				Analyzer: Analyzer,
-				Pkg: types.NewPackage("sample", "sample"),
-				Fset: fset,
-				Files: []*ast.File{goFile},
+				Analyzer:   Analyzer,
+				Pkg:        types.NewPackage("sample", "sample"),
+				Fset:       fset,
+				Files:      []*ast.File{goFile},
 				OtherFiles: []string{relative, hyPath},
-				ReadFile: tc.readFile,
+				ReadFile:   tc.readFile,
 				Report: func(d analysis.Diagnostic) { reported = append(reported, d) },
 			}
 			if _, err := run(pass); err != nil {
@@ -279,7 +283,7 @@ func TestDeclaredAndScannedHybridPathsAreCanonicalAndReportedOnce(t *testing.T) 
 
 func TestSiblingDiagnosticsHaveStableFileOrder(t *testing.T) {
 	dir := t.TempDir()
-	src := "package sample\\nfn check() { let x = 7; let y = move x; let z = x }\\n"
+	src := "package sample\nfn check() { let x = 7; let y = move x; let z = x }\n"
 	for _, name := range []string{"b.hy", "a.hy"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0600); err != nil {
 			t.Fatal(err)
@@ -287,7 +291,7 @@ func TestSiblingDiagnosticsHaveStableFileOrder(t *testing.T) {
 	}
 	for i := 0; i < 4; i++ {
 		fset := token.NewFileSet()
-		goFile, err := parser.ParseFile(fset, filepath.Join(dir, "anchor.go"), "package sample\\n", 0)
+		goFile, err := parser.ParseFile(fset, filepath.Join(dir, "anchor.go"), "package sample\n", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -295,8 +299,8 @@ func TestSiblingDiagnosticsHaveStableFileOrder(t *testing.T) {
 		pass := &analysis.Pass{
 			Analyzer: Analyzer,
 			Pkg: types.NewPackage("sample", "sample"),
-			Fset: fset,
-			Files: []*ast.File{goFile},
+			Fset:     fset,
+			Files:    []*ast.File{goFile},
 			Report: func(d analysis.Diagnostic) {
 				filenames = append(filenames, filepath.Base(fset.Position(d.Pos).Filename))
 			},
