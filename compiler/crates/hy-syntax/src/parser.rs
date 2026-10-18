@@ -2165,7 +2165,20 @@ impl Parser {
                     depth -= 1;
                 }
                 Tok::Punct(",") if depth == 1 => has_comma = true,
-                Tok::Ident(_) if depth >= 1 => type_shaped = true,
+                Tok::Ident(_) | Tok::Kw("chan") | Tok::Kw("fn") if depth >= 1 => {
+                    type_shaped = true
+                }
+                Tok::Punct("<-") if depth >= 1 => {
+                    let prev_is_chan = k > 0
+                        && matches!(self.toks.get(k - 1).map(|t| &t.tok), Some(Tok::Kw("chan")));
+                    let next_is_chan =
+                        matches!(self.toks.get(k + 1).map(|t| &t.tok), Some(Tok::Kw("chan")));
+                    if prev_is_chan || next_is_chan {
+                        type_shaped = true;
+                    } else if depth == 1 {
+                        index_shaped = true;
+                    }
+                }
                 Tok::Punct(".") if depth >= 1 => {}
                 Tok::Eof => return false,
                 other => {

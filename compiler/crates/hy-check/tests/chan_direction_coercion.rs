@@ -308,3 +308,95 @@ fn controls_bidir_to_unidir_and_same_dir_accept() {
     assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
     assert!(r.diagnostics.is_empty());
 }
+
+#[test]
+fn generic_struct_method_and_fn_type_args_enforce_e3012() {
+    let r = check(
+        "struct box[t] {\n\
+           val t\n\
+         }\n\
+         fn (b box[t]) put(v t) {}\n\
+         struct pair[a, b] {\n\
+           first a\n\
+           second b\n\
+         }\n\
+         fn take_pair[a, b](x a, y b) {}\n\
+         fn id[t](x t) t {\n\
+           return x\n\
+         }\n\
+         fn main() {\n\
+           sc := make(chan<- int, 1)\n\
+           c := make(chan int, 1)\n\
+           b := box[<-chan int]{val: sc}\n\
+           b.put(sc)\n\
+           var b2 box[<-chan int] = box[chan int]{val: c}\n\
+           take_pair[<-chan int, int](sc, 1)\n\
+           var r <-chan int = id(sc)\n\
+           p := pair[<-chan int, int]{first: sc, second: 1}\n\
+           _ = b2\n\
+           _ = r\n\
+           _ = p\n\
+         }",
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+    let e3012_count = r.diagnostics.iter().filter(|d| d.code == "HYB-E3012").count();
+    assert_eq!(e3012_count, 6, "expected 6 HYB-E3012 diagnostics, got {:?}", r.diagnostics);
+}
+
+#[test]
+fn comma_ok_receive_and_map_lookup_enforce_e3012() {
+    let r = check(
+        "fn main() {\n\
+           outer := make(chan chan<- int, 1)\n\
+           m := map[int]chan<- int{}\n\
+           var got <-chan int\n\
+           var ok bool\n\
+           got, ok = <-outer\n\
+           got2, ok2 := <-outer\n\
+           var r2 <-chan int = got2\n\
+           got, ok = m[0]\n\
+           got3, ok3 := m[0]\n\
+           var r3 <-chan int = got3\n\
+           _ = got\n\
+           _ = ok\n\
+           _ = ok2\n\
+           _ = r2\n\
+           _ = ok3\n\
+           _ = r3\n\
+         }",
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+    let e3012_count = r.diagnostics.iter().filter(|d| d.code == "HYB-E3012").count();
+    assert_eq!(e3012_count, 4, "expected 4 HYB-E3012 diagnostics, got {:?}", r.diagnostics);
+}
+
+#[test]
+fn spread_named_args_some_slice_pop_set_and_conversion_enforce_e3012() {
+    let r = check(
+        "type recv_int = <-chan int\n\
+         fn connect(host string, ch <-chan int) {}\n\
+         fn main() {\n\
+           sc := make(chan<- int, 1)\n\
+           s1 := []<-chan int{}\n\
+           s2 := []chan<- int{sc}\n\
+           s3 := append(s1, s2...)\n\
+           connect(ch = sc, host = \"localhost\")\n\
+           var o option[<-chan int] = some(sc)\n\
+           var sub []<-chan int = s2[0:1]\n\
+           var popped <-chan int = s2.pop()\n\
+           st := set[<-chan int]{}\n\
+           st.insert(sc)\n\
+           var alias_r recv_int = recv_int(sc)\n\
+           _ = s3\n\
+           _ = o\n\
+           _ = sub\n\
+           _ = popped\n\
+           _ = st\n\
+           _ = alias_r\n\
+         }",
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+    let e3012_count = r.diagnostics.iter().filter(|d| d.code == "HYB-E3012").count();
+    assert_eq!(e3012_count, 7, "expected 7 HYB-E3012 diagnostics, got {:?}", r.diagnostics);
+}
+
