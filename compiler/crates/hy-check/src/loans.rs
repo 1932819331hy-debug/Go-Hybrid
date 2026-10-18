@@ -1627,6 +1627,17 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
+                } else if l.kind != LocalKind::Const
+                    && Checker::is_nil_literal(value)
+                {
+                    // N1, untyped leg (HYB-E4003): `var x = nil` / `x := nil`
+                    // / `let x = nil` — no ascription means nothing proves a
+                    // nil home, `shape_of_expr(nil)` is Unknown, and the
+                    // emitter emits `var x = nil`, which Go rejects outright
+                    // (`use of untyped nil in variable declaration`). Local
+                    // `const c = nil` is the E6003 constant-expression guard
+                    // (issue #640) — different locus, do not double-fire.
+                    self.emit_untyped_nil_decl_error(name, value.span());
                 }
                 // N1 for composite literals: `job{m: nil}` carries its own
                 // type context (the struct def / map value / slice elem) —
