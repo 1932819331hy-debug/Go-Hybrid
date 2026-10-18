@@ -1,12 +1,18 @@
 # W012 M1 evidence: current validation and historical snapshot
 
-## Current validation supersedes historical headline measurements
+## Latest hosted validation (2026-10-18)
 
-The tested correction at `34c759f91e4ff76c8b6d587208cbf4bea6a51ca0` fixes a real Go-wrapper loss of accepted managed-safety warnings. On this PR branch's **60 fixtures**, raw native/WASM envelope parity is **60/60**; Go wrapper modeled-field parity improves from **58/60** to **60/60**, with the race suite passing.
+The [current GitHub Actions M1 parity run](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39143438366), against the PR head `fef92eecf31ee1c3fe383a2953e17ea1840b9ff0` merged with its then-current base, **passed 79/79 checker-corpus fixtures and 79/79 full native/WASM normalized envelopes**, plus `go test -race -count=1 ./...` and `go vet ./...`. The [separate compiler CI](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39143438385) also passed. The fixture count is tied to this specific tested merge, not a promise about future upstream corpus size.
 
-Fresh 100-sample cloud measurements put the **actual public `Engine.Check` at p50 2.143 ms / p99 7.176 ms**, versus native subprocess + JSON validation at **1.204 / 1.796 ms**. The reused-instance experimental boundary is **1.097 / 1.521 ms** and is not the analyzer's actual per-call instance strategy. These results establish neither a current 18.7× speedup nor sub-millisecond IDE latency. Different hosts and harnesses prevent interpreting this as a historical regression ratio.
+That head also adds a **30-second fail-closed limit to the public `Engine.Check`** and a cancellable `CheckContext` for embedding hosts. Context-log snapshots copy all slice backing arrays, and cancellation, subsequent runtime reuse, and snapshot isolation have regression tests. Hosted green CI establishes the tested behavior, not unsaved-buffer, LSP, or interactive editor integration.
 
-See the [current validation record, exact commands, limitations, and raw samples](spikes/w012-inprocess/validation-2026-10-18/README.md). That record is the current evidence for wrapper correctness and latency; it does not claim coverage of later upstream corpus additions.
+## Earlier 60-fixture correctness and benchmark snapshot (retained for provenance)
+
+The tested correction at `34c759f91e4ff76c8b6d587208cbf4bea6a51ca0` fixes a real Go-wrapper loss of accepted managed-safety warnings. On that older **60-fixture** checkout, raw native/WASM envelope parity was **60/60**; Go wrapper modeled-field parity improved from **58/60** to **60/60**, with the race suite passing.
+
+The original 100-sample cloud measurements put the **actual public `Engine.Check` at p50 2.143 ms / p99 7.176 ms**, versus native subprocess + JSON validation at **1.204 / 1.796 ms**. The reused-instance experimental boundary was **1.097 / 1.521 ms** and is not the analyzer's actual per-call instance strategy. These results establish neither an 18.7× speedup nor sub-millisecond IDE latency. The more recent timeout change was **not rebenchmarked** here; different hosts and harnesses prevent treating these figures as a controlled performance regression comparison.
+
+See the [measurement record, commands, limitations, and raw samples](spikes/w012-inprocess/validation-2026-10-18/README.md). Its 60-fixture and timing numbers are a historical snapshot, not the latest hosted acceptance run.
 
 ## Historical review snapshot follows
 
