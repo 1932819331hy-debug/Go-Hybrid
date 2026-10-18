@@ -48,6 +48,24 @@ fn assert_ok(src: &str) {
     assert!(cs.is_empty(), "expected 0 diagnostics, got {cs:?} for:\n{src}");
 }
 
+/// U6 operand variant. The PR's strict all-equal assertion was written
+/// against a base without the landed T23 multi-value binding rule
+/// (pr-599/#669, `HYB-E2002`): on the merged tree a 1-name binding whose
+/// initializer CONTAINS a multi-value call co-emits E2002 alongside this
+/// rule's E1002. The program's verdict (REJECT) and E1002's presence are
+/// asserted strictly; E2002 is the documented landed co-emission.
+fn assert_operand_rejected(src: &str, want: &str) {
+    let cs = codes(src);
+    assert!(
+        !cs.is_empty() && cs.iter().any(|c| c == want),
+        "expected [{want}] among the diagnostics, got {cs:?} for:\n{src}"
+    );
+    assert!(
+        cs.iter().all(|c| c == want || c == "HYB-E2002"),
+        "unexpected diagnostic besides [{want}]/E2002: {cs:?} for:\n{src}"
+    );
+}
+
 const TWO: &str = "fn two() (int, int) {\n    return 1, 2\n}\n\n";
 
 // ---------------------------------------------------------------------------
@@ -56,21 +74,21 @@ const TWO: &str = "fn two() (int, int) {\n    return 1, 2\n}\n\n";
 
 #[test]
 fn multi_value_call_as_an_operand_is_rejected() {
-    assert_code(
+    assert_operand_rejected(
         &format!("{TWO}fn main() {{\n    v := two() + 1\n    fmt.println(\"{{v}}\")\n}}\n"),
         "HYB-E1002",
     );
     // Either side, and the other binary operators.
-    assert_code(
+    assert_operand_rejected(
         &format!("{TWO}fn main() {{\n    v := 1 + two()\n    fmt.println(\"{{v}}\")\n}}\n"),
         "HYB-E1002",
     );
-    assert_code(
+    assert_operand_rejected(
         &format!("{TWO}fn main() {{\n    v := two() * 2\n    fmt.println(\"{{v}}\")\n}}\n"),
         "HYB-E1002",
     );
     // An ordered comparison is a single-value context too.
-    assert_code(
+    assert_operand_rejected(
         &format!("{TWO}fn main() {{\n    if two() > 1 {{\n        fmt.println(\"gt\")\n    }}\n}}\n"),
         "HYB-E1002",
     );

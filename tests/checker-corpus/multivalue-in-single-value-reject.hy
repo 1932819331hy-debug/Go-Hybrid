@@ -17,7 +17,15 @@
 //
 // ---- Expected verdict (reproduced as a real `go build` failure first) ----
 // EXPECTED-VERDICT: REJECT BUILDABLE
-// EXPECTED-DIAGNOSTIC: HYB-E1002
+// EXPECTED-DIAGNOSTIC: HYB-E2002
+//
+// Registration note (merged tree): the landed T23 multi-value binding rule
+// (pr-599/#669) classifies this shape first — a 1-name binding whose
+// initializer contains a multi-value call is E2002 — so the leading
+// diagnostic is HYB-E2002, with this rule's HYB-E1002 co-emitted (pinned by
+// `multivalue_and_void_positions.rs::multi_value_call_as_an_operand_is_rejected`).
+// Both rules reject a program Go refuses; the verdict-level agreement is
+// REJECT either way.
 //
 // ---- Paired fixture ----
 // `multivalue-and-void-controls-accept.hy` holds the legal multi-value and

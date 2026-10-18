@@ -142,7 +142,8 @@
         "bind both values: `lo, hi := minmax(3, 9)`"
       ],
       "example": "p := minmax(3, 9)   // reject: HYB-E2002 — multi-value is not a tuple",
-      "rule": "T23"
+      "rule": "T23",
+      "tier0_rule_id": "BUILDABLE"
     },
     {
       "code": "HYB-E2005",

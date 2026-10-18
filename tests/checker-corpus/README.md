@@ -163,8 +163,11 @@ results, `g(two())` where `g` really takes two parameters (which is what makes
 the rule an arity comparison rather than a blanket rejection), a no-result call
 as a statement and as a `defer` operand, the two non-call two-value sources
 (`m[k]` and `<-ch`), and single-value calls in binding, operand, and argument
-positions. Rules live in `hy-check/tests/multivalue_and_void_positions.rs`
-(8 tests).
+positions. On the merged tree the U6 operand fixture's leading diagnostic is
+the landed T23 rule's `HYB-E2002` (pr-599/#669 classifies the containing
+1-name binding first), with the new rule's `HYB-E1002` co-emitted; the fixture
+header records this and the rust test pins E1002's presence. Rules live in
+`hy-check/tests/multivalue_and_void_positions.rs` (8 tests).
 
 With this registration the corpus is **105 programs: ACCEPT 33 ·
 ACCEPT-MANAGED 2 · REJECT 70**.
