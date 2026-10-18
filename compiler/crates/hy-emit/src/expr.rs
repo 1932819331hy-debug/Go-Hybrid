@@ -215,6 +215,11 @@ impl Emitter {
 
             Expr::StructLit { ty, fields, .. } => {
                 if let Some(t) = ty {
+                    if matches!(t, TypeExpr::Chan { .. }) {
+                        return Err(EmitError::unsupported(
+                            "channel type is not a value expression — construct a channel with `make(chan T)`",
+                        ));
+                    }
                     let head = self.type_text(t);
                     let body = self.struct_lit_body(t, fields)?;
                     Ok(format!("{}{{{}}}", head, body))
@@ -764,6 +769,17 @@ impl Emitter {
             }
         }
 
+        let mut bare_callee = callee;
+        while let Expr::Paren { inner, .. } = bare_callee {
+            bare_callee = inner;
+        }
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "make") {
+            return self.emit_make(args);
+        }
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "new") && args.len() == 1 {
+            return self.emit_new(&args[0]);
+        }
+
         // --- a SPEC primitive conversion: `u8(300)` -> `uint8(300)`.
         //     SPEC-LANGUAGE line 1991 states `b := u8(300) // expect: 44`
         //     as an executable test-claim (§ "Examples are tests"), but the
@@ -872,7 +888,11 @@ impl Emitter {
         let Some(first) = args.first() else {
             return Err(EmitError::unsupported("`make` with no type argument"));
         };
-        let ty_text = match &first.value {
+        let mut first_val = &first.value;
+        while let Expr::Paren { inner, .. } = first_val {
+            first_val = inner;
+        }
+        let ty_text = match first_val {
             Expr::StructLit {
                 ty: Some(t),
                 fields,
@@ -893,6 +913,7 @@ impl Emitter {
             } if entries.is_empty() => {
                 format!("map[{}]{}", self.type_text(key), self.type_text(value))
             }
+            Expr::Ident { name, .. } => name.clone(),
             other => {
                 return Err(EmitError::unsupported(format!(
                     "`make` first argument must be a type; got value `{}`",
@@ -905,6 +926,36 @@ impl Emitter {
             parts.push(self.emit_call_arg(a)?);
         }
         Ok(format!("make({})", parts.join(", ")))
+    }
+
+    fn emit_new(&mut self, arg: &CallArg) -> Result<String, EmitError> {
+        let mut val = &arg.value;
+        while let Expr::Paren { inner, .. } = val {
+            val = inner;
+        }
+        let ty_text = match val {
+            Expr::StructLit {
+                ty: Some(t),
+                fields,
+                ..
+            } if fields.is_empty() => self.type_text(t),
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() => format!("[]{}", self.type_text(t)),
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } if entries.is_empty() => format!("map[{}]{}", self.type_text(key), self.type_text(value)),
+            Expr::Ident { name, .. } => super::shapes::go_primitive_name(name)
+                .unwrap_or(name.as_str())
+                .to_string(),
+            other => self.emit_expr(other, 0)?,
+        };
+        Ok(format!("new({})", ty_text))
     }
 
     /// The rust-crate call lowering (M6): `sha3.digest256(w)` →
