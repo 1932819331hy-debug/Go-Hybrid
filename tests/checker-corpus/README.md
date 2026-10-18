@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 105 programs** — ACCEPT 33 · ACCEPT-MANAGED 2 ·
-REJECT 70 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 109 programs** — ACCEPT 34 · ACCEPT-MANAGED 2 ·
+REJECT 73 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -169,5 +169,20 @@ the landed T23 rule's `HYB-E2002` (pr-599/#669 classifies the containing
 header records this and the rust test pins E1002's presence. Rules live in
 `hy-check/tests/multivalue_and_void_positions.rs` (8 tests).
 
-With this registration the corpus is **105 programs: ACCEPT 33 ·
-ACCEPT-MANAGED 2 · REJECT 70**.
+With this registration the corpus is **109 programs: ACCEPT 34 ·
+ACCEPT-MANAGED 2 · REJECT 73**.
+
+`undefined-member-call-reject.hy`, `defer-arity-reject.hy`,
+`append-element-type-reject.hy`, `member-defer-and-append-controls-accept.hy`
+— the #682 U2–U5 buildable wave (issue #682 group C, pr #707 by isHeSatoshi).
+Four `hyb check`-accepted programs whose emitted Go failed `go build`: a call
+to a member that does not exist (on a scalar and on a struct), a deferred call
+with the wrong arity, and `append` with an element of the wrong type. Each was
+reproduced as a real `go build` failure before the check was written, and each
+rejection is paired against a legal neighbour inside the single ACCEPT control
+— the ordinary method/field cases, `stack.pop()` (a `hy-emit` intrinsic lowered
+to `hy_pop(&stack)`, not a Go method), `*atomic.int64` members (a foreign
+generic whose members the kind model cannot see, so the rule must fail open),
+`defer` on a builtin and on a method, and `append` with a variadic spread,
+multiple values, and an untyped int constant into a `[]float64`. Regression
+pins live in `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).

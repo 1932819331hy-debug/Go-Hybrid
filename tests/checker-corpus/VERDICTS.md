@@ -901,3 +901,42 @@ pseudo-syntax — `func main`, `var x: int = 42`, `spawn fn(){}()`,
 `print(x)` — which does not parse on main; the maintainer integration
 translated it to Hybrid's grammar with the intent unchanged.
 KonstantinPythonLab.)
+
+## Additive corpus registration — #682 group C: U2–U5 buildable shapes (pr #707)
+
+- Programs: `undefined-member-call-reject.hy`, `defer-arity-reject.hy`,
+  `append-element-type-reject.hy`,
+  `member-defer-and-append-controls-accept.hy`.
+- Source: issue #682, "accepted-but-unbuildable member-call / defer-arity /
+  append-element bypasses in the buildable operand pass" (pr #707,
+  isHeSatoshi). Four programs `hyb check` accepted with zero diagnostics whose
+  emitted Go failed `go build`. Each was reproduced as a real compiler error
+  before any check was written.
+- Verdicts:
+  - `undefined-member-call-reject` — REJECT BUILDABLE (HYB-E1002).
+    `q.missing()` on a struct (and `x.nope()` on an `int`) is
+    `q.missing undefined (type s has no field or method missing)`. The field
+    branch of the call-operand pass previously reported only a member that
+    EXISTS but is not callable, and stayed silent when nothing was found at
+    all. Fails open on anything unresolved (`*atomic.int64` →
+    `Pointer(Unknown)` keeps its members invisible, not absent) and on
+    `hy-emit`-lowered intrinsics (`stack.pop()` → `hy_pop(&stack)`).
+  - `defer-arity-reject` — REJECT BUILDABLE (HYB-E1002). `defer g()` for a
+    one-parameter `g` is `not enough arguments in call to g`. HYB-E2001 keeps
+    the "defer requires a call" half; this rule owns arity, and fires only for
+    a bare identifier resolving to a declared `fn` (builtins and methods stay
+    alone).
+  - `append-element-type-reject` — REJECT BUILDABLE (HYB-E1002).
+    `append([]int{1}, "str")` is `cannot use "str" (untyped string constant)
+    as int value in argument to append`. Skips a variadic spread
+    (`append(a, b...)` passes the whole slice, not an element) and stays
+    fail-open on an unknown element kind; the legal implicit int→float64
+    constant direction stays allowed.
+- Scope notes (why the ACCEPT control is the load-bearing half):
+  the control's `stack.pop()` and `*atomic.int64` members each caught a real
+  over-rejection during development (spike-6 positive suite; corpus
+  `17-atomic-channel-immutable.hy`).
+- Regression pins: `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).
+- Verified on the merged tree: 109/109 verdict agreement, tripwire not fired;
+  differential reject-side 70/70, accept-side 35/37 (the 2 are the known
+  cgo-bridge programs); cargo test --workspace green.
