@@ -1457,6 +1457,7 @@ impl<'a> Checker<'a> {
         // immutability shortcut in sendability.rs. Primitives, strings,
         // atomics and channels stay sendable via `is_sendable_by_type`.
         let immutable = matches!(l.kind, LocalKind::Const);
+        let is_let = matches!(l.kind, LocalKind::Let);
         // Issue #205: reject non-constant `const` initializers (emitter keeps Go `const`).
         if matches!(l.kind, LocalKind::Const) {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
@@ -1475,7 +1476,7 @@ impl<'a> Checker<'a> {
                     .unwrap_or(TypeShape::Unknown);
             let ty = l.ty.clone();
             for name in &l.names {
-                self.define_binding(st, name, shape.clone(), ty.clone(), immutable, managed);
+                self.define_binding(st, name, shape.clone(), ty.clone(), immutable, managed, is_let);
             }
             return;
         }
@@ -1571,7 +1572,7 @@ impl<'a> Checker<'a> {
                 overwritten.push(info.name.clone());
                 let is_view = matches!(info.shape, TypeShape::BorrowHandle(_));
                 let carries = self.shape_may_share(&info.shape);
-                self.define_binding(st, &info.name, info.shape.clone(), info.ty, immutable, managed);
+                self.define_binding(st, &info.name, info.shape.clone(), info.ty, immutable, managed, is_let);
                 if is_view {
                     self.extend_call_loans_to_view(st, &l.values[0], &info.name, idx);
                 }
@@ -1706,7 +1707,7 @@ impl<'a> Checker<'a> {
                 if move_operand_ident(value).is_some()
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
-                    self.define_binding(st, name, shape, ty, immutable, managed);
+                    self.define_binding(st, name, shape, ty, immutable, managed, is_let);
                     if let Some(origin) = moved_non_owned {
                         if let Some(b) = st.env_lookup_mut(name) {
                             b.non_owned_origin = Some(origin);
@@ -1782,7 +1783,7 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                self.define_binding(st, name, shape, ty, immutable, managed);
+                self.define_binding(st, name, shape, ty, immutable, managed, is_let);
                 if let Some(origin) = &moved_non_owned {
                     if let Some(b) = st.env_lookup_mut(name) {
                         if b.non_owned_origin.is_none() {
@@ -2982,6 +2983,7 @@ impl<'a> Checker<'a> {
                     shape,
                     ty: ty.cloned(),
                     immutable: false,
+                    is_let: false,
                     managed_taint: false,
                     moved: None,
                     non_owned_origin: None,
@@ -3102,6 +3104,7 @@ impl<'a> Checker<'a> {
                                 shape: shape.clone(),
                                 ty: l.ty.clone(),
                                 immutable: false,
+                                is_let: l.kind == LocalKind::Let,
                                 managed_taint: false,
                                 moved: None,
                                 non_owned_origin: None,
@@ -3142,6 +3145,7 @@ impl<'a> Checker<'a> {
                                 shape,
                                 ty,
                                 immutable: false,
+                                is_let: l.kind == LocalKind::Let,
                                 managed_taint: false,
                                 moved: None,
                                 non_owned_origin: None,
@@ -3169,6 +3173,7 @@ impl<'a> Checker<'a> {
                                 shape,
                                 ty,
                                 immutable: false,
+                                is_let: l.kind == LocalKind::Let,
                                 managed_taint: false,
                                 moved: None,
                                 non_owned_origin: None,
@@ -3351,6 +3356,7 @@ impl<'a> Checker<'a> {
                                 shape: vshape,
                                 ty: None,
                                 immutable: false,
+                                is_let: false,
                                 managed_taint: false,
                                 moved: None,
                                 non_owned_origin: None,
@@ -3398,6 +3404,7 @@ impl<'a> Checker<'a> {
                                 shape: subj_shape.clone(),
                                 ty: None,
                                 immutable: false,
+                                is_let: false,
                                 managed_taint: false,
                                 moved: None,
                                 non_owned_origin: None,
@@ -4503,7 +4510,7 @@ impl<'a> Checker<'a> {
                 .as_ref()
                 .map(|t| self.shape_of_type(t))
                 .unwrap_or(TypeShape::Unknown);
-            self.define_binding(&mut cst, p, shape.clone(), pty.clone(), false, false);
+            self.define_binding(&mut cst, p, shape.clone(), pty.clone(), false, false, false);
             if self.shape_may_share(&shape)
                 || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
             {
@@ -4520,7 +4527,7 @@ impl<'a> Checker<'a> {
                 .as_ref()
                 .map(|t| self.shape_of_type(t))
                 .unwrap_or(TypeShape::Unknown);
-            self.define_binding(&mut cst, nr, shape, rty.clone(), false, false);
+            self.define_binding(&mut cst, nr, shape, rty.clone(), false, false, false);
             origins.remove(nr);
             shadowed.insert(nr.clone());
         }
@@ -4600,6 +4607,7 @@ impl<'a> Checker<'a> {
             }
             match stmt {
                 Stmt::Local(l) => {
+                    let is_let = matches!(l.kind, LocalKind::Let);
                     if l.values.is_empty() {
                         let shape = l
                             .ty
@@ -4614,6 +4622,7 @@ impl<'a> Checker<'a> {
                                 l.ty.clone(),
                                 false,
                                 false,
+                                is_let,
                             );
                             if self.shape_may_share(&shape)
                                 || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
@@ -4640,7 +4649,7 @@ impl<'a> Checker<'a> {
                             &mut base_o,
                         );
                         for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
-                            self.define_binding(&mut cst, name, shape.clone(), ty, false, false);
+                            self.define_binding(&mut cst, name, shape.clone(), ty, false, false, is_let);
                             if self.shape_may_share(&shape)
                                 || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
                             {
@@ -4679,7 +4688,7 @@ impl<'a> Checker<'a> {
                             })
                             .collect();
                         for (name, (shape, ty, mut s)) in l.names.iter().zip(rhs_info) {
-                            self.define_binding(&mut cst, name, shape.clone(), ty, false, false);
+                            self.define_binding(&mut cst, name, shape.clone(), ty, false, false, is_let);
                             if self.shape_may_share(&shape)
                                 || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
                             {
@@ -5013,6 +5022,7 @@ impl<'a> Checker<'a> {
         ty: Option<hy_syntax::TypeExpr>,
         immutable: bool,
         managed: bool,
+        is_let: bool,
     ) {
         if name == "_" {
             return;
@@ -5038,6 +5048,7 @@ impl<'a> Checker<'a> {
                 shape,
                 ty,
                 immutable,
+                is_let,
                 managed_taint: managed, // O6.2: born inside `managed {}`
                 moved: None,
                 non_owned_origin,
@@ -5125,6 +5136,7 @@ impl<'a> Checker<'a> {
             ty,
             self_shadows_const,
             managed || pre_tainted,
+            false,
         );
 
         self.record_may_share(st, name, subject);
@@ -5224,7 +5236,17 @@ impl<'a> Checker<'a> {
                     self.emit_const_write_error(&name, t.span);
                     true
                 }
-                None => false,
+                None => {
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        if let Some(b) = self.lookup_binding(st, name) {
+                            if b.is_let {
+                                self.emit_let_write_error(name, t.span);
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                }
             })
             .collect();
 
@@ -5798,6 +5820,23 @@ impl<'a> Checker<'a> {
         );
     }
 
+    /// HYB-E3006 — T22 binding-level immutability diagnostic (#655):
+    /// `let x = e` creates an immutable binding (no rebinding/reassignment).
+    fn emit_let_write_error(&mut self, name: &str, span: Span) {
+        let msg = format!(
+            "cannot reassign to `{}` — it is a `let` binding (immutable)",
+            name
+        );
+        let notes = vec![
+            "`let` creates an immutable binding (SPEC-LANGUAGE T22): no rebinding or reassignment".to_string(),
+            "interior mutation through an alias is possible, but the binding itself cannot be reassigned".to_string(),
+            "use `var` or `:=` if the binding needs to be reassigned".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3006", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
     /// #123: closure bodies sit outside Pass B (the A5 perimeter — flatten,
     /// uses, and calls never descend into an `FnLit`), so `process_assign`
     /// never sees a write to a `const` inside a closure. For every closure
@@ -5834,7 +5873,7 @@ impl<'a> Checker<'a> {
                                 } else {
                                     TypeShape::Primitive
                                 };
-                                self.define_binding(&mut cst, n, shape, None, false, false);
+                                self.define_binding(&mut cst, n, shape, None, false, false, false);
                             }
                         }
                         walk::ScopeEvent::MatchBind { name, subject } => {
@@ -5865,6 +5904,7 @@ impl<'a> Checker<'a> {
                                         None,
                                         true,
                                         false,
+                                        false,
                                     );
                                 } else {
                                     cst.aliases.insert(name.to_string(), cr.clone());
@@ -5876,6 +5916,7 @@ impl<'a> Checker<'a> {
                                     name,
                                     TypeShape::Unknown,
                                     None,
+                                    false,
                                     false,
                                     false,
                                 );
@@ -5948,7 +5989,19 @@ impl<'a> Checker<'a> {
                                 }
                                 true
                             }
-                            None => false,
+                            None => {
+                                if let PlaceKind::Ident(name) = &t.kind {
+                                    if let Some(b) = self.lookup_binding(&cst, name) {
+                                        if b.is_let {
+                                            if check_writes {
+                                                self.emit_let_write_error(name, t.span);
+                                            }
+                                            return true;
+                                        }
+                                    }
+                                }
+                                false
+                            }
                         })
                         .collect();
 
@@ -6054,7 +6107,7 @@ impl<'a> Checker<'a> {
                         for (name, shape) in vars.iter().zip(shapes) {
                             let is_ref = shape.is_reference_alias() || shape.is_handle();
                             let carries = self.shape_may_share(&shape);
-                            self.define_binding(&mut cst, name, shape, None, false, false);
+                            self.define_binding(&mut cst, name, shape, None, false, false, false);
                             if !is_chan {
                                 let mut roots = Vec::new();
                                 collect_ref_roots(expr, &mut roots);
@@ -6073,7 +6126,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     hy_syntax::ForKind::Range { var, .. } => {
-                        self.define_binding(&mut cst, var, TypeShape::Primitive, None, false, false);
+                        self.define_binding(&mut cst, var, TypeShape::Primitive, None, false, false, false);
                     }
                     _ => {}
                 },
@@ -6128,13 +6181,13 @@ impl<'a> Checker<'a> {
         st.scope_push();
         for p in params {
             let shape = self.shape_of_type(&p.ty);
-            self.define_binding(st, &p.name, shape, Some(p.ty.clone()), false, false);
+            self.define_binding(st, &p.name, shape, Some(p.ty.clone()), false, false, false);
         }
         for r in results {
             if let Some(name) = &r.name {
                 if name != "_" {
                     let shape = self.shape_of_type(&r.ty);
-                    self.define_binding(st, name, shape, Some(r.ty.clone()), false, false);
+                    self.define_binding(st, name, shape, Some(r.ty.clone()), false, false, false);
                 }
             }
         }
@@ -6149,6 +6202,7 @@ impl<'a> Checker<'a> {
         let immutable = l.kind == LocalKind::Const;
         let pre_st = st.clone();
         let mut overwritten = Vec::new();
+        let is_let = l.kind == LocalKind::Let;
         if l.values.len() == 1 && l.names.len() > 1 {
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
             let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
@@ -6180,7 +6234,7 @@ impl<'a> Checker<'a> {
                 .collect();
             for (name, shape, ty, is_imm) in resolved {
                 overwritten.push(name.clone());
-                self.define_binding(st, &name, shape.clone(), ty, is_imm, false);
+                self.define_binding(st, &name, shape.clone(), ty, is_imm, false, is_let);
                 if move_operand_ident(&l.values[0]).is_none() {
                     self.record_storage_from_snapshot(st, &pre_st, &name, &l.values[0], &overwritten, true, true);
                 }
@@ -6212,7 +6266,7 @@ impl<'a> Checker<'a> {
                         },
                     )
                     .is_some();
-            self.define_binding(st, name, shape, ty, immutable || shadowed_const, false);
+            self.define_binding(st, name, shape, ty, immutable || shadowed_const, false, is_let);
             if move_operand_ident(value).is_none() && !is_fresh_copy {
                 self.record_storage_from_snapshot(st, &pre_st, name, value, &overwritten, true, false);
             }
@@ -7703,6 +7757,7 @@ impl<'a> Checker<'a> {
             shape,
             ty,
             immutable: true, // class 4: const values are immutable-by-type
+            is_let: false,
             managed_taint: false,
             moved: None,
             non_owned_origin,
