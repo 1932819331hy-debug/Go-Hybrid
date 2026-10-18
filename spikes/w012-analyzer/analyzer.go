@@ -246,18 +246,11 @@ func run(pass *analysis.Pass) (interface{}, error) {
 					if _, already := hyFiles[fullPath]; !already {
 						log.FoundHyFiles = append(log.FoundHyFiles, "DirScan:"+e.Name())
 
-						// Test pass.ReadFile contract on this unlisted sibling .hy file:
-						if pass.ReadFile != nil {
-							rfData, rfErr := pass.ReadFile(fullPath)
-							log.PassReadFileTested = true
-							if rfErr != nil {
-								log.PassReadFileErr = rfErr.Error()
-							} else {
-								log.PassReadFileLen = len(rfData)
-							}
-						}
-
-						// Primary read via os.ReadFile to support on-disk singlechecker execution
+						// .hy files found only by directory scan are NOT valid inputs
+						// to Pass.ReadFile: strict drivers may reject or panic on
+						// undeclared paths. For this explicitly on-disk vet adapter,
+						// read from disk and verify the pre-run Hybrid snapshot.
+						// Only listed OtherFiles are read through Pass.ReadFile.
 						data, err := os.ReadFile(fullPath)
 						if err != nil {
 							return nil, fmt.Errorf("read %s: %w", fullPath, err)
