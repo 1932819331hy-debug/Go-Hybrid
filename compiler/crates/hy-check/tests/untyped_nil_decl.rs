@@ -122,6 +122,34 @@ fn match_arm_untyped_nil_is_e4003() {
     );
 }
 
+#[test]
+fn if_body_untyped_nil_is_e4003() {
+    // Carried from dezzy-music's parallel take #691 (same fix, credit both):
+    // an if-body `var x = nil` rides the same closure-boundary walk.
+    let r = check("fn main() {\n    if true {\n        var x = nil\n        _ = x\n    }\n}\n");
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E4003"),
+        "expected HYB-E4003 for an if-body `var x = nil`, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn if_init_untyped_nil_is_e4003() {
+    // Carried from dezzy-music's parallel take #691 (same fix, credit both):
+    // the if-statement initializer `if x := nil; ...` is a local declaration.
+    let r = check("fn main() {\n    if x := nil; x != nil {\n        _ = x\n    }\n}\n");
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E4003"),
+        "expected HYB-E4003 for the if-init `x := nil`, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
 // ---------------------------------------------------------------------------
 // Locals named `_` still reject: the emitted Go `var _ = nil` is just as
 // unbuildable.
