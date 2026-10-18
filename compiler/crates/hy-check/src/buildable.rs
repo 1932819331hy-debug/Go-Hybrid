@@ -404,6 +404,12 @@ impl<'a> Collector<'a> {
         for v in &l.values {
             self.expr(v);
         }
+        // #682 U8: `a := v()` where `v` produces no value. Only the
+        // single-name/single-value shape is checked; `a, b := f()` is a legal
+        // multi-value binding and is handled by `infer_local_kinds`.
+        if l.names.len() == 1 && l.values.len() == 1 {
+            self.check_single_value_position(&l.values[0], "a binding", /*binding_position=*/ true);
+        }
         // Composed resolution (pr-430 x landed pr-475): #475's track_read
         // set (Define|Let|Var|Const) drives which locals get unused-read
         // tracking; #430's operand-kind inference runs for EVERY name so
@@ -503,6 +509,13 @@ impl<'a> Collector<'a> {
                 }
                 for v in values {
                     self.expr(v);
+                }
+                // #682 U8: `a = v()` where `v` produces no value. The
+                // multi-name form (`a, b = f()`) is a legal multi-value
+                // assignment, so only the single-target/single-value shape is
+                // checked here.
+                if targets.len() == 1 && values.len() == 1 {
+                    self.check_single_value_position(&values[0], "an assignment", /*binding_position=*/ true);
                 }
                 self.check_assign_operands(targets, *op, values, *span);
             }
@@ -744,6 +757,19 @@ impl<'a> Collector<'a> {
                 self.expr(callee);
                 for a in args {
                     self.expr(&a.value);
+                }
+                // #682 U7: every argument must be exactly one value, except
+                // that a lone multi-value call IS the whole argument list when
+                // the callee takes that many parameters (`g(two())` for a
+                // 2-param `g` builds). That exception is checked against the
+                // resolved arity in `check_user_fn_arity`; here the shape is
+                // only rejected when the callee cannot take it.
+                if self.multi_value_arg_count(args).is_none() {
+                    for a in args {
+                        self.check_single_value_position(&a.value, "a call argument", /*binding_position=*/ false);
+                    }
+                } else {
+                    self.check_multi_value_arg_arity(callee, args, *span);
                 }
                 self.check_call_operands(callee, args, *span);
             }
@@ -1198,6 +1224,122 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// #682 U6/U8 — the number of values a call expression produces, when it is
+    /// knowable and is NOT exactly one.
+    ///
+    /// `Some(0)` is a call that produces no value (`fn v()`), which Go refuses
+    /// with `v() (no value) used as value`. `Some(n)` for `n >= 2` is a
+    /// multi-value call, which Go refuses in any single-value position with
+    /// `multiple-value f() (value of type (T, U)) in single-value context`.
+    ///
+    /// `None` means "one value, or unknown" — the caller must stay permissive.
+    /// This is the single place the multi-value shape is derived, so the
+    /// distinction is not re-guessed at each call site.
+    fn non_single_value_count(&self, e: &Expr) -> Option<usize> {
+        match unwrap_parens(e) {
+            Expr::Call { callee, args, .. } => {
+                let res = self.call_result_kinds(callee, args)?;
+                if res.len() == 1 {
+                    None
+                } else {
+                    Some(res.len())
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Reject a call used where exactly one value is required (#682 U6/U8).
+    ///
+    /// `binding_position` says whether the surrounding position is a binding or
+    /// assignment target. **HYB-E2002 (T23, SPEC-LANGUAGE §2.8) already owns
+    /// the multi-value case there** — `p := minmax(3, 9)` is E2002's own
+    /// spec-cited claim, and `multi_value_tuple.rs` asserts that shape yields
+    /// exactly one diagnostic. So in a binding position this rule reports only
+    /// the VOID case, which E2002 does not cover, and leaves multi-value to
+    /// E2002. In every other position (operands, arguments) no rule covers
+    /// either shape, so both are reported here.
+    fn check_single_value_position(&mut self, e: &Expr, context: &str, binding_position: bool) {
+        match self.non_single_value_count(e) {
+            Some(0) => self.emit_e1002(
+                e.span(),
+                format!(
+                    "`{}` produces no value and cannot be used as one in {context} — Go refuses `{} (no value) used as value` (HYB-E1002)",
+                    e.render(),
+                    e.render()
+                ),
+                "a function declared with no results is a statement, not a value; call it on its own line",
+            ),
+            Some(n) => {
+                if binding_position {
+                    // E2002 owns this shape; do not double-report.
+                    return;
+                }
+                self.emit_e1002(
+                    e.span(),
+                    format!(
+                        "`{}` produces {n} values and cannot be used as one in {context} — Go refuses `multiple-value ... in single-value context` (HYB-E1002)",
+                        e.render()
+                    ),
+                    "bind the results first (`a, b := f()`) or select the one you need",
+                );
+            }
+            None => {}
+        }
+    }
+
+    /// #682 U7 — a multi-value call as the whole argument list is legal Go when
+    /// the callee takes exactly that many parameters (`g(two())` for a 2-param
+    /// `g`), so the arity rule has to accept that case rather than treat it as
+    /// one argument.
+    fn multi_value_arg_count(&self, args: &[CallArg]) -> Option<usize> {
+        if args.len() != 1 {
+            return None;
+        }
+        match self.non_single_value_count(&args[0].value) {
+            Some(n) if n >= 2 => Some(n),
+            _ => None,
+        }
+    }
+
+    /// #682 U7 — a lone multi-value call as the whole argument list is legal
+    /// only when the callee takes exactly that many parameters. `g(two())` for
+    /// a 1-param `g` is `too many arguments in call to g`; for a 2-param `g` it
+    /// builds.
+    ///
+    /// Deliberately scoped to the multi-value shape: this does NOT check the
+    /// ordinary one-argument-per-parameter rule (open PR #620 adds that as
+    /// `check_user_fn_arity`), so the two cannot double-report on the same
+    /// call. It fires only when a multi-value call is the sole argument.
+    fn check_multi_value_arg_arity(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
+        let Some(n) = self.multi_value_arg_count(args) else {
+            return;
+        };
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        let head = Checker::base_named_type_str(name);
+        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+            return;
+        };
+        let want = f.params.len();
+        if want == n {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "`{}` takes {want} argument{} but its argument list expands to {n} value{} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
+                name,
+                if want == 1 { "" } else { "s" },
+                if n == 1 { "" } else { "s" },
+                if n < want { "not enough" } else { "too many" },
+                name
+            ),
+            "a multi-value call expands to one argument per result; the callee must accept exactly that many",
+        );
+    }
+
     /// Family A (#425): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
         let k = self.kind_of_expr(cond);
@@ -1251,6 +1393,12 @@ impl<'a> Collector<'a> {
 
     /// Family B3/B4/B5 (#425): binary operator operand-kind checks.
     fn check_binary_operands(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) {
+        // #682 U6: an operand must be exactly one value. `two() + 1` is Go's
+        // `multiple-value two() (value of type (int, int)) in single-value
+        // context`, and the kind inference below would otherwise take the
+        // call's FIRST result and silently accept it as an int.
+        self.check_single_value_position(lhs, "a binary operation", /*binding_position=*/ false);
+        self.check_single_value_position(rhs, "a binary operation", /*binding_position=*/ false);
         let lk = self.kind_of_expr(lhs);
         let rk = self.kind_of_expr(rhs);
         match op {

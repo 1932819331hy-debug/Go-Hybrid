@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 77 programs** — ACCEPT 21 · ACCEPT-MANAGED 2 ·
-REJECT 54 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 83 programs** — ACCEPT 22 · ACCEPT-MANAGED 2 ·
+REJECT 59 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -62,3 +62,29 @@ surface with author credit (tests extracted to
 
 With this registration the corpus is **78 programs: ACCEPT 21 ·
 ACCEPT-MANAGED 2 · REJECT 55**.
+
+`multivalue-in-single-value-reject.hy`, `multivalue-arg-arity-reject.hy`,
+`void-as-value-reject.hy`, `multivalue-and-void-controls-accept.hy` —
+isHeSatoshi (issue #682): the U6–U8 value-position classes. All three share one
+root cause — `kind_of_expr` on a call returned the FIRST result kind for a
+multi-value call (silently discarding the rest) and `OpKind::Void` for a
+no-result call, which no operand check rejected. The fix derives the call's
+value count in one place (`non_single_value_count`) and rejects it in the
+positions that need exactly one value. The `void-as-value-reject.hy` header
+records that this class was already latent in the repo: the T22 fixture in
+`hy-check/src/lib.rs` used `is_ok(delete(alias, "k"))` to get a `delete` into an
+`if` condition, and `delete` produces no value either, so that fixture was
+itself accepted-but-unbuildable. The new rule surfaced it; the fixture was
+rewritten to put the `delete` in a closure body with the closure called in the
+condition, and both of its assertions stayed strict. The fourth fixture is the
+ACCEPT half and is the reason this batch is safe: it holds every legal
+multi-value form — `a, b := two()`, `a, b = two()`, `return two()` with matching
+results, `g(two())` where `g` really takes two parameters (which is what makes
+the rule an arity comparison rather than a blanket rejection), a no-result call
+as a statement and as a `defer` operand, the two non-call two-value sources
+(`m[k]` and `<-ch`), and single-value calls in binding, operand, and argument
+positions. Rules live in `hy-check/tests/multivalue_and_void_positions.rs`
+(8 tests).
+
+With this registration the corpus is **83 programs: ACCEPT 22 ·
+ACCEPT-MANAGED 2 · REJECT 59**.
