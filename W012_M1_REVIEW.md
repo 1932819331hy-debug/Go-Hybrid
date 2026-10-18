@@ -1,5 +1,23 @@
 # W012 M1 evidence: current validation and historical snapshot
 
+## Reviewer decision brief (2026-10-19 JST)
+
+**Status: W-012 is scheduled for the 2026-11-01 wildcard M1 review, not yet M1-awarded or merged.** W-011 is adjacent (Go checking surface), not the same experiment (in-process delivery boundary). This PR is an executable feasibility and falsification record, **not** a request to replace the production toolchain.
+
+| Question the reviewer should ask | Evidence at current validated code head | Honest boundary |
+| --- | --- | --- |
+| Can the existing Rust checker run in-process without a semantic rewrite? | `hy-wasm` + Wazero + Go `analysis.Analyzer`; native/WASM **113/113** complete normalized envelopes and corpus verdicts | A prebuilt WASM distribution is not shipped |
+| Is fail-closed behavior preserved across the boundary? | Fault injection, active cancellation, strict JSON checks, anonymous concurrent guest instances, source-read failures, input snapshots, and strict `Pass.ReadFile` contract tests pass under `go test -race` | Production RSS/leak bounds and pathological rapid edit/revert races are not formally proved |
+| Does this remove Go editor/compiler integration costs? | On-disk `.hy` source positions with a cache-safe `hybvet vet` wrapper | Stock gopls cannot load this analyzer dynamically or track unsaved `.hy` buffers |
+| Does this already beat the native CLI at real request latency? | In the earlier controlled Linux 100-sample experiment the public `Engine.Check` was **2.143 ms p50**, versus **1.204 ms** for native subprocess + JSON validation | This **falsifies** the earlier unqualified sub-ms / 18.7× claim for the corrected Go wrapper; M2's 25-file/100-edit IDE path has not been run |
+| Does `TypesInfo` erase the opaque-foreign boundary? | Go types supply structural facts | They do **not** supply Hybrid ownership, borrows, or mutation-effect contracts |
+
+**Current reproducible CI:** [W-012 validation 39171466042](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39171466042) and [compiler CI 39171466089](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39171466089) passed at `585dac8922a481124fcacd3cb2424f05c8b8e7e2`, with **113/113 native/WASM normalized envelope parity**, **113/113 expected corpus verdicts**, `go test -race -count=1 ./...`, and `go vet ./...`. These are correctness tests, **not** current end-to-end latency claims.
+
+**Design decision for M1:** prefer a single Rust semantic implementation with a WASM adapter over an unbounded Go checker rewrite; retain the native CLI for one-shot checking and propose a dedicated Hybrid LSP only after measuring a real editor request path. Do not treat feature quantity or a green PR check as sufficient for M1 award; maintainer acceptance and the M2 learning publication are separate decisions. For M2, either publish a controlled 25-file/100-edit and CI footprint experiment or explicitly publish which original targets are technically blocked and why.
+
+---
+
 ## Maintainer decision memo (2026-10-19 JST)
 
 **Scope:** An executable M1 feasibility spike for [W-012 / #268](https://github.com/limitlessprojects/Go-Hybrid/issues/268), not a request to replace `hyb`, claim a stock-`gopls` plugin, or merge a production IDE feature. This answers solicitation #5 by investigating the *delivery/execution boundary*; W-011 independently attacks the `.hy`/Go syntax surface. The two approaches are adjacent and can compose.
@@ -22,9 +40,9 @@
 
 ---
 
-## Latest hosted validation (2026-10-18)
+## Latest hosted validation (2026-10-18 UTC / 2026-10-19 JST)
 
-The [latest hosted M1 parity workflow](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39169356538), against PR head `e029d661d8ce7f79e7f362a7ee97bf3251d6a274` merged with its then-current base, passed **113/113 checker-corpus fixture agreements** and **113/113 complete normalized native/WASM JSON-envelope comparisons**. Its `go test -race -count=1 ./...` and `go vet ./...` steps succeeded. The [independent compiler CI](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39169356527) passed as well.
+The [latest hosted M1 parity workflow](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39171466042), against PR head `585dac8922a481124fcacd3cb2424f05c8b8e7e2` merged with its then-current base, passed **113/113 checker-corpus fixture agreements** and **113/113 complete normalized native/WASM JSON-envelope comparisons**. Its `go test -race -count=1 ./...` and `go vet ./...` steps succeeded. The [independent compiler CI](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39171466089) passed as well.
 
 This latest head fails closed on unreadable declared `.hy` files rather than silently skipping them; it also canonicalizes file names to prevent duplicate diagnostic reports and emits diagnostics in deterministic path order. Regression tests for the read-failure, path-alias, and ordering cases ran in hosted CI. The 113-fixture count describes this specific tested merge, not future upstream corpus revisions.
 
