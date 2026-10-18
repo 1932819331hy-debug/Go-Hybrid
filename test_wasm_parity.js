@@ -49,12 +49,12 @@ async function main() {
     // Test a sample accept file
     const sampleAccept = fs.readFileSync(path.join(__dirname, 'tests/checker-corpus/16-move-send-clean.hy'), 'utf8');
     const resAccept = checkSource(sampleAccept);
-    console.log('Sample Accept verdict:', resAccept.verdict, 'errors:', resAccept.errors);
+    console.log('Sample Accept verdict:', resAccept.summary?.verdict, 'errors:', resAccept.summary?.errors);
 
     // Test a sample reject file
     const sampleReject = fs.readFileSync(path.join(__dirname, 'tests/checker-corpus/01-shared-map-across-tasks.hy'), 'utf8');
     const resReject = checkSource(sampleReject);
-    console.log('Sample Reject verdict:', resReject.verdict, 'errors:', resReject.errors, 'rule:', resReject.diagnostics[0]?.tier0_rule);
+    console.log('Sample Reject verdict:', resReject.summary?.verdict, 'errors:', resReject.summary?.errors, 'rule:', resReject.diagnostics[0]?.tier0_rule);
 
     // Test across all corpus files and measure time
     const corpusDir = path.join(__dirname, 'tests/checker-corpus');
@@ -108,7 +108,7 @@ async function main() {
         if (match) {
             passed++;
         } else {
-            console.error(`FAIL ${f}: expected ${expectedVerdict} (${expectedRule}), got ${res.verdict}`);
+            console.error(`FAIL ${f}: expected ${expectedVerdict} (${expectedRule}), got ${verdict}`);
         }
     }
 
