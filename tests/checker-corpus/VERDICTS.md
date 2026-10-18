@@ -1,4 +1,4 @@
-# VERDICTS.md — the pre-registered verdict table (tests/checker-corpus)
+﻿# VERDICTS.md — the pre-registered verdict table (tests/checker-corpus)
 
 **Status:** pre-registered 2026-10-12, BEFORE any checker existed — per the
 human owner's ruling of 2026-10-12 (QUESTIONS.md Q1, item 2): *"write the
@@ -691,35 +691,6 @@ flush (`remaining_stmts_use_loan`), not in the source.
 With these two additions the registered corpus is **63 programs:
 ACCEPT 17 · ACCEPT-MANAGED 2 · REJECT 44**.
 
-| 60 | 60-rebind-without-defer-control | ACCEPT | — | — | the over-rejection guard: a rebind with no defer and no boundary |
-
-## Additive corpus registration — 2026-10-17: malformed string escapes fail closed
-
-One case registered WITH its fix. It pins the lexer's fail-closed contract:
-a malformed `\x`/`\u`/`\U` escape in an interpreted string (LX7's Go escape
-set) must reject with `HYB-E0002`, never pass silently with a corrupted
-value. Before the fix `"\u{41}"` was ACCEPTED with 0 diagnostics and lexed
-to the value `"41}"` (the `\u{` was dropped, the rest leaked as literal
-text); `"\xG1"` became `"1"`; `"\u12G4"` became `"4"`. Root cause:
-`escape_char`'s hex-digit error paths returned `None` without recording
-the diagnostic both callers assume, so the string lexer silently kept one
-bumped char verbatim. The brace form after `\u` is LX6 rune-literal
-syntax; in a string it is a malformed escape, and the diagnostic says so.
-Surrogates (`\ud800`) and values above U+10FFFF (`\U0011FFFF`) are the
-same family and reject likewise (unit tests in `hy-syntax/src/lexer.rs`:
-six malformed cases plus the valid-escape over-rejection guard). The new
-diagnostics carry `tier0_rule` `LX6`/`LX7` so this harness can join on
-them; no registry entry changes (HYB-E0002 keeps its parse-error slot).
-
-| # | program | verdict | rule | diagnostic | rationale |
-|---|---------|---------|------|------------|-----------|
-| 61 | 61-string-escape-fail-closed | REJECT | LX7 | `HYB-E0002` | `s := "\u{41}"` — the LX6 rune form in a string is a malformed LX7 escape; it must be named, not silently dropped |
-
-With this addition the registered corpus is **61 programs:
-ACCEPT 15 · ACCEPT-MANAGED 2 · REJECT 44**. The file contains no `managed`
-block; the harness's historical as-written set {01, 03, 04} is unchanged,
-so the tripwire ratios only move with the larger total.
-
 ## Additive corpus registration — 2026-10-18: reference-typed element reads
 
 Five fixtures pin the **reference-typed element read**: a binding initialized from
@@ -742,42 +713,12 @@ glob and reads the `EXPECTED-VERDICT` header, not the filename.
 | struct-field-slice-elem-alias | REJECT | A1b | `HYB-E3003` | `d := h.data` copies a slice header, so the element write reaches the array `move h` transferred |
 | append-spare-capacity-backing-alias | REJECT | A1b | `HYB-E3003` | `append` on a slice with SPARE CAPACITY (`make([]int, 1, 4)`) returns the same backing array; 51 pins the 3-arg `make` as a fresh local, this pins that a slice derived from it by `append` is not independent |
 
-Reproduction (checker at the pinned toolchain, latest main): the harness reports
-**66/66 verdict agreement, tripwire not fired**, and the differential loop keeps
-its reject side at 43/43 with the accept side unchanged apart from the two
-bridge programs that need a C compiler.
+Reproduction (checker built from the merged tree, pinned toolchain):
+`python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
+**77/77 verdict agreement, tripwire not fired**. The differential loop's
+reject side was 43/43 at this section's original base; it is not re-measured
+here.
 
-With both registrations the corpus is **66 programs: ACCEPT 16 ·
-ACCEPT-MANAGED 2 · REJECT 48**. The reproduction line above is the merged tree.
-
-| 60 | 60-rebind-without-defer-control | ACCEPT | — | — | the over-rejection guard: a rebind with no defer and no boundary |
-
-## Additive corpus registration — 2026-10-17: malformed string escapes fail closed
-
-One case registered WITH its fix. It pins the lexer's fail-closed contract:
-a malformed `\x`/`\u`/`\U` escape in an interpreted string (LX7's Go escape
-set) must reject with `HYB-E0002`, never pass silently with a corrupted
-value. Before the fix `"\u{41}"` was ACCEPTED with 0 diagnostics and lexed
-to the value `"41}"` (the `\u{` was dropped, the rest leaked as literal
-text); `"\xG1"` became `"1"`; `"\u12G4"` became `"4"`. Root cause:
-`escape_char`'s hex-digit error paths returned `None` without recording
-the diagnostic both callers assume, so the string lexer silently kept one
-bumped char verbatim. The brace form after `\u` is LX6 rune-literal
-syntax; in a string it is a malformed escape, and the diagnostic says so.
-Surrogates (`\ud800`) and values above U+10FFFF (`\U0011FFFF`) are the
-same family and reject likewise (unit tests in `hy-syntax/src/lexer.rs`:
-six malformed cases plus the valid-escape over-rejection guard). The new
-diagnostics carry `tier0_rule` `LX6`/`LX7` so this harness can join on
-them; no registry entry changes (HYB-E0002 keeps its parse-error slot).
-
-| # | program | verdict | rule | diagnostic | rationale |
-|---|---------|---------|------|------------|-----------|
-| 61 | 61-string-escape-fail-closed | REJECT | LX7 | `HYB-E0002` | `s := "\u{41}"` — the LX6 rune form in a string is a malformed LX7 escape; it must be named, not silently dropped |
-
-With this addition the registered corpus is **61 programs:
-ACCEPT 15 · ACCEPT-MANAGED 2 · REJECT 44**. The file contains no `managed`
-block; the harness's historical as-written set {01, 03, 04} is unchanged,
-so the tripwire ratios only move with the larger total.
 ## Additive corpus registration — 2026-10-18: channel-element and type-erasure surfaces
 
 Seven fixtures pin surfaces the corpus had **no** representation of, all on the
@@ -812,36 +753,33 @@ decision is visible either way.
 
 Reproduction (checker built from the merged tree, pinned toolchain):
 `python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
-**68/68 verdict agreement, tripwire not fired**.
+**77/77 verdict agreement, tripwire not fired**.
 
-With both registrations the corpus is **68 programs: ACCEPT 17 ·
-ACCEPT-MANAGED 2 · REJECT 49** — the 61 above plus these seven. The
-coverage table's `before` column is the 60-program corpus this section was
-authored against, before the 2026-10-17 escape fixture landed.
+## Additive corpus registration — 2026-10-18: deep sendability under `move` (depth 3)
 
-| 60 | 60-rebind-without-defer-control | ACCEPT | — | — | the over-rejection guard: a rebind with no defer and no boundary |
-
-## Additive corpus registration ? 2026-10-18: deep sendability under `move` (depth 3)
-
-GUARANTEES.md claim 3 promises **deep** sendability ? "every reference-typed
+GUARANTEES.md claim 3 promises **deep** sendability — "every reference-typed
 field/element must itself be sendable; a fresh literal wrapping a shared map is
 still rejected". Corpus 45 pins that at depth 2, but it sends **without** `move`,
 so it rejects at the safe-by-type gate and the deep walk is never reached. This
 pair uses `move` on **both** halves, which removes the safe-by-type question
 entirely and isolates the deep-embedding question at depth 3
-(`[]holder` ? `holder` ? `map[string]int`).
+(`[]holder` — `holder` — `map[string]int`).
 
 | program | verdict | rule | diagnostic | rationale |
 |---|---|---|---|---|
-| deep-composite-move-shared-at-spawn | REJECT | A1b | `HYB-E3003` | `xs := []holder{holder{m: shared}}` then `task worker(move xs, done)` then `shared["a"] = 2` ? the move transfers the composite but not the map HEADER embedded in it, so `shared` and `xs[0].m` name one hash table and the write is use-after-move |
-| deep-composite-move-fresh-control | ACCEPT | ? | ? | structurally identical (same slice, struct, `move`, channel) with a fresh innermost map: nothing outside `xs` names it, so the value is self-contained |
+| deep-composite-move-shared-at-spawn | REJECT | A1b | `HYB-E3003` | `xs := []holder{holder{m: shared}}` then `task worker(move xs, done)` then `shared["a"] = 2` — the move transfers the composite but not the map HEADER embedded in it, so `shared` and `xs[0].m` name one hash table and the write is use-after-move |
+| deep-composite-move-fresh-control | ACCEPT | — | — | structurally identical (same slice, struct, `move`, channel) with a fresh innermost map: nothing outside `xs` names it, so the value is self-contained |
 
 The control matters more than the rejection here: a checker that rejected it
 would ban nested composite literals from every boundary, which would make the
 deep rule unusable. This is corpus 54's finding (a field store materializes the
-edge) taken one level deeper ? through a struct nested inside a slice ? and
+edge) taken one level deeper — through a struct nested inside a slice — and
 separated from the safe-by-type gate by the `move`.
 
-Reproduction (checker built from main at 422066b, the pinned toolchain):
+Reproduction (checker built from the merged tree, pinned toolchain):
 `python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
-**62/62 verdict agreement, tripwire not fired**.
+**77/77 verdict agreement, tripwire not fired**.
+
+With all three registrations the corpus is **77 programs: ACCEPT 21 ·
+ACCEPT-MANAGED 2 · REJECT 54** — main's 63 plus these fourteen. Every
+reproduction line above is the merged tree.
