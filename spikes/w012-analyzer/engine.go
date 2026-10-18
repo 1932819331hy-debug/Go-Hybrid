@@ -160,7 +160,7 @@ func (e *WasmEngine) CheckSource(ctx context.Context, src string) *AnalysisResul
 		}
 	}
 
-	mod, err := e.runtime.InstantiateModule(ctx, e.compiled, wazero.NewModuleConfig())
+	mod, err := e.runtime.InstantiateModule(ctx, e.compiled, wazero.NewModuleConfig().WithName(""))
 	if err != nil {
 		return &AnalysisResult{
 			Verdict: VerdictAnalysisFailure,

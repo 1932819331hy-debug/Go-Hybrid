@@ -96,7 +96,7 @@ func TestAcceptedWarningsPreserved(t *testing.T) {
 	}
 }
 
-func TestAnalyzerReportsManagedWarning(t *testing.T) {
+func TestAnalyzerKeepsManagedWarningsNonfatal(t *testing.T) {
 	source, err := os.ReadFile("../../tests/checker-corpus/02-shared-map-managed.hy")
 	if err != nil {
 		t.Fatal(err)
@@ -116,11 +116,7 @@ func TestAnalyzerReportsManagedWarning(t *testing.T) {
 	if _, err := run(pass); err != nil {
 		t.Fatal(err)
 	}
-	if len(diagnostics) != 1 {
-		t.Fatalf("want managed warning, got %+v", diagnostics)
-	}
-	pos := fset.Position(diagnostics[0].Pos)
-	if pos.Filename != hyFile || pos.Line != 76 || pos.Column != 13 {
-		t.Fatalf("wrong warning position: %s", pos)
+	if len(diagnostics) != 0 {
+		t.Fatalf("accepted managed warnings must not fail go vet: %+v", diagnostics)
 	}
 }

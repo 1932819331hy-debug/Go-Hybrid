@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tetratelabs/wazero"
 	"golang.org/x/tools/go/analysis"
@@ -186,11 +187,6 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		}
 	}
 
-	engine, err := GetEngine("")
-	if err != nil {
-		return nil, fmt.Errorf("failed to init wazero engine: %w", err)
-	}
-
 	// Sibling .hy discovery:
 	// A. Check pass.OtherFiles
 	// B. Check directory containing Go files
@@ -266,6 +262,15 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 	setLastContextLog(log)
 
+	// Go-only packages need neither a WASM artifact nor a live runtime.
+	if len(hyFiles) == 0 {
+		return nil, nil
+	}
+	engine, err := GetEngine("")
+	if err != nil {
+		return nil, fmt.Errorf("failed to init wazero engine: %w", err)
+	}
+
 	// Map iteration order is unstable: report diagnostics in canonical filename
 	// order so identical source trees yield reproducible go vet output.
 	filenames := make([]string, 0, len(hyFiles))
@@ -286,16 +291,18 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			fileToken.SetLinesForContent([]byte(content))
 		}
 
-		// Acceptance means no errors, not no diagnostics: retain managed warnings.
+		// The structured engine preserves nonfatal warnings. go/analysis has
+		// no severity channel: passing warnings to vet would turn an accepted
+		// managed program into a failing build. Report only errors here.
 		for _, d := range out.Diagnostics {
+			if d.Severity != "error" {
+				continue
+			}
 			var exactPos token.Pos = token.NoPos
-			if fileToken != nil && d.Span.Start.Line > 0 {
-				if d.Span.Start.Line > fileToken.LineCount() {
-					return nil, fmt.Errorf("diagnostic line outside %s", filename)
-				}
-				lineStart := fileToken.LineStart(d.Span.Start.Line)
-				if lineStart.IsValid() {
-					exactPos = lineStart + token.Pos(d.Span.Start.Col-1)
+			if fileToken != nil {
+				exactPos, err = hybridTokenPos(fileToken, content, d.Span.Start.Line, d.Span.Start.Col)
+				if err != nil {
+					return nil, fmt.Errorf("invalid diagnostic position in %s: %w", filename, err)
 				}
 			}
 
@@ -308,4 +315,36 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	}
 
 	return nil, nil
+}
+
+// hybridTokenPos translates Rust lexer Unicode-scalar columns into Go's
+// byte-based token.Pos without allowing a diagnostic to escape its own line.
+func hybridTokenPos(file *token.File, content string, line, col int) (token.Pos, error) {
+	if line < 1 || line > file.LineCount() || col < 1 {
+		return token.NoPos, fmt.Errorf("invalid position %d:%d", line, col)
+	}
+	start := file.Offset(file.LineStart(line))
+	end := len(content)
+	if line < file.LineCount() {
+		end = file.Offset(file.LineStart(line + 1))
+	}
+	if end > start && content[end-1] == '\n' {
+		end--
+	}
+	if end > start && content[end-1] == '\r' {
+		end--
+	}
+	runeCol := 1
+	for offset := start; offset < end; {
+		if runeCol == col {
+			return file.Pos(offset), nil
+		}
+		_, size := utf8.DecodeRuneInString(content[offset:end])
+		offset += size
+		runeCol++
+	}
+	if runeCol == col {
+		return file.Pos(end), nil
+	}
+	return token.NoPos, fmt.Errorf("column %d beyond line %d (maximum %d)", col, line, runeCol)
 }
