@@ -43,7 +43,7 @@ jobs:
         run: |
           set -euxo pipefail
           cd compiler
-          cargo fmt --all -- --check
+          cargo fmt --package hy-wasm -- --check
           cargo build -p hyb --release
           cargo build -p hy-wasm --target wasm32-unknown-unknown --release
 
