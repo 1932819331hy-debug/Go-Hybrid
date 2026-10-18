@@ -36,7 +36,7 @@ func TestMalformedEnvelopeFailsClosed(t *testing.T) {
 	}
 	envelope["future_field"] = "allowed"
 	data, _ := json.Marshal(envelope)
-	if _, err := decodeCheckOutput(data); err != nil {
+	if _, err := DecodeCheckOutput(data); err != nil {
 		t.Fatalf("additive field rejected: %v", err)
 	}
 }

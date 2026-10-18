@@ -1,3 +1,17 @@
+# W012 M1 evidence: current validation and historical snapshot
+
+## Current validation supersedes historical headline measurements
+
+The tested correction at `34c759f91e4ff76c8b6d587208cbf4bea6a51ca0` fixes a real Go-wrapper loss of accepted managed-safety warnings. On this PR branch's **60 fixtures**, raw native/WASM envelope parity is **60/60**; Go wrapper modeled-field parity improves from **58/60** to **60/60**, with the race suite passing.
+
+Fresh 100-sample cloud measurements put the **actual public `Engine.Check` at p50 2.143 ms / p99 7.176 ms**, versus native subprocess + JSON validation at **1.204 / 1.796 ms**. The reused-instance experimental boundary is **1.097 / 1.521 ms** and is not the analyzer's actual per-call instance strategy. These results establish neither a current 18.7× speedup nor sub-millisecond IDE latency. Different hosts and harnesses prevent interpreting this as a historical regression ratio.
+
+See the [current validation record, exact commands, limitations, and raw samples](spikes/w012-inprocess/validation-2026-10-18/README.md). That record is the current evidence for wrapper correctness and latency; it does not claim coverage of later upstream corpus additions.
+
+## Historical review snapshot follows
+
+The original narrative below is retained for provenance. Its 55-fixture, 903.4 KB, 0.269 ms, 18.7×, and amortization figures describe the earlier recorded baseline only. They must not be quoted as measurements of the current corrected wrapper. Its architectural recommendations are hypotheses/tradeoffs rather than proof of completed editor integration.
+
 # W-012 M1 Technical Due Diligence & Confirmatory Architectural Audit
 ## In-Process Analysis Driver for Go-Hybrid: WASM/Wazero vs. Native Go vs. Subprocess Architecture
 

@@ -32,8 +32,11 @@ func (r *AnalysisResult) CheckInvariant() error {
 		if r.Failure != nil {
 			return errors.New("INVARIANT VIOLATION: Failure present in Accept verdict")
 		}
-		if len(r.Diagnostics) > 0 {
-			return errors.New("INVARIANT VIOLATION: Diagnostics present in Accept verdict")
+		// Accepted source may still carry managed-safety warnings or notes.
+		for _, d := range r.Diagnostics {
+			if d.Severity != "warning" && d.Severity != "note" {
+				return errors.New("INVARIANT VIOLATION: error or invalid diagnostic in Accept verdict")
+			}
 		}
 	case VerdictReject:
 		if r.Failure != nil {
@@ -259,20 +262,20 @@ func CheckSourceWithABI(ctx context.Context, abi WasmABI, src string) *AnalysisR
 		}
 	}
 
-	out, err := decodeCheckOutput(outCopy)
+	out, err := DecodeCheckOutput(outCopy)
 	if err != nil {
 		return &AnalysisResult{Verdict: VerdictAnalysisFailure, Failure: fmt.Errorf("infrastructure error: malformed diagnostic envelope: %w", err)}
 	}
 	if out.Summary.Verdict == "accept" {
-		return &AnalysisResult{Verdict: VerdictAccept, Summary: &out.Summary}
+		return &AnalysisResult{Verdict: VerdictAccept, Diagnostics: out.Diagnostics, Summary: &out.Summary}
 	}
 	return &AnalysisResult{Verdict: VerdictReject, Diagnostics: out.Diagnostics, Summary: &out.Summary}
 }
 
-// decodeCheckOutput validates semantic structure, not merely JSON syntax.
+// DecodeCheckOutput validates semantic structure, not merely JSON syntax.
 // Unknown additive fields remain allowed; missing fields and contradictory
 // summaries are infrastructure failures rather than user-code verdicts.
-func decodeCheckOutput(data []byte) (*CheckOutput, error) {
+func DecodeCheckOutput(data []byte) (*CheckOutput, error) {
 	var wire struct {
 		Version     *int          `json:"version"`
 		Diagnostics *[]Diagnostic `json:"diagnostics"`

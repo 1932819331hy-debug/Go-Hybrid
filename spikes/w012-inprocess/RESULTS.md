@@ -1,3 +1,5 @@
+> Historical spike record. For the current corrected Go-wrapper checks and freshly measured latency, use [validation-2026-10-18](validation-2026-10-18/README.md). The old speedup figures below do not describe the current analyzer path.
+
 # Confirmatory Replication Protocol & Results Ledger: W-012 In-Process Analyzer Spike
 
 ## 0. Preregistration Notice & Protocol Status

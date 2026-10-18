@@ -235,25 +235,24 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			fileToken.SetLinesForContent([]byte(content))
 		}
 
-		if out.Summary.Verdict == "reject" {
-			for _, d := range out.Diagnostics {
-				var exactPos token.Pos = token.NoPos
-				if fileToken != nil && d.Span.Start.Line > 0 {
-					if d.Span.Start.Line > fileToken.LineCount() {
-						return nil, fmt.Errorf("diagnostic line outside %s", filename)
-					}
-					lineStart := fileToken.LineStart(d.Span.Start.Line)
-					if lineStart.IsValid() {
-						exactPos = lineStart + token.Pos(d.Span.Start.Col-1)
-					}
+		// Acceptance means no errors, not no diagnostics: retain managed warnings.
+		for _, d := range out.Diagnostics {
+			var exactPos token.Pos = token.NoPos
+			if fileToken != nil && d.Span.Start.Line > 0 {
+				if d.Span.Start.Line > fileToken.LineCount() {
+					return nil, fmt.Errorf("diagnostic line outside %s", filename)
 				}
-
-				pass.Report(analysis.Diagnostic{
-					Pos:      exactPos,
-					Message:  fmt.Sprintf("[%s] %s", d.Code, d.Message),
-					Category: "hybrid",
-				})
+				lineStart := fileToken.LineStart(d.Span.Start.Line)
+				if lineStart.IsValid() {
+					exactPos = lineStart + token.Pos(d.Span.Start.Col-1)
+				}
 			}
+
+			pass.Report(analysis.Diagnostic{
+				Pos:      exactPos,
+				Message:  fmt.Sprintf("[%s] %s", d.Code, d.Message),
+				Category: "hybrid",
+			})
 		}
 	}
 
