@@ -144,6 +144,14 @@ fn delete_arity_two_ok() {
 }
 
 #[test]
+fn nested_place_builtin_args_rejected_e2005() {
+    let r = check(
+        "fn main() {\n    m := map[string][]int{\"a\": []int{1}}\n    m[string(make([]byte, -1))][0] = 1\n}\n",
+    );
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
 fn defer_ident_send_fusion_is_non_call() {
     // Parser yields Defer{Ident(ch)} then a following receive — not a Call.
     let r = check(
