@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"sync"
 	"time"
 
@@ -195,17 +196,31 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	// B. Check directory containing Go files
 	hyFiles := make(map[string]string) // name -> full path or content
 
-	// Check OtherFiles
+	// Declared files are a trusted input set, not an optional hint: failing to
+	// read one must fail this analysis, never silently produce an all-clear.
 	for _, of := range pass.OtherFiles {
-		if filepath.Ext(of) == ".hy" {
-			log.FoundHyFiles = append(log.FoundHyFiles, "OtherFiles:"+of)
-			if pass.ReadFile != nil {
-				data, err := pass.ReadFile(of)
-				if err == nil {
-					hyFiles[of] = string(data)
-				}
-			}
+		if filepath.Ext(of) != ".hy" {
+			continue
 		}
+		log.FoundHyFiles = append(log.FoundHyFiles, "OtherFiles:"+of)
+		var data []byte
+		var readErr error
+		if pass.ReadFile != nil {
+			data, readErr = pass.ReadFile(of)
+		} else {
+			data, readErr = os.ReadFile(of)
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("read declared .hy file %q: %w", of, readErr)
+		}
+		name, err := filepath.Abs(of)
+		if err != nil {
+			return nil, fmt.Errorf("resolve declared .hy path %q: %w", of, err)
+		}
+		if previous, exists := hyFiles[name]; exists && previous != string(data) {
+			return nil, fmt.Errorf("conflicting content for declared .hy file %q", name)
+		}
+		hyFiles[name] = string(data)
 	}
 
 	// Also inspect disk directory of first Go file to test if sibling .hy can be discovered via dir scan
@@ -219,7 +234,10 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			}
 			for _, e := range entries {
 				if filepath.Ext(e.Name()) == ".hy" {
-					fullPath := filepath.Join(dir, e.Name())
+					fullPath, err := filepath.Abs(filepath.Join(dir, e.Name()))
+					if err != nil {
+						return nil, fmt.Errorf("resolve sibling .hy path %q: %w", e.Name(), err)
+					}
 					if _, already := hyFiles[fullPath]; !already {
 						log.FoundHyFiles = append(log.FoundHyFiles, "DirScan:"+e.Name())
 
@@ -248,8 +266,15 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 	setLastContextLog(log)
 
-	// Run Hybrid checks on found .hy files
-	for filename, content := range hyFiles {
+	// Map iteration order is unstable: report diagnostics in canonical filename
+	// order so identical source trees yield reproducible go vet output.
+	filenames := make([]string, 0, len(hyFiles))
+	for filename := range hyFiles {
+		filenames = append(filenames, filename)
+	}
+	sort.Strings(filenames)
+	for _, filename := range filenames {
+		content := hyFiles[filename]
 		out, err := engine.Check(content)
 		if err != nil {
 			return nil, fmt.Errorf("hybrid check on %s failed: %w", filename, err)
