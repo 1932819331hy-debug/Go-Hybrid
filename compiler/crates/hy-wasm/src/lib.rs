@@ -86,7 +86,11 @@ unsafe fn hy_wasm_check_impl(src_ptr: *const u8, src_len: usize, report_managed:
                 .filter(|d| d.severity == hy_diag::Severity::Warning)
                 .count();
             let verdict = res.verdict.as_str().to_string();
-            let managed = if report_managed { Some(res.managed) } else { None };
+            let managed = if report_managed {
+                Some(res.managed)
+            } else {
+                None
+            };
             let summary = hy_diag::CheckSummary {
                 file: "input.hy".into(),
                 verdict,
