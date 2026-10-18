@@ -814,7 +814,7 @@ pub(crate) fn move_operand_ident(e: &Expr) -> Option<String> {
 /// Collect the root binding of every reference-carrying sub-expression of
 /// `e` — the generalized form of `Expr::root_ident()`.
 ///
-/// `root_ident()` stops at anything that is not an ident/field/index chain:
+/// `root_ident()` stops at anything that is not an ident/field/index/slice chain:
 /// a CALL result (`same(same(m))`), a view of a call result (`same(m)[0:2]`),
 /// a composite literal (`wrap{items: same(m)}`), a field read out of a
 /// literal (`box{items: m}.items`) or a call that returns a parameter field

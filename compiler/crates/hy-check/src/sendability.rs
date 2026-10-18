@@ -397,9 +397,16 @@ impl<'a> Checker<'a> {
 
     fn classify_addr_of(&self, st: &FnState, expr: &Expr, operand: &Expr) -> Outcome {
         let Some(root) = operand.root_ident() else {
-            // `&m[k]`-shaped or otherwise unrooted: classify the pointee shape
+            // Address-of produces a pointer even when its storage has no named root.
             let shape = self.shape_of_expr(st, operand);
-            return self.outcome_for_shape(&shape, &expr.render());
+            if matches!(shape, TypeShape::Unknown) {
+                return self.outcome_for_shape(&TypeShape::Unknown, &expr.render());
+            }
+            let ptr_shape = TypeShape::Pointer(Box::new(shape));
+            if matches!(&ptr_shape, TypeShape::Pointer(inner) if matches!(**inner, TypeShape::Chan(_))) {
+                return Outcome::Ok;
+            }
+            return self.outcome_for_shape(&ptr_shape, &expr.render());
         };
         let Some(b) = self.lookup_binding(st, root) else {
             // FAIL-CLOSED (O4.9): lending through a name that does not
