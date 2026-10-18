@@ -1468,7 +1468,16 @@ impl Parser {
                             _ => return self.err("select arm must be send, receive, or default"),
                         }
                     }
-                    Stmt::Send { chan, value, .. } => SelectArmKind::Send { chan, value },
+                    Stmt::Send {
+                        chan,
+                        value,
+                        is_move,
+                        ..
+                    } => SelectArmKind::Send {
+                        chan,
+                        value,
+                        is_move,
+                    },
                     Stmt::Expr {
                         expr: Expr::Receive { chan, .. },
                         ..
@@ -3100,6 +3109,41 @@ mod tests {
     }
 
     #[test]
+    fn select_send_carries_the_move_marker() {
+        // C5: a select send clause is a sendability check-site exactly like a
+        // statement send, so the parser's `ch <- move v` marker must survive
+        // the statement→arm conversion. Dropping it made the class-3
+        // owned-move route unreachable inside select arms.
+        let f = parse_src("fn main() { select { ch <- move m: {} } }");
+        let Stmt::Select { arms, .. } = first_stmt(&f) else {
+            panic!("select")
+        };
+        let SelectArmKind::Send { value, is_move, .. } = &arms[0].kind else {
+            panic!("send arm")
+        };
+        assert!(*is_move, "the move marker must survive the select conversion");
+        assert!(
+            matches!(value, Expr::Ident { name, .. } if name == "m"),
+            "the arm value is the plain moved ident, got {}",
+            value.render()
+        );
+    }
+
+    #[test]
+    fn select_plain_send_is_not_a_move() {
+        // Negative control for the marker: a send without `move` stays false,
+        // so the arm cannot accidentally claim ownership transfer.
+        let f = parse_src("fn main() { select { ch <- m: {} } }");
+        let Stmt::Select { arms, .. } = first_stmt(&f) else {
+            panic!("select")
+        };
+        let SelectArmKind::Send { is_move, .. } = &arms[0].kind else {
+            panic!("send arm")
+        };
+        assert!(!*is_move);
+    }
+
+    #[test]
     fn select_default_identifier_is_not_an_arm_without_separator() {
         // LX3 does not reserve `default`: preserve the ordinary channel
         // name and the local assignment inside the unbraced send body.
@@ -3403,6 +3447,55 @@ mod tests {
         assert!(
             errs.iter().any(|d| d.message.contains("`while`")),
             "error should name the keyword: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn go_keyword_traps_fail_at_parse_naming_keyword() {
+        // issue #228: `switch`/`range`/`goto`/`fallthrough` parsed as
+        // plain identifiers and were emitted verbatim into Go
+        // (`x := switch` → go: `expected operand, found 'switch'`;
+        // `fallthrough` → `fallthrough statement out of place`). Now they
+        // fail at parse naming the word — the `while` (#103) move.
+        for w in ["switch", "range", "goto", "fallthrough"] {
+            let src = format!("fn main() {{ x := {} }}", w);
+            let errs = match parse_file("t.hy", &src) {
+                Ok(_) => panic!("`{}` must fail at parse, not emit broken Go", w),
+                Err(d) => d,
+            };
+            assert!(
+                errs.iter().any(|d| d.message.contains(&format!("`{}`", w))),
+                "error should name `{}`: {:?}",
+                w,
+                errs
+            );
+        }
+    }
+
+    #[test]
+    fn map_prefix_controls_still_parse() {
+        // issue #228 controls: the legitimate `map` forms (type, literal,
+        // generic map, map through trivia) must keep parsing — only a
+        // *bare* `map` is rejected (as a HYB-E0002 lexical diagnostic).
+        let ok = [
+            "fn main() { m := map[string]int{} _ = m }",
+            "fn main() { var x map[int]string _ = x }",
+            "fn f(m map[bool]u8) { _ = m }",
+            "fn main() { y := map /* c */ [string]int{} _ = y }",
+        ];
+        for src in ok {
+            if let Err(diags) = parse_file("t.hy", src) {
+                panic!("map-prefix control must parse: {} -> {:?}", src, diags);
+            }
+        }
+        let errs = match parse_file("t.hy", "fn main() { x := map }") {
+            Ok(_) => panic!("bare `map` must fail at parse"),
+            Err(d) => d,
+        };
+        assert!(
+            errs.iter().any(|d| d.message.contains("`map`")),
+            "error should name `map`: {:?}",
             errs
         );
     }

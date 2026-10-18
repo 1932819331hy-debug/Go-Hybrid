@@ -1,22 +1,145 @@
-//! const_overflow.rs — constant initializers that overflow a declared
-//! fixed-width integer type (issue #148).
+//! const_overflow.rs — constant initializers that would make the emitted
+//! Go unbuildable (issue #148, extended by issue #201-B).
 //!
 //! `var n int8 = 300` (and the file-level `const` twin) pass `hyb check`
 //! with 0 diagnostics today, then fail `go vet` / `go build` with
 //! `cannot use 300 as int8 value (overflows)`. The accepted-should-
 //! emit-buildable-Go contract requires a checker diagnostic (HYB-E6002)
-//! for that narrow constant case. Non-constant operands stay out of
-//! scope — Go truncates at run time via an explicit conversion
-//! (SPEC-LANGUAGE X4), and the conversion form `int8(x)` is unaffected.
+//! for that narrow constant case. Issue #201-B extends the fold to
+//! constant *expressions* (`100 + 100`, `1 << 10` — Go folds them before
+//! the range check, so they overflow the same way) and to float constants
+//! assigned to an integer type (`2.5` → Go `(truncated)`). Non-constant
+//! operands stay out of scope — Go truncates at run time via an explicit
+//! conversion (SPEC-LANGUAGE X4), and the conversion form `int8(x)` is
+//! unaffected.
 
-use crate::model::{unwrap_parens, Checker};
+use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, LitKind, TypeExpr, UnOp};
+use hy_syntax::{BinOp, Expr, LitKind, TypeExpr, UnOp};
+use std::collections::HashMap;
 
 impl<'a> Checker<'a> {
     /// When `ty` is a fixed-width integer and `value` is an integer
-    /// constant outside that type's range, emit HYB-E6002.
-    pub(crate) fn check_const_overflow_init(&mut self, name: &str, ty: &TypeExpr, value: &Expr) {
+    /// constant (literal or folded constant expression) outside that
+    /// type's range, or a float constant, emit HYB-E6002.
+    pub(crate) fn check_const_overflow_init(
+        &mut self,
+        name: &str,
+        ty: &TypeExpr,
+        value: &Expr,
+        st: Option<&FnState>,
+    ) {
+        let resolved = self.resolve_type_alias(ty);
+        let TypeExpr::Named {
+            name: ty_name,
+            span: ty_span,
+        } = &resolved
+        else {
+            return;
+        };
+        let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
+            return;
+        };
+        match const_int_fold_with(value, &self.const_values, 0, st) {
+            ConstFold::NotConst => {}
+            ConstFold::TooBig => {
+                let span = value.span();
+                let msg = format!(
+                    "constant expression `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
+                    value.render(),
+                    ty_name,
+                    name
+                );
+                let notes = vec![
+                    format!(
+                        "why: Go folds the constant expression before the range check and rejects a value outside `{}` (`cannot use … as {} value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #201)",
+                        ty_name, ty_name
+                    ),
+                    format!(
+                        "fix: use a constant in [{}, {}] or widen the declared type",
+                        lo, hi
+                    ),
+                    format!(
+                        "note: the declared type was written here ({})",
+                        span_hint(*ty_span)
+                    ),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                );
+                return;
+            }
+            ConstFold::Val(v) => {
+                if v >= lo && v <= hi {
+                    return;
+                }
+                let span = value.span();
+                let msg = format!(
+                    "constant `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
+                    value.render(),
+                    ty_name,
+                    name
+                );
+                let notes = vec![
+                    format!(
+                        "why: Go rejects a constant initializer outside `{}`'s range (`cannot use … as {} value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #148)",
+                        ty_name, ty_name
+                    ),
+                    format!(
+                        "fix: use a constant in [{}, {}], widen the declared type, or convert from a variable if truncation is intentional (`x := {}; y := {}(x)`)",
+                        lo, hi, value.render(), ty_name
+                    ),
+                    format!(
+                        "note: the declared type was written here ({})",
+                        span_hint(*ty_span)
+                    ),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                );
+                return;
+            }
+        }
+        // Issue #201-B: a float constant is never assignable to an integer
+        // type in Go — `var x int = 2.5` fails with `(truncated)` (and a
+        // magnitude that cannot fit fails with `(overflows)`).
+        if let Some(f) = const_float_value(value) {
+            let span = value.span();
+            let msg = format!(
+                "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
+                value.render(),
+                ty_name,
+                name
+            );
+            let notes = vec![
+                format!(
+                    "why: Go rejects a float constant as an `{}` value (`cannot use … as {} value (truncated)`), so an accepted Hybrid program would emit unbuildable Go (issue #201)",
+                    ty_name, ty_name
+                ),
+                format!(
+                    "fix: drop the fractional part (`{}` → `{}`), use a float declared type, or convert from a variable if rounding is intentional",
+                    value.render(),
+                    integer_of_float(f)
+                ),
+                format!(
+                    "note: the declared type was written here ({})",
+                    span_hint(*ty_span)
+                ),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+            );
+        }
+    }
+
+    /// When `ty` is a fixed-width integer and `value` assigned to `target`
+    /// is an integer constant outside that type's range, or a float constant, emit HYB-E6002.
+    pub(crate) fn check_const_overflow_assign(
+        &mut self,
+        target: &str,
+        ty: &TypeExpr,
+        value: &Expr,
+    ) {
         let TypeExpr::Named {
             name: ty_name,
             span: ty_span,
@@ -27,31 +150,121 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        let Some(v) = const_int_value(value) else {
-            return;
-        };
-        if v >= lo && v <= hi {
-            return;
+        match const_int_fold(value) {
+            ConstFold::NotConst => {}
+            ConstFold::TooBig => {
+                let span = value.span();
+                let msg = format!(
+                    "constant expression `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
+                    value.render(),
+                    ty_name,
+                    target
+                );
+                let notes = vec![
+                    format!(
+                        "why: Go folds the constant expression before the range check and rejects a value outside `{}` (`cannot use … as {} value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #300)",
+                        ty_name, ty_name
+                    ),
+                    format!(
+                        "fix: use a constant in [{}, {}] or widen the declared type",
+                        lo, hi
+                    ),
+                    format!(
+                        "note: the declared type was written here ({})",
+                        span_hint(*ty_span)
+                    ),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                );
+                return;
+            }
+            ConstFold::Val(v) => {
+                if v >= lo && v <= hi {
+                    return;
+                }
+                let span = value.span();
+                let msg = format!(
+                    "constant `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
+                    value.render(),
+                    ty_name,
+                    target
+                );
+                let notes = vec![
+                    format!(
+                        "why: Go rejects a constant assignment outside `{}`'s range (`cannot use … as {} value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #300)",
+                        ty_name, ty_name
+                    ),
+                    format!(
+                        "fix: use a constant in [{}, {}], widen the declared type, or convert from a variable if truncation is intentional (`x := {}; {} = {}(x)`)",
+                        lo, hi, value.render(), target, ty_name
+                    ),
+                    format!(
+                        "note: the declared type was written here ({})",
+                        span_hint(*ty_span)
+                    ),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                );
+                return;
+            }
         }
+        if const_float_value(value).is_some() {
+            let span = value.span();
+            let msg = format!(
+                "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
+                value.render(),
+                ty_name,
+                target
+            );
+            let notes = vec![
+                format!(
+                    "why: Go rejects a float constant as an `{}` value (`cannot use … as {} value (truncated)`), so an accepted Hybrid program would emit unbuildable Go (issue #300)",
+                    ty_name, ty_name
+                ),
+                format!(
+                    "fix: convert explicitly at runtime if truncation is intentional (`x := {}; {} = {}(x)`)",
+                    value.render(), target, ty_name
+                ),
+                format!(
+                    "note: the declared type was written here ({})",
+                    span_hint(*ty_span)
+                ),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+            );
+        }
+    }
+
+    /// Check integer constants in variable declarations without an explicit
+    /// type. Go gives these declarations the target's default `int` type.
+    pub(crate) fn check_default_int_overflow(
+        &mut self,
+        name: &str,
+        value: &Expr,
+        st: Option<&FnState>,
+    ) {
+        let (lo, hi) = target_int_range();
+        match const_int_fold_with(value, &self.const_values, 0, st) {
+            ConstFold::NotConst => return,
+            ConstFold::Val(v) if v >= lo && v <= hi => return,
+            ConstFold::Val(_) | ConstFold::TooBig => {}
+        }
+
         let span = value.span();
         let msg = format!(
-            "constant `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
+            "constant expression `{}` overflows default type `int` of `{}` (HYB-E6002)",
             value.render(),
-            ty_name,
             name
         );
         let notes = vec![
+            "why: Go assigns default type `int` to an untyped integer constant in a variable declaration and rejects values outside the target int range, so an accepted Hybrid program would emit unbuildable Go (issue #228)"
+                .to_string(),
             format!(
-                "why: Go rejects a constant initializer outside `{}`'s range (`cannot use … as {} value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #148)",
-                ty_name, ty_name
-            ),
-            format!(
-                "fix: use a constant in [{}, {}], widen the declared type, or convert from a variable if truncation is intentional (`x := {}; y := {}(x)`)",
-                lo, hi, value.render(), ty_name
-            ),
-            format!(
-                "note: the declared type was written here ({})",
-                span_hint(*ty_span)
+                "fix: use a value in [{}, {}], declare an explicit wider type, or keep the value as an untyped constant",
+                lo, hi
             ),
         ];
         self.diags.push(
@@ -62,6 +275,29 @@ impl<'a> Checker<'a> {
 
 fn span_hint(span: Span) -> String {
     format!("{}:{}", span.start.line, span.start.col)
+}
+
+/// Target word size for platform-dependent integer types. Hybrid's current
+/// emitter/runtime targets are 64-bit; keep the policy centralized so a
+/// future target configuration can replace this constant.
+pub(crate) const TARGET_INT_WIDTH_BITS: u32 = 64;
+
+#[inline]
+pub(crate) fn target_int_range() -> (i128, i128) {
+    match TARGET_INT_WIDTH_BITS {
+        32 => (i32::MIN as i128, i32::MAX as i128),
+        64 => (i64::MIN as i128, i64::MAX as i128),
+        _ => (i64::MIN as i128, i64::MAX as i128),
+    }
+}
+
+#[inline]
+pub(crate) fn target_uint_range() -> (i128, i128) {
+    match TARGET_INT_WIDTH_BITS {
+        32 => (0, u32::MAX as i128),
+        64 => (0, u64::MAX as i128),
+        _ => (0, u64::MAX as i128),
+    }
 }
 
 /// Inclusive representable range for a Hybrid fixed-width integer type
@@ -76,48 +312,267 @@ fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
         "u16" | "uint16" => (0, u16::MAX as i128),
         "i32" | "int32" | "rune" => (i32::MIN as i128, i32::MAX as i128),
         "u32" | "uint32" => (0, u32::MAX as i128),
-        "i64" | "int64" | "int" | "isize" => (i64::MIN as i128, i64::MAX as i128),
-        "u64" | "uint64" | "uint" | "usize" | "uintptr" => (0, u64::MAX as i128),
+        "i64" | "int64" => (i64::MIN as i128, i64::MAX as i128),
+        "int" | "isize" => target_int_range(),
+        "u64" | "uint64" => (0, u64::MAX as i128),
+        "uint" | "usize" | "uintptr" => target_uint_range(),
         _ => return None,
     })
 }
 
-/// Evaluate a pure integer constant expression the checker can see without
-/// a full constant folder: int literals (any base the lexer keeps),
-/// unary `-`, and parentheses. Anything else (idents, calls, binary ops)
-/// is out of scope for HYB-E6002.
-fn const_int_value(e: &Expr) -> Option<i128> {
+/// Parsed integer literal, retaining the fact that a syntactically valid
+/// value exceeded i128 instead of treating it as non-constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConstInt {
+    Value(i128),
+    PosOverflow,
+    NegOverflow,
+}
+
+/// Outcome of folding a constant integer expression (issue #201-B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConstFold {
+    /// Folded to an exact i128 value.
+    Val(i128),
+    /// Not a constant the checker can prove (idents, calls, …) — callers
+    /// stay silent (fail-open; other diagnostics own those shapes).
+    NotConst,
+    /// Provably a constant whose magnitude exceeds every fixed-width
+    /// Hybrid integer range (e.g. `1 << 200`, `i128` arithmetic overflow).
+    TooBig,
+}
+
+/// Fold a pure integer constant expression: int literals (any base the
+/// lexer keeps), unary `-`, parentheses, and the arithmetic/shift/bitwise
+/// operators over constant operands (issue #201-B: Go folds `100 + 100`
+/// and `1 << 10` before the range check, so they overflow identically).
+/// Anything else (idents, calls) is `NotConst`.
+pub(crate) fn const_int_fold(e: &Expr) -> ConstFold {
+    const_int_fold_with(e, &HashMap::new(), 0, None)
+}
+
+/// Like [`const_int_fold`], but resolves file-level `const` identifiers to
+/// their (constant) initializers: `const big = 300; var n int8 = big` must
+/// be rejected like the literal. A local binding with the same name shadows
+/// the file-level const, so `st` is consulted before resolving.
+pub(crate) fn const_int_fold_with(
+    e: &Expr,
+    consts: &HashMap<String, &Expr>,
+    depth: u32,
+    st: Option<&FnState>,
+) -> ConstFold {
     match unwrap_parens(e) {
         Expr::Lit {
             kind: LitKind::Int(s),
             ..
-        } => parse_int_lit(s),
+        } => match parse_int_lit(s) {
+            Some(ConstInt::Value(v)) => ConstFold::Val(v),
+            Some(ConstInt::PosOverflow | ConstInt::NegOverflow) => ConstFold::TooBig,
+            None => ConstFold::NotConst,
+        },
+        Expr::Lit {
+            kind: LitKind::Char(c),
+            ..
+        } => ConstFold::Val(*c as i128),
+        Expr::Ident { name, .. } => {
+            if let Some(st) = st {
+                if st.env_lookup(name).is_some() {
+                    return ConstFold::NotConst;
+                }
+            }
+            if depth < 16 {
+                if let Some(v) = consts.get(name) {
+                    // The function state guards the identifier at the *use
+                    // site* only: a const's own initializer refers to the
+                    // file-level scope, so expand it without `st`.
+                    return const_int_fold_with(v, consts, depth + 1, None);
+                }
+            }
+            ConstFold::NotConst
+        }
         Expr::Unary {
             op: UnOp::Neg,
             operand,
             ..
-        } => {
-            let v = const_int_value(operand)?;
-            v.checked_neg()
+        } => match const_int_fold_with(operand, consts, depth + 1, st) {
+            ConstFold::Val(v) => v.checked_neg().map(ConstFold::Val).unwrap_or(ConstFold::TooBig),
+            ConstFold::NotConst => ConstFold::NotConst,
+            ConstFold::TooBig => ConstFold::TooBig,
+        },
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let l = const_int_fold_with(lhs, consts, depth + 1, st);
+            let r = const_int_fold_with(rhs, consts, depth + 1, st);
+            fold_bin(*op, l, r)
         }
+        _ => ConstFold::NotConst,
+    }
+}
+
+fn fold_bin(op: BinOp, l: ConstFold, r: ConstFold) -> ConstFold {
+    use BinOp::*;
+    // Division/shift-by-huge and `TooBig` interactions are handled per-op.
+    match op {
+        Add | Sub | Mul => {
+            if matches!(l, ConstFold::NotConst) || matches!(r, ConstFold::NotConst) {
+                return ConstFold::NotConst;
+            }
+            if matches!(l, ConstFold::TooBig) || matches!(r, ConstFold::TooBig) {
+                return ConstFold::TooBig;
+            }
+            let (ConstFold::Val(a), ConstFold::Val(b)) = (l, r) else {
+                return ConstFold::NotConst;
+            };
+            let v = match op {
+                Add => a.checked_add(b),
+                Sub => a.checked_sub(b),
+                _ => a.checked_mul(b),
+            };
+            v.map(ConstFold::Val).unwrap_or(ConstFold::TooBig)
+        }
+        // Bitwise masking can shrink a `TooBig` value back into range —
+        // give up (fail-open) rather than guess.
+        BitAnd | BitOr | BitXor => {
+            if matches!(l, ConstFold::TooBig) || matches!(r, ConstFold::TooBig) {
+                return ConstFold::NotConst;
+            }
+            let (ConstFold::Val(a), ConstFold::Val(b)) = (l, r) else {
+                return ConstFold::NotConst;
+            };
+            let v = match op {
+                BitAnd => a & b,
+                BitOr => a | b,
+                _ => a ^ b,
+            };
+            ConstFold::Val(v)
+        }
+        Shl => {
+            let (ConstFold::Val(a), ConstFold::Val(n)) = (l, r) else {
+                // A provably-huge left operand stays huge when shifted by
+                // a non-negative constant; anything else fails open.
+                if matches!(l, ConstFold::TooBig)
+                    && matches!(r, ConstFold::Val(n) if n >= 0)
+                {
+                    return ConstFold::TooBig;
+                }
+                return ConstFold::NotConst;
+            };
+            if n < 0 {
+                // Negative counts are HYB-E6005's job at the shift site.
+                return ConstFold::NotConst;
+            }
+            if a == 0 {
+                return ConstFold::Val(0);
+            }
+            if n >= 128 {
+                return ConstFold::TooBig;
+            }
+            let n = n as u32;
+            let base = 1u128 << n;
+            let Some(mag) = (a.unsigned_abs() as u128).checked_mul(base) else {
+                return ConstFold::TooBig;
+            };
+            if mag > i128::MAX as u128 {
+                return ConstFold::TooBig;
+            }
+            let mag = mag as i128;
+            ConstFold::Val(if a < 0 { -mag } else { mag })
+        }
+        Shr => {
+            let (ConstFold::Val(a), ConstFold::Val(n)) = (l, r) else {
+                return ConstFold::NotConst;
+            };
+            if n < 0 {
+                return ConstFold::NotConst;
+            }
+            if n >= 128 {
+                // Arithmetic shift: non-negative → 0, negative → -1.
+                return ConstFold::Val(if a < 0 { -1 } else { 0 });
+            }
+            ConstFold::Val(a >> (n as u32))
+        }
+        Div | Mod => {
+            // `TooBig` operands give up: division shrinks and could land
+            // back in range — never guess (fail-open, no false reject).
+            if !matches!(l, ConstFold::Val(_)) || !matches!(r, ConstFold::Val(_)) {
+                return ConstFold::NotConst;
+            }
+            let (ConstFold::Val(a), ConstFold::Val(b)) = (l, r) else {
+                return ConstFold::NotConst;
+            };
+            if b == 0 {
+                return ConstFold::NotConst; // HYB-E6001 owns `/ 0`
+            }
+            match op {
+                Div => a.checked_div(b).map(ConstFold::Val).unwrap_or(ConstFold::TooBig),
+                _ => a.checked_rem(b).map(ConstFold::Val).unwrap_or(ConstFold::NotConst),
+            }
+        }
+        _ => ConstFold::NotConst,
+    }
+}
+
+/// Convenience: fold to a value when the expression IS a constant in
+/// range (used by the negative-shift check in emit_guard.rs).
+pub(crate) fn const_int_value(e: &Expr) -> Option<i128> {
+    match const_int_fold(e) {
+        ConstFold::Val(v) => Some(v),
         _ => None,
     }
 }
 
-fn parse_int_lit(s: &str) -> Option<i128> {
-    let s = s.as_bytes();
-    if s.is_empty() {
+/// Fold a float constant expression (literals, unary `-`, parens) — the
+/// `var x int = 2.5` truncation site (issue #201-B).
+pub(crate) fn const_float_value(e: &Expr) -> Option<f64> {
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Float(s),
+            ..
+        } => s.replace('_', "").parse::<f64>().ok(),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => const_float_value(operand).map(|v| -v),
+        _ => None,
+    }
+}
+
+/// Render a folded float as the nearest integer literal for the fix-it.
+fn integer_of_float(f: f64) -> String {
+    format!("{}", f.trunc() as i128)
+}
+
+fn parse_int_lit(s: &str) -> Option<ConstInt> {
+    let clean: String = s.chars().filter(|c| *c != '_').collect();
+    if clean.is_empty() {
         return None;
     }
-    if s.len() >= 2 && s[0] == b'0' {
-        match s[1].to_ascii_lowercase() {
-            b'x' => return i128::from_str_radix(std::str::from_utf8(&s[2..]).ok()?, 16).ok(),
-            b'b' => return i128::from_str_radix(std::str::from_utf8(&s[2..]).ok()?, 2).ok(),
-            b'o' => return i128::from_str_radix(std::str::from_utf8(&s[2..]).ok()?, 8).ok(),
-            _ => {}
+    let s = clean.as_str();
+    let (radix, digits) = if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        (16, rest)
+    } else if let Some(rest) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        (2, rest)
+    } else if let Some(rest) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
+        (8, rest)
+    } else if s.len() > 1 && s.starts_with('0') {
+        if s.chars().any(|c| c == '8' || c == '9') {
+            return None;
         }
+        (8, s)
+    } else {
+        (10, s)
+    };
+    if digits.is_empty() {
+        return None;
     }
-    i128::from_str_radix(std::str::from_utf8(s).ok()?, 10).ok()
+    match i128::from_str_radix(digits, radix) {
+        Ok(v) => Some(ConstInt::Value(v)),
+        Err(err) => match err.kind() {
+            std::num::IntErrorKind::PosOverflow => Some(ConstInt::PosOverflow),
+            std::num::IntErrorKind::NegOverflow => Some(ConstInt::NegOverflow),
+            _ => None,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -135,9 +590,20 @@ mod unit {
 
     #[test]
     fn parse_bases() {
-        assert_eq!(parse_int_lit("300"), Some(300));
-        assert_eq!(parse_int_lit("0x12C"), Some(300));
-        assert_eq!(parse_int_lit("0b101"), Some(5));
-        assert_eq!(parse_int_lit("0o10"), Some(8));
+        assert_eq!(parse_int_lit("300"), Some(ConstInt::Value(300)));
+        assert_eq!(parse_int_lit("0x12C"), Some(ConstInt::Value(300)));
+        assert_eq!(parse_int_lit("0b101"), Some(ConstInt::Value(5)));
+        assert_eq!(parse_int_lit("0o10"), Some(ConstInt::Value(8)));
+        assert_eq!(parse_int_lit("1_000"), Some(ConstInt::Value(1000)));
+    }
+
+    #[test]
+    fn parse_overflow_and_target_ranges() {
+        assert_eq!(
+            parse_int_lit("340282366920938463463374607431768211457"),
+            Some(ConstInt::PosOverflow)
+        );
+        assert_eq!(target_int_range(), (i64::MIN as i128, i64::MAX as i128));
+        assert_eq!(target_uint_range(), (0, u64::MAX as i128));
     }
 }

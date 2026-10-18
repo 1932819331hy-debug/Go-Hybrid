@@ -73,24 +73,64 @@ def read_expected(path):
 
 
 def checker_rejects(bin_path, hy_path, expected_rule):
-    """Require the first error to match the pre-registered rejection rule."""
-    proc = subprocess.run(
-        [bin_path, "check", hy_path, "--json"],
-        capture_output=True, text=True, timeout=60,
-    )
-    if proc.returncode not in (0, 1):
-        return False, f"unexpected checker exit {proc.returncode}"
+    """Require the first error to match the pre-registered rejection rule.
+
+    False also covers harness faults — an unexecutable checker, a decode
+    failure, or undecodable output — not only checker disagreement: the
+    differential loop must never crash on them, and never count them as
+    agreement.
+    """
+    # The checker emits UTF-8 JSON, not text in the caller's locale. With
+    # text=True on a non-UTF-8 host (Windows cp936) the locale decode
+    # raises out of run() itself, or leaves the stream None in a reader
+    # thread; capture bytes and decode here so both become a reportable
+    # (False, detail) instead of a traceback — the same failure class as
+    # corpus_harness.run_checker (#492).
     try:
-        payload = json.loads(proc.stdout.strip())
+        proc = subprocess.run(
+            [bin_path, "check", hy_path, "--json"],
+            capture_output=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"checker could not be run: {exc}"
+    if proc.returncode not in (0, 1):
+        detail = f"unexpected checker exit {proc.returncode}"
+        if proc.stderr:
+            detail += ": " + proc.stderr.decode("utf-8", "replace").strip()[-200:]
+        return False, detail
+    try:
+        out = proc.stdout.decode("utf-8").lstrip("\ufeff").strip()
+    except UnicodeDecodeError as exc:
+        detail = f"checker output is not valid UTF-8: {exc}"
+        if proc.stderr:
+            detail += ": " + proc.stderr.decode("utf-8", "replace").strip()[-200:]
+        return False, detail
+    try:
+        payload = json.loads(out)
     except json.JSONDecodeError:
         return False, "no/invalid checker JSON"
+    # Envelope validation (PR #260): a well-formed JSON scalar/list, a
+    # non-dict summary, non-list diagnostics, or non-dict diagnostic items
+    # used to escape as AttributeError tracebacks; a summary "errors" count
+    # contradicting the diagnostics was silently accepted.
+    if not isinstance(payload, dict):
+        return False, "invalid checker JSON envelope: expected an object"
     summary = payload.get("summary", {})
+    diags = payload.get("diagnostics", [])
+    if not isinstance(summary, dict) or not isinstance(diags, list) or any(
+        not isinstance(d, dict) for d in diags
+    ):
+        return False, "invalid checker JSON envelope: summary/diagnostics"
+    if "errors" in summary:
+        count = summary["errors"]
+        actual = sum(d.get("severity") == "error" for d in diags)
+        if type(count) is not int or count < 0 or count != actual:
+            return False, f"inconsistent summary errors count: {count!r} vs {actual}"
     if proc.returncode != 1:
         return False, (
             f"checker exit/verdict mismatch: exit {proc.returncode}, "
             f"verdict={summary.get('verdict')}"
         )
-    diags = payload.get("diagnostics", [])
     errors = [d for d in diags if d.get("severity") == "error"]
     first_rule = errors[0].get("tier0_rule") if errors else None
     return (
@@ -201,7 +241,11 @@ def main():
     print("----")
     print(f"differential accept-side (build+run): {rate}")
     print(f"differential reject-side (checker):   {reject_pass}/{reject_total}")
-    if accept_total and accept_pass == accept_total and reject_pass == reject_total:
+    if accept_total + reject_total == 0:
+        print("differential: no registered EXPECTED-VERDICT cases in corpus",
+              file=sys.stderr)
+        return 2
+    if accept_pass == accept_total and reject_pass == reject_total:
         print("differential: FULL AGREEMENT")
         return 0
     print(f"differential: {len(failures)} disagreement(s)")
