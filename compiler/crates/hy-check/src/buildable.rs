@@ -85,7 +85,11 @@ enum OpKind {
     Chan(Box<OpKind>),
     Struct(Option<String>),
     Pointer(Box<OpKind>),
-    Fn(Vec<OpKind>),
+    /// Function kind: result kinds, plus the declared parameter count when the
+    /// signature is known (`None` = unknown, e.g. a `fn`-typed value whose
+    /// declaration is out of reach). The count is what closes the
+    /// closure/method-value arity bypass (#577 C9).
+    Fn(Vec<OpKind>, Option<usize>),
     Void,
 }
 
@@ -109,7 +113,7 @@ impl OpKind {
             OpKind::Struct(Some(n)) => format!("struct {}", n),
             OpKind::Struct(None) => "struct".to_string(),
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
-            OpKind::Fn(_) => "fn".to_string(),
+            OpKind::Fn(..) => "fn".to_string(),
             OpKind::Void => "void".to_string(),
         }
     }
@@ -149,6 +153,12 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // (`var f float64 = 1` builds). The kind model cannot tell an untyped
         // constant from an `int` variable, so this direction must stay allowed
         // or the check would reject buildable programs.
+        // No value is involved; the count check owns that case.
+        (Void, _) | (_, Void) => false,
+        // An untyped int constant is assignable to a float result
+        // (`fn f() float64 { return 1 }` builds). The kind model cannot tell
+        // an untyped constant from an `int` variable, so this direction must
+        // stay allowed or the check would reject buildable programs.
         (Float, Int) => false,
         // A struct whose name did not resolve is not evidence of a mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
@@ -238,6 +248,19 @@ struct Collector<'a> {
     kind_scopes: Vec<HashMap<String, OpKind>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
+    /// Result kinds of the function whose body is currently being walked
+    /// (#577 C9/C10). Empty for a fn declared with no results — which is also
+    /// the state outside any body, so `Stmt::Return` can only ever see it
+    /// while a body is open. `FnLit` bodies swap it like `fn_decl` does.
+    fn_results: Vec<OpKind>,
+    /// Whether every result of the enclosing signature is named, so Go's
+    /// naked `return` is legal (corpus 63).
+    fn_results_all_named: bool,
+    /// Whether the enclosing signature's last result is `error`, which the
+    /// emitter zero-fills — a short return is then lowered to the full arity
+    /// (`return v` in a `(value, error)` fn emits `return v, nil`, the E3
+    /// sugar; corpus 13).
+    fn_results_error_tail: bool,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
@@ -256,6 +279,9 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             file_consts: HashMap::new(),
+            fn_results: Vec::new(),
+            fn_results_all_named: false,
+            fn_results_error_tail: false,
             defines: Vec::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
@@ -442,6 +468,16 @@ impl<'a> Collector<'a> {
         for r in &f.results {
             self.ty(&r.ty);
         }
+        let result_kinds: Vec<OpKind> = f
+            .results
+            .iter()
+            .map(|r| self.kind_of_ty(&r.ty, 0))
+            .collect();
+        let all_named = !f.results.is_empty() && f.results.iter().all(|r| r.name.is_some());
+        let error_tail = matches!(
+            f.results.last().map(|r| &r.ty),
+            Some(TypeExpr::Named { name, .. }) if name == "error"
+        );
         let Some(body) = &f.body else { return };
         self.push_scope();
         if let Some(r) = &f.receiver {
@@ -466,7 +502,13 @@ impl<'a> Collector<'a> {
                 self.exempt(name);
             }
         }
+        let outer = std::mem::replace(&mut self.fn_results, result_kinds);
+        let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
+        let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
         self.block_stmts(body);
+        self.fn_results = outer;
+        self.fn_results_all_named = outer_named;
+        self.fn_results_error_tail = outer_err;
         self.pop_scope();
     }
 
@@ -690,10 +732,11 @@ impl<'a> Collector<'a> {
                 self.block_scoped(body);
                 self.pop_scope();
             }
-            Stmt::Return { values, .. } => {
+            Stmt::Return { values, span } => {
                 for v in values {
                     self.expr(v);
                 }
+                self.check_return(values, *span);
             }
             Stmt::Task { callee, args, .. } => {
                 self.expr(callee);
@@ -973,7 +1016,23 @@ impl<'a> Collector<'a> {
                         self.exempt(name);
                     }
                 }
+                let result_kinds: Vec<OpKind> = results
+                    .iter()
+                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                    .collect();
+                let all_named =
+                    !results.is_empty() && results.iter().all(|r| r.name.is_some());
+                let error_tail = matches!(
+                    results.last().map(|r| &r.ty),
+                    Some(TypeExpr::Named { name, .. }) if name == "error"
+                );
+                let outer = std::mem::replace(&mut self.fn_results, result_kinds);
+                let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
+                let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
                 self.block_stmts(body);
+                self.fn_results = outer;
+                self.fn_results_all_named = outer_named;
+                self.fn_results_error_tail = outer_err;
                 self.pop_scope();
             }
             Expr::Paren { inner, .. } => self.expr(inner),
@@ -1045,11 +1104,12 @@ impl<'a> Collector<'a> {
                 OpKind::Chan(Box::new(self.kind_of_ty(elem, depth + 1)))
             }
             TypeExpr::Option { .. } => OpKind::Unknown,
-            TypeExpr::Fn { results, .. } => OpKind::Fn(
+            TypeExpr::Fn { params, results, .. } => OpKind::Fn(
                 results
                     .iter()
                     .map(|r| self.kind_of_ty(r, depth + 1))
                     .collect(),
+                Some(params.len()),
             ),
         }
     }
@@ -1133,6 +1193,7 @@ impl<'a> Collector<'a> {
                             .iter()
                             .map(|r| self.kind_of_ty(&r.ty, 0))
                             .collect(),
+                        Some(f.params.len()),
                     );
                 }
                 OpKind::Unknown
@@ -1256,11 +1317,14 @@ impl<'a> Collector<'a> {
                 Box::new(self.kind_of_ty(key, 0)),
                 Box::new(self.kind_of_ty(value, 0)),
             ),
-            Expr::FnLit { results, .. } => OpKind::Fn(
+            Expr::FnLit {
+                params, results, ..
+            } => OpKind::Fn(
                 results
                     .iter()
                     .map(|r| self.kind_of_ty(&r.ty, 0))
                     .collect(),
+                Some(params.len()),
             ),
             Expr::Call { callee, args, .. } => match self.call_result_kinds(callee, args) {
                 Some(res) if res.is_empty() => OpKind::Void,
@@ -1288,7 +1352,7 @@ impl<'a> Collector<'a> {
             }
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
-                    if let OpKind::Fn(res) = k {
+                    if let OpKind::Fn(res, _) = k {
                         return Some(res);
                     }
                     return None;
@@ -1340,7 +1404,7 @@ impl<'a> Collector<'a> {
                         );
                     }
                 }
-                if let Some(OpKind::Fn(res)) = self.struct_field_kind(&bk, name) {
+                if let Some(OpKind::Fn(res, _)) = self.struct_field_kind(&bk, name) {
                     return Some(res);
                 }
                 None
@@ -1587,6 +1651,202 @@ impl<'a> Collector<'a> {
         };
         let want = f.params.len();
         if want == n {
+        );
+    }
+    /// #577 C9 — a closure or `fn`-typed value whose declared parameter count
+    /// is known (`f := fn(x int) int {...}; f(1, 2)`).
+    fn report_local_arity(&mut self, name: &str, want: usize, got: usize, span: Span) {
+        let msg = if got < want {
+            format!(
+                "`{}` takes {} argument{} but is called with {} — Go refuses `not enough arguments in call to {}` (HYB-E1002)",
+                name,
+                want,
+                if want == 1 { "" } else { "s" },
+                got,
+                name
+            )
+        } else {
+            format!(
+                "`{}` takes {} argument{} but is called with {} — Go refuses `too many arguments in call to {}` (HYB-E1002)",
+                name,
+                want,
+                if want == 1 { "" } else { "s" },
+                got,
+                name
+            )
+        };
+        self.emit_e1002(
+            span,
+            msg,
+            "a call must pass one argument per declared parameter; the emitted Go call is rejected at build time",
+        );
+    }
+
+    /// #577 C9 — a call to a top-level `fn` must pass exactly as many
+    /// arguments as the declaration has parameters. Go refuses the emitted
+    /// call otherwise (`not enough arguments` / `too many arguments`), so an
+    /// accepted program would not build (Row 13).
+    ///
+    /// Only fires for a bare identifier that resolves to a declared `fn`.
+    /// A name bound to a local (including a fn-typed variable or closure) is
+    /// skipped by the caller — the local's arity is not tracked here — and a
+    /// builtin never reaches this point because builtins are not in `fns`.
+    fn check_user_fn_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
+        let head = Checker::base_named_type_str(name);
+        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+            return;
+        };
+        // Generic instantiations (`id[int](x)`) carry type arguments the
+        // parameter list does not describe; leave them to the type checker.
+        if !f.type_params.is_empty() {
+            return;
+        }
+        let (want, got) = (f.params.len(), args.len());
+        if want == got {
+            return;
+        }
+        let msg = if got < want {
+            format!(
+                "`{}` takes {} argument{} but is called with {} — Go refuses `not enough arguments in call to {}` (HYB-E1002)",
+                name,
+                want,
+                if want == 1 { "" } else { "s" },
+                got,
+                name
+            )
+        } else {
+            format!(
+                "`{}` takes {} argument{} but is called with {} — Go refuses `too many arguments in call to {}` (HYB-E1002)",
+                name,
+                want,
+                if want == 1 { "" } else { "s" },
+                got,
+                name
+            )
+        };
+        self.emit_e1002(
+            span,
+            msg,
+            "a call must pass one argument per declared parameter; the emitted Go call is rejected at build time",
+        );
+    }
+
+    /// #577 C9 — method calls (`x.bump(k)`) declare their receiver
+    /// separately, so the parameter count is the declared one.
+    fn check_method_arity(&mut self, bk: &OpKind, name: &str, args: &[CallArg], span: Span) {
+        let Some(sn) = self.struct_name(bk) else {
+            return;
+        };
+        let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
+            return;
+        };
+        if !m.type_params.is_empty() {
+            return;
+        }
+        let (want, got) = (m.params.len(), args.len());
+        if want == got {
+            return;
+        }
+        let msg = if got < want {
+            format!(
+                "method `{}` on `{}` takes {} argument{} but is called with {} — Go refuses `not enough arguments in call to {}.{}` (HYB-E1002)",
+                name,
+                sn,
+                want,
+                if want == 1 { "" } else { "s" },
+                got,
+                sn,
+                name
+            )
+        } else {
+            format!(
+                "method `{}` on `{}` takes {} argument{} but is called with {} — Go refuses `too many arguments in call to {}.{}` (HYB-E1002)",
+                name,
+                sn,
+                want,
+                if want == 1 { "" } else { "s" },
+                got,
+                sn,
+                name
+            )
+        };
+        self.emit_e1002(
+            span,
+            msg,
+            "the receiver is not an argument: pass one argument per declared parameter",
+        );
+    }
+
+    /// #577 C10 — a `return` must supply the enclosing function's result
+    /// list: the same number of values, each assignable to its result type.
+    /// Go refuses the emitted statement otherwise (Row 13).
+    fn check_return(&mut self, values: &[Expr], span: Span) {
+        let want = self.fn_results.clone();
+        // Go's multi-value rule: `return f()` where `f`'s results line up
+        // exactly with the enclosing signature. The single call is the whole
+        // value list, so compare its results positionally instead of
+        // rejecting the count.
+        if values.len() == 1 {
+            if let Expr::Call { callee, args, .. } = unwrap_parens(&values[0]) {
+                if let Some(res) = self.call_result_kinds(callee, args) {
+                    if res.len() == want.len() {
+                        for (r, w) in res.iter().zip(want.iter()) {
+                            self.report_return_conflict(r, w, values[0].span());
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        if values.len() != want.len() {
+            let (nv, nw) = (values.len(), want.len());
+            // Fewer values than results is legal in exactly two shapes, and
+            // both are lowered to a full-arity Go return:
+            //   * every result is named — Go's naked `return` (corpus 63);
+            //   * the last result is `error` — the emitter's E3 zero-fill
+            //     turns `return v` into `return v, nil` (corpus 13).
+            // Anything else is a genuine arity error.
+            let short_ok = nv < nw
+                && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
+            if short_ok {
+                for (v, w) in values.iter().zip(want.iter()) {
+                    let got = self.kind_of_expr(v);
+                    self.report_return_conflict(&got, w, v.span());
+                }
+                return;
+            }
+            let msg = match (nw, nv) {
+                (0, _) => format!(
+                    "`return` with {nv} value{} in a function that declares no results — Go refuses `too many return values` (HYB-E1002)",
+                    if nv == 1 { "" } else { "s" }
+                ),
+                (_, 0) => format!(
+                    "`return` without a value in a function that declares {nw} result{} — Go refuses `not enough return values` (HYB-E1002)",
+                    if nw == 1 { "" } else { "s" }
+                ),
+                _ => format!(
+                    "`return` supplies {nv} value{} but the signature declares {nw} result{} — Go refuses `not enough return values` / `too many return values` (HYB-E1002)",
+                    if nv == 1 { "" } else { "s" },
+                    if nw == 1 { "" } else { "s" }
+                ),
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                "a return statement must supply exactly the results the signature declares",
+            );
+            return;
+        }
+        for (v, w) in values.iter().zip(want.iter()) {
+            let got = self.kind_of_expr(v);
+            self.report_return_conflict(&got, w, v.span());
+        }
+    }
+
+    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
+        if !kinds_conflict(want, got) {
+        );
+    }
             return;
         }
         self.emit_e1002(
@@ -1600,6 +1860,12 @@ impl<'a> Collector<'a> {
                 name
             ),
             "a multi-value call expands to one argument per result; the callee must accept exactly that many",
+                "cannot return a value of type `{}` from a function declaring `{}` — Go refuses `cannot use ... as {} value in return statement` (HYB-E1002)",
+                got.label(),
+                want.label(),
+                want.label()
+            ),
+            "a returned value must be assignable to its declared result type; write an explicit conversion when a conversion is intended",
         );
     }
 
@@ -2167,8 +2433,15 @@ impl<'a> Collector<'a> {
             } if items.is_empty() && bare.as_array_lit().is_none() => {}
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
-                    if !matches!(k, OpKind::Unknown | OpKind::Fn(_)) {
-                        self.emit_e1002(
+                    match k {
+                        // A local bound to a closure or fn-typed value carries
+                        // its declared parameter count, so the call's arity is
+                        // checkable (#577 C9).
+                        OpKind::Fn(_, Some(want)) if want != args.len() => {
+                            self.report_local_arity(name, want, args.len(), span)
+                        }
+                        OpKind::Fn(..) | OpKind::Unknown => {}
+                        _ => self.emit_e1002(
                             span,
                             format!(
                                 "cannot call `{}` (variable of type `{}`): `{}` is not a function (HYB-E1002)",
@@ -2177,7 +2450,7 @@ impl<'a> Collector<'a> {
                                 k.label()
                             ),
                             "only functions, methods, closures, and type conversions can be called",
-                        );
+                        ),
                     }
                 } else {
                     self.check_builtin_operand_kinds(name, args, span);
@@ -2187,15 +2460,19 @@ impl<'a> Collector<'a> {
                     if name == "append" {
                         self.check_append_elements(args);
                     }
+                    self.check_user_fn_arity(name, args, span);
                 }
             }
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
+                // A method has no field entry, so resolve it before the field
+                // lookup: `x.bump()` must reach the arity check even though
+                // `bump` is not a struct field (#577 C9).
                 let has_method = self
                     .struct_name(&bk)
                     .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn, name.clone())));
                 if let Some(fk) = self.struct_field_kind(&bk, name) {
-                    if !has_method && !matches!(fk, OpKind::Unknown | OpKind::Fn(_)) {
+                    if !has_method && !matches!(fk, OpKind::Unknown | OpKind::Fn(..)) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -2238,11 +2515,23 @@ impl<'a> Collector<'a> {
                             "declare the method on that type, or call something that exists",
                         );
                     }
+                    // `u.cb(1, 2)` where `cb fn(x int) int` — the field type
+                    // states the count.
+                    if !has_method {
+                        if let OpKind::Fn(_, Some(want)) = fk {
+                            if want != args.len() {
+                                self.report_local_arity(&callee.render(), want, args.len(), span);
+                            }
+                        }
+                    }
+                }
+                if has_method {
+                    self.check_method_arity(&bk, name, args, span);
                 }
             }
             _ => {
                 let ck = self.kind_of_expr(bare);
-                if !matches!(ck, OpKind::Unknown | OpKind::Fn(_)) {
+                if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
                     self.emit_e1002(
                         span,
                         format!(

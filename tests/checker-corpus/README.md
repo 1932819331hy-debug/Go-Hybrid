@@ -186,3 +186,5 @@ generic whose members the kind model cannot see, so the rule must fail open),
 `defer` on a builtin and on a method, and `append` with a variadic spread,
 multiple values, and an untyped int constant into a `[]float64`. Regression
 pins live in `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).
+With this registration the corpus is **105 programs: ACCEPT 33 ·
+ACCEPT-MANAGED 2 · REJECT 70**.
