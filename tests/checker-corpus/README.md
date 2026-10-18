@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 88 programs** — ACCEPT 29 · ACCEPT-MANAGED 2 ·
-REJECT 57 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 89 programs** — ACCEPT 29 · ACCEPT-MANAGED 2 ·
+REJECT 58 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -20,7 +20,7 @@ the new fixtures.
 
 The prose below is the original pre-registration statement, kept as written
 on its date: the corpora sizes it names (18, 20) are what the corpus held
-then, not today's 88. The dated tripwire baseline is preserved as historical
+then, not today's 89. The dated tripwire baseline is preserved as historical
 for the same reason.
 
 18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
@@ -82,5 +82,5 @@ type's range. Each header states what it fences and cites GUARANTEES.md Row 13
 (BUILDABLE) or the Row 16 "No claim" position for run-time panics, so a
 reviewer can see why ACCEPT is correct rather than an oversight.
 
-With this registration the corpus is **86 programs: ACCEPT 28 ·
-ACCEPT-MANAGED 2 · REJECT 56**.
+With this registration the corpus is **89 programs: ACCEPT 29 ·
+ACCEPT-MANAGED 2 · REJECT 58**.

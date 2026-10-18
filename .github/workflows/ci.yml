@@ -146,7 +146,7 @@ jobs:
           set -e
           cd compiler
           cargo test --workspace --quiet
-      - name: Checker corpus verdict agreement (88/88 + tripwire)
+      - name: Checker corpus verdict agreement (89/89 + tripwire)
         run: |
           set -e
           cd compiler && cargo build -p hyb --quiet
