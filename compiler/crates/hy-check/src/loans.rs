@@ -2443,7 +2443,7 @@ impl<'a> Checker<'a> {
                 .loans
                 .iter()
                 .filter_map(|l| match &l.target {
-                    LoanTarget::MapSlot { binding, path }
+                    LoanTarget::MapSlot { binding, path, key }
                         if l.created <= idx
                             && idx <= l.last
                             && a3_paths_conflict(st, path, &src) =>
@@ -2452,6 +2452,7 @@ impl<'a> Checker<'a> {
                             target: LoanTarget::MapSlot {
                                 binding: binding.clone(),
                                 path: name.to_string(),
+                                key: key.clone(),
                             },
                             created: l.created,
                             last: l.last,

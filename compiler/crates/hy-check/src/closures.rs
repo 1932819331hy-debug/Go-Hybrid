@@ -1200,11 +1200,13 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                     for (name, val) in l.names.iter().zip(l.values.iter()) {
                         if let Some(path) = walk::addr_of_index_base_path(val) {
                             let binding = name.clone();
+                            let key = walk::addr_of_index_slot_key(val);
                             let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                             st.loans.push(Loan {
                                 target: LoanTarget::MapSlot {
                                     binding: binding.clone(),
                                     path,
+                                    key,
                                 },
                                 created: idx,
                                 last,
@@ -1228,12 +1230,14 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                         if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
                             if let Some(path) = walk::addr_of_index_base_path(v) {
                                 let binding = name.clone();
+                                let key = walk::addr_of_index_slot_key(v);
                                 let last =
                                     st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                                 st.loans.push(Loan {
                                     target: LoanTarget::MapSlot {
                                         binding: binding.clone(),
                                         path,
+                                        key,
                                     },
                                     created: idx,
                                     last,
