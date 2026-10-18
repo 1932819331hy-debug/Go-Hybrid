@@ -614,6 +614,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     Some(callee),
                     targets.as_deref(),
                 );
+                let cr = walk::CallRef {
+                    callee,
+                    args,
+                    span: *span,
+                };
+                ck.check_call_const_writes(&st, &cr, &std::collections::HashSet::new());
             }
 
             // O4.0 check-site: the sent value (HYB-E3002). The parser flags

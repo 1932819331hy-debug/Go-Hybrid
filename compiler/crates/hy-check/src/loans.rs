@@ -5687,6 +5687,14 @@ impl<'a> Checker<'a> {
                     }
                     self.record_callee_param_stores(&mut cst, cr);
                 }
+                if let Stmt::Task { callee, args, span } = stmt {
+                    let cr = CallRef {
+                        callee,
+                        args,
+                        span: *span,
+                    };
+                    self.check_call_const_writes(&cst, &cr, &HashSet::new());
+                }
             }
 
             match stmt {
@@ -6069,7 +6077,7 @@ impl<'a> Checker<'a> {
     /// reject the call site with `HYB-E3006` (`cannot write to const`).
     /// Read-only helpers (`len(shared_map)`, `count(shared_map)`) do not
     /// mutate the parameter and remain accepted.
-    fn check_call_const_writes(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
+    pub(crate) fn check_call_const_writes(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
         let callee = crate::model::unwrap_parens(cr.callee);
         if let Expr::Ident { name, .. } = callee {
             if name == "delete"
@@ -6128,26 +6136,44 @@ impl<'a> Checker<'a> {
             }
         }
         for (i, a) in cr.args.iter().enumerate() {
-            let Some(const_name) = self.const_arg_root(st, &a.value, declared) else {
-                continue;
-            };
-            let mutates = match callee {
+            let inner = crate::model::unwrap_parens(&a.value);
+            let is_addressable = matches!(
+                inner,
+                Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
+            );
+            let already_ptr = matches!(self.shape_of_expr(st, &a.value), TypeShape::Pointer(_))
+                || as_addr_of(inner).is_some();
+
+            let (param_is_ptr, mutates) = match callee {
                 Expr::Ident { name, .. } => {
                     if declared.contains(name) {
-                        true
+                        (false, true)
                     } else if let Some(decl) = self.fns.get(name) {
                         match decl.params.get(i) {
-                            Some(p) => self.fn_mutates_const_param(decl, &p.name, 0),
-                            None => true,
+                            Some(p) => {
+                                let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
+                                (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                            }
+                            None => (false, true),
                         }
-                    } else if self
-                        .lookup_binding(st, name)
-                        .map(|b| matches!(b.shape, TypeShape::Closure))
-                        .unwrap_or(false)
-                    {
-                        true
+                    } else if let Some(b) = self.lookup_binding(st, name) {
+                        if let Some(hy_syntax::TypeExpr::Fn { params, .. }) = &b.ty {
+                            match params.get(i) {
+                                Some(p) => {
+                                    let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                        || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
+                                    (is_ptr, true)
+                                }
+                                None => (false, true),
+                            }
+                        } else if matches!(b.shape, TypeShape::Closure) {
+                            (false, true)
+                        } else {
+                            (false, false)
+                        }
                     } else {
-                        false
+                        (false, false)
                     }
                 }
                 Expr::Field {
@@ -6162,14 +6188,15 @@ impl<'a> Checker<'a> {
                         _ => false,
                     };
                     if is_pkg {
-                        match crate::model::unwrap_parens(base) {
+                        let mutates = match crate::model::unwrap_parens(base) {
                             Expr::Ident { name: pkg, .. } => {
                                 foreign::package_mutated_arg(pkg, method_name) == Some(i)
                             }
                             _ => false,
-                        }
+                        };
+                        (false, mutates)
                     } else if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
-                        true
+                        (false, true)
                     } else {
                         let recv_base = match self.shape_of_expr(st, base) {
                             TypeShape::Struct(Some(s)) => Some(s),
@@ -6183,24 +6210,51 @@ impl<'a> Checker<'a> {
                             self.method_decls.get(&(rb, method_name.clone())).copied()
                         }) {
                             match decl.params.get(i) {
-                                Some(p) => self.fn_mutates_const_param(decl, &p.name, 0),
-                                None => true,
+                                Some(p) => {
+                                    let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                        || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
+                                    (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                                }
+                                None => (false, true),
                             }
                         } else {
-                            false
+                            (false, false)
                         }
                     }
                 }
                 Expr::FnLit { params, body, .. } => match params.get(i) {
                     Some(p) => {
+                        let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                            || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
                         let mut aliases = HashSet::new();
                         aliases.insert(p.name.clone());
-                        self.block_mutates_const_param(body, &mut aliases, 0)
+                        (is_ptr, self.block_mutates_const_param(body, &mut aliases, 0))
                     }
-                    None => true,
+                    None => (false, true),
                 },
-                _ => false,
+                _ => (false, false),
             };
+
+            let const_name = self.const_arg_root(st, &a.value, declared).or_else(|| {
+                if param_is_ptr && is_addressable && !already_ptr {
+                    let root = inner.root_ident()?;
+                    if declared.contains(root) {
+                        return None;
+                    }
+                    let place = Place {
+                        kind: PlaceKind::Ident(root.to_string()),
+                        span: a.value.span(),
+                    };
+                    self.const_write_root(st, &place)
+                } else {
+                    None
+                }
+            });
+
+            let Some(const_name) = const_name else {
+                continue;
+            };
+
             if mutates {
                 hits.push((const_name, a.value.span()));
             }
