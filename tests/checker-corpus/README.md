@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 77 programs** — ACCEPT 21 · ACCEPT-MANAGED 2 ·
-REJECT 54 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 80 programs** — ACCEPT 22 · ACCEPT-MANAGED 2 ·
+REJECT 56 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -20,7 +20,7 @@ the new fixtures.
 
 The prose below is the original pre-registration statement, kept as written
 on its date: the corpora sizes it names (18, 20) are what the corpus held
-then, not today's 77. The dated tripwire baseline is preserved as historical
+then, not today's 80. The dated tripwire baseline is preserved as historical
 for the same reason.
 
 18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
@@ -62,3 +62,14 @@ surface with author credit (tests extracted to
 
 With this registration the corpus is **78 programs: ACCEPT 21 ·
 ACCEPT-MANAGED 2 · REJECT 55**.
+
+`n5-zero-map-first-write.hy` — the accept-side pin for issue #645: N5's
+first-write allocation of zero-value maps (a `var` local, a map field of a
+zero-valued / partially keyed / nested struct, an aliased map type, and
+`new(T)`). It used to pass the checker, build, and panic at the first
+write with `assignment to entry in nil map`. Its header carries its stdout
+as `// EXPECTED-OUTPUT:` lines, diffed byte-exact by
+`compiler/crates/hyb/tests/spec_n5_zero_maps.rs`.
+
+With this registration the corpus is **80 programs: ACCEPT 22 ·
+ACCEPT-MANAGED 2 · REJECT 56**.

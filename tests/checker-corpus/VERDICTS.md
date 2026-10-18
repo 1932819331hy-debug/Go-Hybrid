@@ -800,3 +800,21 @@ reproduction line above is the merged tree.
 - Verdict: REJECT FC, exact diagnostic HYB-E3005. Pins GUARANTEES.md row 11 at a task-spawn check site; scalar-atomic acceptance remains covered by corpus 17.
 - This registers existing fail-closed behavior; no checker rule or existing verdict changes.
 - Verified on the refreshed tree: 79/79 verdict agreement, tripwire not fired; ACCEPT 21 · ACCEPT-MANAGED 2 · REJECT 56.
+
+## Additive corpus registration — 2026-10-18: N5 zero maps
+
+- Program: `n5-zero-map-first-write.hy` (issue #645), registered with its
+  fix. Descriptive naming, as above.
+- Verdict: ACCEPT. Pins N5 / T8: first writes to a `var` zero map, a map
+  field of a zero-valued struct, a partially keyed literal, a nested
+  struct, an aliased map type, and `new(T)`. Before the fix it was accepted
+  with 0 diagnostics, built, and panicked with `assignment to entry in nil
+  map`.
+- N5 is tagged open D11 (keep vs Go-exact); this registers the spec as
+  written, and a D11 reversal amends this verdict here.
+- The header carries `// EXPECTED-OUTPUT:` lines; the stdout is diffed
+  byte-exact by `compiler/crates/hyb/tests/spec_n5_zero_maps.rs` (the
+  differential loop checks build + exit 0).
+- No checker rule or existing verdict changes. Verified on the fixed tree:
+  80/80 verdict agreement, tripwire not fired; differential FULL 24+56;
+  ACCEPT 22 · ACCEPT-MANAGED 2 · REJECT 56.

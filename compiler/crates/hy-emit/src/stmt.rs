@@ -273,7 +273,15 @@ impl Emitter {
             LocalKind::Var => {
                 let ty = l.ty.as_ref().map(|t| self.type_text(t));
                 match (&ty, l.values.first()) {
-                    (Some(t), None) => self.push(&format!("var {} {}", l.names.join(", "), t)),
+                    // N5: a zero map (or a struct carrying one) allocates
+                    // at its declaration (zeroinit.rs, issue #645).
+                    (Some(t), None) => match l.ty.as_ref().and_then(|ty| self.n5_zero_init(ty)) {
+                        Some(init) => {
+                            let inits = vec![init; l.names.len()].join(", ");
+                            self.push(&format!("var {} {} = {}", l.names.join(", "), t, inits))
+                        }
+                        None => self.push(&format!("var {} {}", l.names.join(", "), t)),
+                    },
                     (Some(t), Some(v)) => {
                         self.hoist_tries_expr(v)?;
                         let e = self.emit_expr(v, 0)?;

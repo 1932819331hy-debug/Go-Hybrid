@@ -33,6 +33,7 @@ use hy_syntax::*;
 mod constconv;
 mod rangebind;
 mod shapes;
+mod zeroinit;
 use shapes::{
     import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion,
 };
@@ -419,6 +420,10 @@ pub struct Emitter {
     local_vars: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
     ptr_returning_fns: BTreeSet<String>,
+    /// N5 (zeroinit.rs): non-generic user struct → its declared fields,
+    /// and user type alias → its target, for zero values that allocate.
+    n5_structs: BTreeMap<String, Vec<FieldDecl>>,
+    n5_aliases: BTreeMap<String, TypeExpr>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -463,6 +468,8 @@ impl Emitter {
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
             explicit_imports: BTreeMap::new(),
+            n5_structs: BTreeMap::new(),
+            n5_aliases: BTreeMap::new(),
         }
     }
 
@@ -552,6 +559,24 @@ impl Emitter {
                         .map(|f| (f.name.clone(), base_ty_name(&f.ty).unwrap_or_default()))
                         .collect::<Vec<_>>(),
                 )),
+                _ => None,
+            })
+            .collect();
+        self.n5_structs = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Struct(s) if s.type_params.is_empty() => {
+                    Some((s.name.clone(), s.fields.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        self.n5_aliases = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::TypeAlias(t) => Some((t.name.clone(), t.ty.clone())),
                 _ => None,
             })
             .collect();
