@@ -72,7 +72,10 @@ fn probe(v chan int, opt option[int]) {
     assert_has(&r_shadow_int, "HYB-E2008");
 
     // 3. `option[chan<- int]` payload shadowing an outer bidirectional `ch`
-    //    must be rejected with HYB-E2008 (`channel is send-only`) in the guard.
+    //    must be rejected in the guard. The extended channel-direction walker
+    //    (HYB-E3012 work) now classifies the receive-from-send-only first as
+    //    HYB-E3008 (`chan-direction-mismatch`, the precise code for this
+    //    error) before the coarser receive-non-channel fallthrough.
     let r_shadow_send = check(
         r#"package main
 
@@ -85,7 +88,7 @@ fn probe(ch chan int, opt option[chan<- int]) {
 }
 "#,
     );
-    assert_has(&r_shadow_send, "HYB-E2008");
+    assert_has(&r_shadow_send, "HYB-E3008");
 }
 
 #[test]
@@ -168,7 +171,10 @@ fn drain(opt option[chan chan<- int]) {
 }
 "#,
     );
-    assert_has(&r_body, "HYB-E2008");
+    // The extended channel-direction walker classifies the outer receive
+    // (operand is the send-only element type) as HYB-E3008 first; the program
+    // is equally rejected, with the more precise direction diagnostic.
+    assert_has(&r_body, "HYB-E3008");
 
     let r_select = check(
         r#"package main
@@ -188,5 +194,5 @@ fn drain(opt option[chan chan<- int]) {
 }
 "#,
     );
-    assert_has(&r_select, "HYB-E2008");
+    assert_has(&r_select, "HYB-E3008");
 }
