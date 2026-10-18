@@ -776,7 +776,7 @@ impl<'a> Checker<'a> {
     /// all construct a fresh value-element slice via `append([]T{}, ...)` (such
     /// as corpus 15's `chunk_of`), so the returned slice cannot share mutable
     /// backing storage with the caller's argument across loop iterations (#194).
-    fn call_returns_fresh_copy(&self, expr: &Expr) -> bool {
+    pub(crate) fn call_returns_fresh_copy(&self, expr: &Expr) -> bool {
         let Expr::Call { callee, .. } = crate::model::unwrap_parens(expr) else {
             return false;
         };
