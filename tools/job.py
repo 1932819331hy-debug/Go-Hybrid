@@ -20,6 +20,8 @@ import json
 import math
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -178,24 +180,69 @@ def kaggle_wait(minutes, slug=None):
 
 
 def kaggle_fetch(jobdir, slug=None):
+    """Download kernel output; promote only this invocation's summary.
+
+    The download is staged inside the cache directory and the summary is
+    selected from that staging directory alone: a successful transfer can
+    omit paths left by an older run, so selecting from the persistent
+    cache would promote stale output (lexical order is not age — zzz-old
+    sorts last). The candidate list is final, not a starting point; a
+    caller that falls back to searching the cache reinstates the stale
+    promotion. The cache keeps every prior download (a fresh file
+    supersedes the same-named file from an earlier run), and a failed run
+    retains its partial output without promoting anything; a file whose
+    cache copy fails is likewise left out of the candidates. Symlinked
+    files are dereferenced into the cache; symlinked directories are not
+    descended. Staging beside the cache avoids a cross-device copy and a
+    system tmp that may be too small for the kernel output.
+    Returns 0 on success, 1 when nothing was promoted (the documented
+    exit-code contract; the raw CLI status is reported in the message).
+    """
     slug = slug or kaggle_slug()
     raw = os.path.join(jobdir, "result", "raw")
     os.makedirs(raw, exist_ok=True)
-    rc, out = sh("{} kernels output {} -p {}".format(KAGGLE_CLI, slug, raw), timeout=180)
-    print(out)
-    # A failed download must not read as a successful fetch: an empty result
-    # dir is indistinguishable from "the kernel produced nothing".
-    if rc != 0:
-        print("kaggle fetch: kernels output exited {} (download failed)".format(rc), file=sys.stderr)
+    try:
+        staging = tempfile.mkdtemp(prefix=".staging-", dir=raw)
+    except OSError as e:
+        print("WARNING: cannot stage download under {}: {}".format(raw, e), file=sys.stderr)
         return 1
-    # find summary.json anywhere under raw
-    found = []
-    for root, _, files in os.walk(raw):
-        for fn in files:
-            if fn == "summary.json":
-                found.append(os.path.join(root, fn))
+    try:
+        rc, out = sh("{} kernels output {} -p {}".format(
+            shlex.quote(KAGGLE_CLI), shlex.quote(slug), shlex.quote(staging)), timeout=180)
+        print(out)
+        # Retain the downloaded artifacts in the cache regardless of the
+        # exit status, then promote only on success.
+        found = []
+        for root, _, files in os.walk(staging):
+            rel = os.path.relpath(root, staging)
+            cache_dir = os.path.join(raw, rel)
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+            except OSError as e:
+                # A cached name that changed from file to directory (or a
+                # full disk) must not abort the fetch with a traceback.
+                print("WARNING: could not create cache dir {}: {}".format(rel, e), file=sys.stderr)
+                continue
+            for fn in files:
+                src = os.path.join(root, fn)
+                try:
+                    shutil.copy2(src, os.path.join(cache_dir, fn))
+                except OSError as e:
+                    print("WARNING: could not cache {}: {}".format(fn, e), file=sys.stderr)
+                    continue
+                if fn == "summary.json":
+                    # Track the cache copy, not the staging path: staging is
+                    # removed in the finally block before promotion runs.
+                    found.append(os.path.join(cache_dir, fn))
+        # A failed download must not read as a successful fetch: an empty result
+        # dir is indistinguishable from "the kernel produced nothing".
+        if rc != 0:
+            print("WARNING: kaggle kernels output failed (exit {}); "
+                  "no summary promoted".format(rc), file=sys.stderr)
+            return 1
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     if found:
-        import shutil
         source = sorted(found)[-1]
         # A successful transfer may still contain an older kernel's result.
         # Validate before replacing the local summary used as job evidence.
