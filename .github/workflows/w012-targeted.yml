@@ -1,0 +1,39 @@
+name: w012-targeted
+
+on:
+  pull_request:
+
+jobs:
+  w012:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install pinned toolchains
+        run: |
+          set -e
+          curl -sSL -o /tmp/go.tgz https://go.dev/dl/go1.26.9.linux-amd64.tar.gz
+          sudo tar -C /usr/local -xzf /tmp/go.tgz
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.0
+          echo "/usr/local/go/bin:$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build native and WASM checker
+        run: |
+          set -e
+          export PATH="$HOME/.cargo/bin:/usr/local/go/bin:$PATH"
+          rustup target add wasm32-unknown-unknown
+          cd compiler
+          cargo build -p hy-wasm --target wasm32-unknown-unknown --release
+          cargo build -p hyb --release
+      - name: Analyzer tests with race detector
+        run: |
+          set -e
+          export PATH="$HOME/.cargo/bin:/usr/local/go/bin:$PATH"
+          cd spikes/w012-analyzer
+          HYBRID_WASM_PATH="$GITHUB_WORKSPACE/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm" go test -race ./...
+      - name: Native/WASM parity corpus
+        run: |
+          set -e
+          HYBRID_WASM_PATH="$GITHUB_WORKSPACE/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm" \
+          HYBRID_NATIVE_PATH="$GITHUB_WORKSPACE/compiler/target/release/hyb" \
+          node test_wasm_parity.js
