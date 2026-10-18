@@ -29,6 +29,7 @@ jobs:
           # workflow unparseable and take every run (and every PR) down.
           python3 tools/check_conflict_markers.py
           python3 -m unittest discover -s tools -p test_check_conflict_markers.py -v
+          python3 -m unittest discover -s tools -p test_check_corpus_census.py -v
           python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'
           python3 -m unittest discover -s tools/runner -p test_runner.py -v
           python3 -m unittest discover -s tools -p test_job_cli.py -v
@@ -136,12 +137,14 @@ jobs:
           # preinstalled rustup shim (which has no default toolchain).
           export PATH="$HOME/.cargo/bin:/usr/local/go/bin:$PATH"
           bash tools/check-versions.sh
+      - name: Check Corpus Census (every stated count matches the corpus)
+        run: make census
       - name: Compiler tests (hy-diag + hy-syntax + hy-check + hy-emit)
         run: |
           set -e
           cd compiler
           cargo test --workspace --quiet
-      - name: Checker corpus verdict agreement (77/77 + tripwire)
+      - name: Checker corpus verdict agreement (80/80 + tripwire)
         run: |
           set -e
           cd compiler && cargo build -p hyb --quiet
