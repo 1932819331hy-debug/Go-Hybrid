@@ -3680,11 +3680,28 @@ mod tests {
             .any(|d| d.code == "HYB-E3102"));
 
         // 6. T22: const alias bound in `if <init>` cannot be mutated via `delete` in `<cond>`.
+        //
+        // FIXTURE NOTE (issue #682): this case used to read
+        //   `if alias := c; is_ok(delete(alias, "k"))`
+        // with a helper `fn is_ok(x any) bool`. `delete` produces no value in
+        // Go, so `is_ok(delete(...))` was itself an accepted-but-unbuildable
+        // program - Go reports `delete(alias, "k") (no value) used as value`.
+        // The new U8 rule correctly flags that, which changed which rule came
+        // first and broke this assertion.
+        //
+        // The delete now sits in a closure BODY (statement position) and the
+        // closure is called in `<cond>` - the same shape the A3 case above
+        // uses. The fixture still tests "a const alias mutated via `delete`
+        // inside `<cond>`" and both assertions below stay strict; only the
+        // incidental second defect is gone.
         let r_t22 = check(
             "const c = map[string]int{\"k\": 1}\n\
-             fn is_ok(x any) bool { return true }\n\
              fn main() {\n\
-               if alias := c; is_ok(delete(alias, \"k\")) {\n\
+               if del := fn() bool {\n\
+                 alias := c\n\
+                 delete(alias, \"k\")\n\
+                 return true\n\
+               }; del() {\n\
                  fmt.println(\"deleted\")\n\
                }\n\
              }",
