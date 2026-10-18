@@ -63,7 +63,16 @@ impl Emitter {
         expected: Option<&TypeExpr>,
     ) -> Result<String, EmitError> {
         if let Some(exp) = expected {
-            match e {
+            // `Paren` is semantically transparent: `({replicas: 2})` in a
+            // map-value or slice-elem slot still has to inherit the expected
+            // type's head, or the elided literal falls through to the
+            // "spell the type" refusal. Peeling here is safe — the parens are
+            // redundant in a Go element position and are dropped from output.
+            let mut lit = e;
+            while let Expr::Paren { inner, .. } = lit {
+                lit = inner;
+            }
+            match lit {
                 Expr::StructLit {
                     ty: None, fields, ..
                 } => {
