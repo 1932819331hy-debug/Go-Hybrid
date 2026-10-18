@@ -2232,10 +2232,27 @@ impl<'a> Checker<'a> {
         tp_names: &std::collections::HashSet<String>,
         out: &mut std::collections::HashMap<String, hy_syntax::TypeExpr>,
     ) {
-        use hy_syntax::TypeExpr;
+        use hy_syntax::{ChanDir, TypeExpr};
         if let TypeExpr::Named { name, .. } = param_ty {
             if tp_names.contains(name) {
-                out.entry(name.clone()).or_insert_with(|| arg_ty.clone());
+                match out.entry(name.clone()) {
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(arg_ty.clone());
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut o) => {
+                        let existing_res = self.resolve_type_alias(o.get());
+                        let new_res = self.resolve_type_alias(arg_ty);
+                        if matches!(
+                            (&existing_res, &new_res),
+                            (
+                                TypeExpr::Chan { dir: existing_dir, .. },
+                                TypeExpr::Chan { dir: ChanDir::Both, .. }
+                            ) if *existing_dir != ChanDir::Both
+                        ) {
+                            o.insert(arg_ty.clone());
+                        }
+                    }
+                }
                 return;
             }
         }
@@ -2405,14 +2422,16 @@ impl<'a> Checker<'a> {
     }
 
     fn resolve_const_dir_ty(&self, name: &str, env: &ChanDirEnv) -> Option<hy_syntax::TypeExpr> {
-        let b = self.consts.get(name)?;
-        if let Some(ty) = &b.ty {
+        let c = self.file.decls.iter().rev().find_map(|d| match d {
+            hy_syntax::Decl::Const(c) if c.name == name => Some(c),
+            _ => None,
+        })?;
+        if let Some(ty) = &c.ty {
             return Some(ty.clone());
         }
-        let val = self.const_values.get(name)?;
         let mut guard_env = env.clone();
         guard_env.define(name, None);
-        self.dir_ty_of_expr(val, &guard_env)
+        self.dir_ty_of_expr(&c.value, &guard_env)
     }
 
     fn dir_callee_params(

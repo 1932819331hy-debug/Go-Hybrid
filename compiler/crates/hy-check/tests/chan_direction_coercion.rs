@@ -403,22 +403,35 @@ fn spread_named_args_some_slice_pop_set_and_conversion_enforce_e3012() {
 #[test]
 fn top_level_const_alias_and_inferred_multi_param_generic_enforce_e3012() {
     let r = check(
-        "const fwd_alias = alias\n\
+        "fn id[t](x t) t {\n\
+           return x\n\
+         }\n\
+         const fwd_alias = alias\n\
+         const fwd_id = id_alias\n\
+         const id_alias = id(sc)\n\
          const sc chan<- int = make(chan int, 1)\n\
          const alias = sc\n\
          const alias2 = alias\n\
          fn same[t](a t, b t) {}\n\
          fn main() {\n\
+           c := make(chan int, 1)\n\
            var rc <-chan int = alias2\n\
            var rc2 <-chan int = fwd_alias\n\
+           var rc3 <-chan int = fwd_id\n\
            same(rc, sc)\n\
+           same(c, sc)\n\
+           same(sc, c)\n\
+           same[chan<- int](sc, c)\n\
+           same(c, c)\n\
+           same(sc, sc)\n\
            _ = rc\n\
            _ = rc2\n\
+           _ = rc3\n\
          }",
     );
     assert_eq!(r.verdict, Verdict::Reject);
     let e3012_count = r.diagnostics.iter().filter(|d| d.code == "HYB-E3012").count();
-    assert_eq!(e3012_count, 3, "expected 3 HYB-E3012 diagnostics, got {:?}", r.diagnostics);
+    assert_eq!(e3012_count, 6, "expected 6 HYB-E3012 diagnostics, got {:?}", r.diagnostics);
 
     // Self-referential / mutually recursive consts must terminate cleanly without hanging.
     let _ = check(
@@ -430,6 +443,3 @@ fn top_level_const_alias_and_inferred_multi_param_generic_enforce_e3012() {
          }",
     );
 }
-
-
-
