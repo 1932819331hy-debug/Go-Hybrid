@@ -1,4 +1,5 @@
 # STATUS (for the human — 15 lines max)
+- Contributor runner fix: required result files now affect job success; reproduced a false green on unchanged main, with offline regressions. Pending upstream CI/review, no bounty award assumed.
 
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-20: the 19-e queue fully consumed (**13 more PRs landed, 5 credit closes**) — cargo 1053/0 (63 binaries), corpus 78/78, differential FULL (23+55), main CI green (3b44e7a)
 - **M1 VERDICTS: all 21 drafts DONE** (`VERDICTS-M1-DRAFT.md` — maintainer copy): 9 ACCEPTED (W-001 family head, W-002/003 folded, W-007, W-009, W-012 winner-candidate-1, W-014, W-015 winner-candidate-2, W-017 winner-candidate-3), 4 CONDITIONAL (W-004 P4-falsifier narrowed claim, W-005 narrowing pick, W-016 governance repair, W-018 RESULTS growth), 5 DECLINED with published learnings (W-006/008/010/011/013), 2 DEFERRED per intake (W-019/020), 1 ACCEPTED-AS-LEARNING (W-021 asm falsified 16/19, 3 hazards fast-tracked) — post to #365 on 2026-11-01 per the file's checklist
