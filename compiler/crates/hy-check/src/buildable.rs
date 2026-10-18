@@ -2581,8 +2581,12 @@ impl<'a> Collector<'a> {
                         }
                     }
                 }
+                // pr-678: normalize through `struct_base_name` so a generic
+                // instantiation (`cache[int]`, `*lru_cache[k, v]`) resolves to
+                // the base-name key `method_decls` is indexed by — the same
+                // fold `base_named_type` applies for method receivers.
                 let has_method = self
-                    .struct_name(&bk)
+                    .struct_base_name(&bk)
                     .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn, name.clone())));
                 if let Some(fk) = self.struct_field_kind(&bk, name) {
                     if !has_method && !matches!(fk, OpKind::Unknown | OpKind::Fn(_)) {
