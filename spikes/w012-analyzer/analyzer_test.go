@@ -3,11 +3,15 @@ package analyzer
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/packages"
@@ -180,6 +184,144 @@ func TestEngineCheckContextIsCancellableAndDoesNotPoisonRuntime(t *testing.T) {
 	}
 	if out.Summary.Verdict != "accept" || out.Summary.Warnings < 1 {
 		t.Fatalf("unexpected result after cancelling previous check: %+v", out)
+	}
+}
+
+func TestDeclaredHybridReadFailuresFailClosed(t *testing.T) {
+	unreadable := filepath.Join(t.TempDir(), "unreadable.hy")
+	for _, tc := range []struct {
+		name     string
+		readFile func(string) ([]byte, error)
+	}{
+		{"driver_read_denied", func(string) ([]byte, error) {
+			return nil, errors.New("virtual file unavailable")
+		}},
+		{"no_driver_reader", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pass := &analysis.Pass{
+				Analyzer:   Analyzer,
+				Pkg:        types.NewPackage("sample", "sample"),
+				OtherFiles: []string{unreadable},
+				ReadFile:   tc.readFile,
+				Report: func(analysis.Diagnostic) {
+					t.Error("no diagnostics should be emitted when a declared input cannot be read")
+				},
+			}
+			_, err := run(pass)
+			if err == nil || !strings.Contains(err.Error(), "read declared .hy file") {
+				t.Fatalf("unreadable declared input must fail closed, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDeclaredAndScannedHybridPathsAreCanonicalAndReportedOnce(t *testing.T) {
+	dir := t.TempDir()
+	hyPath := filepath.Join(dir, "bad.hy")
+	src := "package sample\\nfn check() { let x = 7; let y = move x; let z = x }\\n"
+	if err := os.WriteFile(hyPath, []byte(src), 0600); err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(".", hyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := GetEngine("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := engine.Check(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Diagnostics) == 0 {
+		t.Fatal("regression fixture must emit a diagnostic")
+	}
+
+	for _, tc := range []struct {
+		name string
+		readFile func(string) ([]byte, error)
+	}{
+		{"driver_file_reader", os.ReadFile},
+		{"filesystem_fallback", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			goFile, err := parser.ParseFile(fset, filepath.Join(dir, "anchor.go"), "package sample\\n", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var reported []analysis.Diagnostic
+			pass := &analysis.Pass{
+				Analyzer: Analyzer,
+				Pkg: types.NewPackage("sample", "sample"),
+				Fset: fset,
+				Files: []*ast.File{goFile},
+				OtherFiles: []string{relative, hyPath},
+				ReadFile: tc.readFile,
+				Report: func(d analysis.Diagnostic) { reported = append(reported, d) },
+			}
+			if _, err := run(pass); err != nil {
+				t.Fatal(err)
+			}
+			if len(reported) != len(out.Diagnostics) {
+				t.Fatalf("expected %d diagnostics for one canonical file, got %d", len(out.Diagnostics), len(reported))
+			}
+			for _, d := range reported {
+				if pos := fset.Position(d.Pos); pos.Filename != hyPath {
+					t.Fatalf("diagnostic must use canonical source path: %s", pos)
+				}
+			}
+		})
+	}
+}
+
+func TestSiblingDiagnosticsHaveStableFileOrder(t *testing.T) {
+	dir := t.TempDir()
+	src := "package sample\\nfn check() { let x = 7; let y = move x; let z = x }\\n"
+	for _, name := range []string{"b.hy", "a.hy"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		fset := token.NewFileSet()
+		goFile, err := parser.ParseFile(fset, filepath.Join(dir, "anchor.go"), "package sample\\n", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var filenames []string
+		pass := &analysis.Pass{
+			Analyzer: Analyzer,
+			Pkg: types.NewPackage("sample", "sample"),
+			Fset: fset,
+			Files: []*ast.File{goFile},
+			Report: func(d analysis.Diagnostic) {
+				filenames = append(filenames, filepath.Base(fset.Position(d.Pos).Filename))
+			},
+		}
+		if _, err := run(pass); err != nil {
+			t.Fatal(err)
+		}
+		if len(filenames) < 2 {
+			t.Fatalf("want both source files to produce diagnostics, got %v", filenames)
+		}
+		firstB := -1
+		for index, name := range filenames {
+			if name == "b.hy" {
+				firstB = index
+				break
+			}
+		}
+		if firstB < 1 {
+			t.Fatalf("diagnostics not sorted by canonical source name: %v", filenames)
+		}
+		for _, name := range filenames[firstB:] {
+			if name != "b.hy" {
+				t.Fatalf("a.hy emitted after b.hy: %v", filenames)
+			}
+		}
 	}
 }
 
