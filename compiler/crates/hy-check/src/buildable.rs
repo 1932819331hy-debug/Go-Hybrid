@@ -63,6 +63,18 @@ use crate::model::{unwrap_parens, Checker};
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OpKind {
     Unknown,
+    /// A known interface type (`any`) — #682 U9-U12.
+    ///
+    /// Deliberately NOT `Unknown`. `Unknown` means "the checker could not
+    /// resolve this" and stays fail-open everywhere. `any` is a *resolved* type
+    /// that Go refuses to operate on: you cannot add to it, index it, select a
+    /// field from it, or call it. Treating the two identically is what let
+    /// those four classes through.
+    ///
+    /// Assigning *to* an `Interface` target stays legal (an interface accepts
+    /// any value), and assigning *from* one stays fail-open because type
+    /// assertions are not modelled.
+    Interface,
     Int,
     Float,
     Bool,
@@ -85,6 +97,7 @@ impl OpKind {
     fn label(&self) -> String {
         match self {
             OpKind::Unknown => "unknown".to_string(),
+            OpKind::Interface => "any".to_string(),
             OpKind::Int => "int".to_string(),
             OpKind::Float => "float64".to_string(),
             OpKind::Bool => "bool".to_string(),
@@ -118,6 +131,18 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     match (want, got) {
         // Fail-open: an unresolved side carries no claim.
         (Unknown, _) | (_, Unknown) => false,
+        // An interface target accepts ANY value (`var a any = 1; a = "str"`
+        // builds), so `Interface` on the `want` side is never a conflict.
+        // `Interface` on the `got` side is fail-open too: assigning an `any` to
+        // a concrete type needs a type assertion the kind model does not track,
+        // so it must not be rejected on kind evidence alone.
+        //
+        // Without this arm the U16 assignment check and the U9-U12 interface
+        // classification contradict each other: `a` of type `any` resolves to
+        // `Interface`, and `Interface` vs `Str` falls through to the mismatch
+        // arm below, so every assignment to an `any` target would be rejected.
+        // The accept-side corpus controls caught exactly that.
+        (Interface, _) | (_, Interface) => false,
         // No value is involved; a count check owns that case.
         (Void, _) | (_, Void) => false,
         // An untyped int constant is assignable to a float target
@@ -778,7 +803,26 @@ impl<'a> Collector<'a> {
                 let bk = self.kind_of_expr(base);
                 self.check_slice_kind(base, &bk, lo.as_deref(), hi.as_deref(), *span);
             }
-            Expr::Field { base, .. } => self.expr(base),
+            // #682 U10: Go refuses `a.nope` where `a` is `any`
+            // (`a.nope undefined (type any has no field or method nope)`).
+            // The struct-field lookup below cannot catch it, because an
+            // interface is not a struct — so reject the base explicitly.
+            Expr::Field { base, name, span } => {
+                if matches!(self.kind_of_expr(base), OpKind::Interface) {
+                    self.emit_e1002(
+                        *span,
+                        format!(
+                            "cannot select field `{}` on a value of type `any` — Go refuses `{}.{} undefined (type any has no field or method {})` (HYB-E1002)",
+                            name,
+                            base.render(),
+                            name,
+                            name
+                        ),
+                        "an `any` value must be asserted to a concrete type before its fields can be read",
+                    );
+                }
+                self.expr(base);
+            }
             Expr::Call {
                 callee, args, span, ..
             } => {
@@ -941,6 +985,9 @@ impl<'a> Collector<'a> {
             return self.kind_of_ty(target, depth + 1);
         }
         match name {
+            // #682 U9-U12: `any` is a resolved interface type, not an
+            // unresolved one, so it must not fall through to `Unknown`.
+            "any" | "interface{}" => OpKind::Interface,
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
             "float32" | "float64" | "f32" | "f64" => OpKind::Float,
