@@ -487,6 +487,18 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         );
                     }
                 }
+            } else if l.kind != LocalKind::Const {
+                // N1, untyped leg (HYB-E4003): a closure-body `var x = nil` /
+                // `x := nil` / `let x = nil` — same gap as the flat walk's
+                // process_local (no ascription → Unknown shape → the emitter
+                // emits `var x = nil`, which Go rejects). Local
+                // `const c = nil` is the E6003 constant-expression guard
+                // (issue #640) — different locus, do not double-fire.
+                for (name, value) in l.names.iter().zip(l.values.iter()) {
+                    if Checker::is_nil_literal(value) {
+                        ck.emit_untyped_nil_decl_error(name, value.span());
+                    }
+                }
             }
             for v in &l.values {
                 ck.check_composite_nils(st, v);

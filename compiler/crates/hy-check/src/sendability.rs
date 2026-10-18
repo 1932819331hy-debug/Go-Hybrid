@@ -907,6 +907,29 @@ impl<'a> Checker<'a> {
             .push(Diagnostic::error("HYB-E4001", self.path.clone(), span, msg).with_notes(notes));
     }
 
+    /// Emit HYB-E4003: an UNTYPED nil declaration — `var x = nil` / `x := nil`
+    /// / `let x = nil` (no ascription). The E4001 sites all require a declared
+    /// type to prove the nil against; with no ascription there is no type at
+    /// all, `shape_of_expr(nil)` is Unknown, and the checker used to accept the
+    /// declaration — then the emitter emitted `var x = nil`, which Go rejects
+    /// outright (`use of untyped nil in variable declaration`). nil has exactly
+    /// two homes (N1): `error` and the foreign-Go perimeter, and both must be
+    /// visible in a DECLARED type — an untyped nil can never name either.
+    pub(crate) fn emit_untyped_nil_decl_error(&mut self, name: &str, span: Span) {
+        let msg = format!(
+            "`{}` is declared from an untyped `nil`: Go rejects the emitted declaration (`use of untyped nil in variable declaration`)",
+            name
+        );
+        let notes = vec![
+            "why: nil has exactly two homes (N1) — `error` and the foreign-Go perimeter (N2) — and both must be visible in a DECLARED type; an untyped nil can never name either, so the emitted `var x = nil` fails `go build`".to_string(),
+            "fix: declare the nil home explicitly — `var e error = nil` (error's zero value) or `var h Foreign.handle = nil` at the foreign perimeter (N1/N2)".to_string(),
+            "fix: declare the binding without an initializer — the zero value of the intended type IS the value (N3): `var ch chan int` (zero channel), `var s []int` (zero slice), `var m map[string]int` (zero map)".to_string(),
+            "fix: if absence is the meaning, use `option[T]` — its zero value is `none` (N3)".to_string(),
+        ];
+        self.diags
+            .push(Diagnostic::error("HYB-E4003", self.path.clone(), span, msg).with_notes(notes));
+    }
+
     /// N1 for composite literals: `job{m: nil}` with a map-typed field used
     /// to pass the checker — classify_composite has no per-field type
     /// context, so the bare-nil check at the five direct-flow sites never

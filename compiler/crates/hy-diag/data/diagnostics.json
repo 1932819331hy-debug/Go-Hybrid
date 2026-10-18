@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated": "2026-10-15",
+  "updated": "2026-10-18",
   "format": "HYB-Exxxx registry (SPEC-LANGUAGE.md §9.6; append-only, never renumbered, never reused)",
   "categories": {
     "E0": "parse / lexical",
@@ -483,6 +483,22 @@
       ],
       "example": "var e option[int]   // reject: HYB-E4002 — option[T] has no zero value",
       "rule": "N"
+    },
+    {
+      "code": "HYB-E4003",
+      "name": "untyped-nil-declaration",
+      "category": "nil-safety",
+      "severity": "error",
+      "title": "an untyped nil cannot declare a binding",
+      "summary": "`var x = nil` / `x := nil` / `let x = nil` leave the binding with no type at all — Go rejects the emitted declaration outright (`use of untyped nil in variable declaration`), so an accepted program would fail `go build`. nil has exactly two homes (N1): `error` and the foreign-Go perimeter, and both must be visible in a declared type.",
+      "fixits": [
+        "declare the nil home explicitly: `var e error = nil` (error's zero value) or `var h Foreign.handle = nil` at the foreign perimeter (N1/N2)",
+        "declare the binding without an initializer — the zero value of the intended type is the value (N3): `var ch chan int`, `var s []int`, `var m map[string]int`",
+        "if absence is the meaning, use `option[T]` — its zero value is `none` (N3)"
+      ],
+      "example": "var x = nil   // reject: HYB-E4003 — Go: use of untyped nil in variable declaration",
+      "rule": "N",
+      "tier0_rule_id": "N1"
     },
     {
       "code": "HYB-E5001",
