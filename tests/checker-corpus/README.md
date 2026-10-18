@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 109 programs** — ACCEPT 34 · ACCEPT-MANAGED 2 ·
-REJECT 73 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 113 programs — ACCEPT 35 · ACCEPT-MANAGED 2 · REJECT 76 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 113 programs — ACCEPT 35 · ACCEPT-MANAGED 2 · REJECT 76 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -186,3 +186,5 @@ generic whose members the kind model cannot see, so the rule must fail open),
 `defer` on a builtin and on a method, and `append` with a variadic spread,
 multiple values, and an untyped int constant into a `[]float64`. Regression
 pins live in `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).
+With this registration the corpus is **113 programs: ACCEPT 35 ·
+ACCEPT-MANAGED 2 · REJECT 76**.
