@@ -976,6 +976,27 @@ impl<'a> Checker<'a> {
                     hy_syntax::TypeExpr::Named { name, .. } => Some(name.clone()),
                     _ => None,
                 });
+                // A struct literal spelled through a type alias (`type
+                // holder_alias = holder; h := holder_alias{m: nil}`) names the
+                // ALIAS here, but `self.structs` is keyed by the real
+                // declaration name — the raw lookup missed, and the nil-field
+                // sweep silently skipped every field of an alias-spelled
+                // literal while the same literal spelled directly rejected
+                // (#385, live probe 2026-10-18). Follow the alias chain to its
+                // root before the lookup; non-struct aliases resolve to a name
+                // that is simply absent from `structs`, same as before.
+                let sname = sname.map(|n| {
+                    let mut cur = n;
+                    for _ in 0..8 {
+                        match self.type_aliases.get(cur.as_str()) {
+                            Some(hy_syntax::TypeExpr::Named { name, .. }) if name != &cur => {
+                                cur = name.clone();
+                            }
+                            _ => break,
+                        }
+                    }
+                    cur
+                });
                 if let Some(sname) = sname.or_else(|| {
                     let shape = self.shape_of_expr(st, value);
                     match shape {
