@@ -808,3 +808,22 @@ reproduction line above is the merged tree.
 - Verdict: REJECT N1, exact diagnostic HYB-E4003. `var x = nil` / `x := nil` / `let x = nil` (no ascription) passed the checker with 0 diagnostics and emitted `var x = nil`, which Go rejects outright (`use of untyped nil in variable declaration`) - accepted-but-unbuildable (GUARANTEES row 13, BUILDABLE). nil has exactly two homes (N1): `error` and the foreign-Go perimeter, and both must be visible in a DECLARED type; an untyped nil can never name either.
 - Scope note: distinct from corpus 28 (nils nested in composite literals, which carry their own field/slot type context) and from the ascribed direct-nil E4001 sites (`var s []int = nil` - a declared type exists). Local `const c = nil` is the E6003 constant-expression guard's locus (issue #640; Go: "nil is not constant"), not E4003.
 - Unit pins: `hy-check/tests/untyped_nil_decl.rs` (13 tests: all four spellings, closure/loop/match-arm bodies, blank identifier; controls that stay accepted: ascribed error-nil, bare nil as call argument/compare, zero-value declarations).
+
+## Additive corpus registration — 2026-10-18: N5 zero maps
+
+- Program: `n5-zero-map-first-write.hy` (issue #645), registered with its
+  fix. Descriptive naming, as above.
+- Verdict: ACCEPT. Pins N5 / T8: first writes to a `var` zero map, a map
+  field of a zero-valued struct, a partially keyed literal, a nested
+  struct, an aliased map type, and `new(T)`. Before the fix it was accepted
+  with 0 diagnostics, built, and panicked with `assignment to entry in nil
+  map`.
+- N5 is tagged open D11 (keep vs Go-exact); this registers the spec as
+  written, and a D11 reversal amends this verdict here.
+- The header carries its single stdout line as a `// EXPECTED-OUTPUT:`
+  marker (the pr-441 single-line form); the stdout is diffed byte-exact by
+  the differential loop and by
+  `compiler/crates/hyb/tests/spec_n5_zero_maps.rs`.
+- No checker rule or existing verdict changes. Verified on the fixed tree:
+  81/81 verdict agreement, tripwire not fired; differential FULL 24+57;
+  ACCEPT 22 · ACCEPT-MANAGED 2 · REJECT 57.

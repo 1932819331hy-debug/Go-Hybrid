@@ -68,7 +68,7 @@ impl Emitter {
                     ty: None, fields, ..
                 } => {
                     let head = self.type_text(exp);
-                    let body = self.field_inits(fields)?;
+                    let body = self.struct_lit_body(exp, fields)?;
                     return Ok(format!("{}{{{}}}", head, body)); // atomic head
                 }
                 Expr::SliceLit {
@@ -202,7 +202,7 @@ impl Emitter {
             Expr::StructLit { ty, fields, .. } => {
                 if let Some(t) = ty {
                     let head = self.type_text(t);
-                    let body = self.field_inits(fields)?;
+                    let body = self.struct_lit_body(t, fields)?;
                     Ok(format!("{}{{{}}}", head, body))
                 } else {
                     Err(EmitError::unsupported(
@@ -466,6 +466,27 @@ impl Emitter {
         Ok((format_str, args))
     }
 
+    /// A struct literal's keyed fields plus, for a user struct, the N5
+    /// allocation of every map-carrying field the literal leaves at its
+    /// zero value (`bag{}` → `bag{counts: map[string]int{}}`, issue #645).
+    fn struct_lit_body(
+        &mut self,
+        ty: &TypeExpr,
+        fields: &[FieldInit],
+    ) -> Result<String, EmitError> {
+        let body = self.field_inits(fields)?;
+        let extra = self.n5_missing_fields(ty, fields);
+        if extra.is_empty() {
+            return Ok(body);
+        }
+        let mut parts = Vec::new();
+        if !body.is_empty() {
+            parts.push(body);
+        }
+        parts.extend(extra);
+        Ok(parts.join(", "))
+    }
+
     fn field_inits(&mut self, fields: &[FieldInit]) -> Result<String, EmitError> {
         let mut parts = Vec::new();
         for f in fields {
@@ -622,6 +643,13 @@ impl Emitter {
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
         if matches!(callee, Expr::Ident { name, .. } if name == "make") {
             return self.emit_make(args);
+        }
+        // --- new(T) whose zero value allocates maps (N5, issue #645) ---
+        let is_new = matches!(callee, Expr::Ident { name, .. } if name == "new");
+        if is_new && !self.local_vars.contains("new") && !self.fn_shapes.contains_key("new") {
+            if let Some(alloc) = self.n5_new(args) {
+                return Ok(alloc);
+            }
         }
 
         // --- package-qualified calls ---
