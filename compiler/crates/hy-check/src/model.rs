@@ -714,6 +714,9 @@ pub(crate) struct Checker<'a> {
     pub total_sites: usize,
     // Row 14 (discussion #4): every managed block's payload, for the audit.
     pub managed_audit: Vec<ManagedBlockAudit>,
+    /// Names each enclosing closure body rebinds, innermost last — the
+    /// emit-guard deep walk skips them (addressable.rs).
+    pub closure_bound: Vec<HashSet<String>>,
 }
 
 /// Row 14 (discussion #4): the CLOSED category set — the invariant a
@@ -749,6 +752,7 @@ impl<'a> Checker<'a> {
             sites_via_managed: 0,
             total_sites: 0,
             managed_audit: Vec::new(),
+            closure_bound: Vec::new(),
         }
     }
 

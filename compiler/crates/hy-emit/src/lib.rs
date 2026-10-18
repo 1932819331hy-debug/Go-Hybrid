@@ -359,7 +359,9 @@ pub struct Emitter {
     /// Map-slot loans (O8): `x := &m[k]` cannot be a Go map-index address,
     /// so it lowers to a COPY read now + store-back at the loan's block end
     /// (O9's honesty: Go-heap reads are copies). Frames are block-scoped:
-    /// a loan flushes at the end of the block that declared it.
+    /// a loan flushes at the end of the block that declared it. Each entry
+    /// is (loan variable, its store-back statement): `m[k] = n`, or
+    /// `m[k] = *n` when `n` is a pointer-typed binding.
     loan_frames: Vec<Vec<(String, String)>>,
     /// #546: outer slot loans handed down into the branches of an `if`
     /// whose branches spawn/send using the loan's base. Every branch body

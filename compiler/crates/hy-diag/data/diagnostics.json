@@ -221,6 +221,21 @@
       "rule": "BUILDABLE"
     },
     {
+      "code": "HYB-E2010",
+      "name": "map-element-not-addressable",
+      "category": "type",
+      "severity": "error",
+      "title": "store into part of a map element",
+      "summary": "A Go map element is not addressable: `m[k] = v` is legal, but a store into part of the element — `m[k].f = v`, `m[k].f += 1`, `m[k].f++`, `m[k][i] = v` on an array element, `m[k].arr[i] = v` — and an O8 loan whose store-back place is part of one (`n := &m[k].f`) emit Go that fails `go build` (`cannot assign to struct field m[k].f in map` / `neither addressable nor a map index expression`), violating the accepted-should-emit-buildable-Go contract. Only proven shapes reject: a pointer-typed or unresolved element stays legal.",
+      "fixits": [
+        "take the whole slot as an O8 loan and store through it: `n := &m[k]; n.f = v`",
+        "copy the element out, modify it, and assign it back: `e := m[k]; e.f = v; m[k] = e`"
+      ],
+      "example": "m[\"a\"].bal = 9   // reject: HYB-E2010 — write `n := &m[\"a\"]; n.bal = 9`",
+      "rule": "BUILDABLE",
+      "tier0_rule_id": "BUILDABLE"
+    },
+    {
       "code": "HYB-E3001",
       "name": "not-sendable-spawn",
       "category": "ownership-sendability",
