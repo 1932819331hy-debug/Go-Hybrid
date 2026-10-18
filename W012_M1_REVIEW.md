@@ -2,7 +2,11 @@
 
 ## Latest hosted validation (2026-10-18)
 
-The [current GitHub Actions M1 parity run](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39143438366), against the PR head `fef92eecf31ee1c3fe383a2953e17ea1840b9ff0` merged with its then-current base, **passed 79/79 checker-corpus fixtures and 79/79 full native/WASM normalized envelopes**, plus `go test -race -count=1 ./...` and `go vet ./...`. The [separate compiler CI](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39143438385) also passed. The fixture count is tied to this specific tested merge, not a promise about future upstream corpus size.
+The [latest hosted M1 parity workflow](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39169356538), against PR head `e029d661d8ce7f79e7f362a7ee97bf3251d6a274` merged with its then-current base, passed **113/113 checker-corpus fixture agreements** and **113/113 complete normalized native/WASM JSON-envelope comparisons**. Its `go test -race -count=1 ./...` and `go vet ./...` steps succeeded. The [independent compiler CI](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39169356527) passed as well.
+
+This latest head fails closed on unreadable declared `.hy` files rather than silently skipping them; it also canonicalizes file names to prevent duplicate diagnostic reports and emits diagnostics in deterministic path order. Regression tests for the read-failure, path-alias, and ordering cases ran in hosted CI. The 113-fixture count describes this specific tested merge, not future upstream corpus revisions.
+
+**Prior hosted snapshot:** [run 39143438366](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39143438366) passed 79/79 at `fef92eecf31ee1c3fe383a2953e17ea1840b9ff0`.
 
 That head also adds a **30-second fail-closed limit to the public `Engine.Check`** and a cancellable `CheckContext` for embedding hosts. Context-log snapshots copy all slice backing arrays, and cancellation, subsequent runtime reuse, and snapshot isolation have regression tests. Hosted green CI establishes the tested behavior, not unsaved-buffer, LSP, or interactive editor integration.
 
