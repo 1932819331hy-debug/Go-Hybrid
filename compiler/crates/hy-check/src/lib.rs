@@ -276,7 +276,10 @@ fn build_tables(ck: &mut Checker<'_>) {
             Decl::Const(c) => {
                 if let Some(ty) = &c.ty {
                     ck.check_type_expr(ty);
+                    ck.check_local_array_lit_len_match(ty, &c.value);
                 }
+                ck.check_expr_emit_guard(&FnState::default(), &c.value);
+                ck.check_composite_nils(&FnState::default(), &c.value);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
             }

@@ -1252,7 +1252,7 @@ impl Emitter {
                     let n = self.expr_text_static(e);
                     format!("[{}]{}", n, self.type_text(elem))
                 }
-                None => format!("[]{}", self.type_text(elem)), // [...]T → slice at emission
+                None => format!("[...]{}", self.type_text(elem)),
             },
             TypeExpr::Map { key, value, .. } => {
                 format!("map[{}]{}", self.type_text(key), self.type_text(value))

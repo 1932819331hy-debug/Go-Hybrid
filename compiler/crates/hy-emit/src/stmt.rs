@@ -2824,9 +2824,14 @@ impl Emitter {
             Expr::StructLit { fields, .. } => fields
                 .iter()
                 .any(|f| Self::expr_mentions_ident(&f.value, target)),
-            Expr::SliceLit { items, .. } => items
-                .iter()
-                .any(|x| Self::expr_mentions_ident(x, target)),
+            Expr::SliceLit { items, .. } => {
+                e.as_array_lit()
+                    .and_then(|(len, _, _)| len)
+                    .is_some_and(|l| Self::expr_mentions_ident(l, target))
+                    || items
+                        .iter()
+                        .any(|x| Self::expr_mentions_ident(x, target))
+            }
             Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
                 Self::expr_mentions_ident(k, target) || Self::expr_mentions_ident(v, target)
             }),
