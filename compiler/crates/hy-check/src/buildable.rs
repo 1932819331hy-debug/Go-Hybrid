@@ -45,12 +45,13 @@
 
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    AssignOp, BinOp, Block, CallArg, Decl, Expr, File, FnDecl, ForKind, InterpPart, LitKind,
-    LocalDecl, LocalKind, MatchPattern, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr, UnOp,
+    AssignOp, BinOp, Block, CallArg, Decl, Expr, FieldInit, File, FnDecl, ForKind, InterpPart,
+    LitKind, LocalDecl, LocalKind, MatchPattern, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr,
+    UnOp,
 };
 use std::collections::{HashMap, HashSet};
 
-use crate::model::{unwrap_parens, Checker};
+use crate::model::{as_addr_of, unwrap_parens, Checker};
 
 /// Lightweight operand-kind classification for issue #425: distinguishes
 /// `Int`, `Float`, and `Bool` (which `TypeShape::Primitive` collapses) so
@@ -62,6 +63,18 @@ use crate::model::{unwrap_parens, Checker};
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OpKind {
     Unknown,
+    /// A known interface type (`any`) — #682 U9-U12.
+    ///
+    /// Deliberately NOT `Unknown`. `Unknown` means "the checker could not
+    /// resolve this" and stays fail-open everywhere. `any` is a *resolved* type
+    /// that Go refuses to operate on: you cannot add to it, index it, select a
+    /// field from it, or call it. Treating the two identically is what let
+    /// those four classes through.
+    ///
+    /// Assigning *to* an `Interface` target stays legal (an interface accepts
+    /// any value), and assigning *from* one stays fail-open because type
+    /// assertions are not modelled.
+    Interface,
     Int,
     Float,
     Bool,
@@ -84,6 +97,7 @@ impl OpKind {
     fn label(&self) -> String {
         match self {
             OpKind::Unknown => "unknown".to_string(),
+            OpKind::Interface => "any".to_string(),
             OpKind::Int => "int".to_string(),
             OpKind::Float => "float64".to_string(),
             OpKind::Bool => "bool".to_string(),
@@ -98,6 +112,58 @@ impl OpKind {
             OpKind::Fn(_) => "fn".to_string(),
             OpKind::Void => "void".to_string(),
         }
+    }
+}
+
+/// Does a value of kind `got` fail to satisfy a declared type of kind `want`,
+/// in a way Go rejects at build time (#682)?
+///
+/// Deliberately conservative, because this is an accept-side check: every
+/// "unknown" stays permissive, and the one legal implicit numeric conversion
+/// is allowed. `false` means "not provably a build failure", not "provably
+/// fine".
+///
+/// NOTE: open PR #620 introduces this same helper for return-statement
+/// checking. Whichever of the two lands second should drop one copy — the two
+/// are textually identical on purpose.
+fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
+    use OpKind::*;
+    match (want, got) {
+        // Fail-open: an unresolved side carries no claim.
+        (Unknown, _) | (_, Unknown) => false,
+        // An interface target accepts ANY value (`var a any = 1; a = "str"`
+        // builds), so `Interface` on the `want` side is never a conflict.
+        // `Interface` on the `got` side is fail-open too: assigning an `any` to
+        // a concrete type needs a type assertion the kind model does not track,
+        // so it must not be rejected on kind evidence alone.
+        //
+        // Without this arm the U16 assignment check and the U9-U12 interface
+        // classification contradict each other: `a` of type `any` resolves to
+        // `Interface`, and `Interface` vs `Str` falls through to the mismatch
+        // arm below, so every assignment to an `any` target would be rejected.
+        // The accept-side corpus controls caught exactly that.
+        (Interface, _) | (_, Interface) => false,
+        // No value is involved; a count check owns that case.
+        (Void, _) | (_, Void) => false,
+        // An untyped int constant is assignable to a float target
+        // (`var f float64 = 1` builds). The kind model cannot tell an untyped
+        // constant from an `int` variable, so this direction must stay allowed
+        // or the check would reject buildable programs.
+        (Float, Int) => false,
+        // A struct whose name did not resolve is not evidence of a mismatch.
+        (Struct(None), _) | (_, Struct(None)) => false,
+        (a, b) if a == b => false,
+        // Same container shape: recurse into the element kinds.
+        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
+            kinds_conflict(a, b)
+        }
+        (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
+        (Pointer(a), Pointer(b)) => kinds_conflict(a, b),
+        // Fn kinds only carry results here, so a result match is not proof of
+        // a signature match; stay permissive.
+        (Fn(..), Fn(..)) => false,
+        // Everything else is a shape or scalar-family mismatch Go refuses.
+        _ => true,
     }
 }
 
@@ -737,7 +803,26 @@ impl<'a> Collector<'a> {
                 let bk = self.kind_of_expr(base);
                 self.check_slice_kind(base, &bk, lo.as_deref(), hi.as_deref(), *span);
             }
-            Expr::Field { base, .. } => self.expr(base),
+            // #682 U10: Go refuses `a.nope` where `a` is `any`
+            // (`a.nope undefined (type any has no field or method nope)`).
+            // The struct-field lookup below cannot catch it, because an
+            // interface is not a struct — so reject the base explicitly.
+            Expr::Field { base, name, span } => {
+                if matches!(self.kind_of_expr(base), OpKind::Interface) {
+                    self.emit_e1002(
+                        *span,
+                        format!(
+                            "cannot select field `{}` on a value of type `any` — Go refuses `{}.{} undefined (type any has no field or method {})` (HYB-E1002)",
+                            name,
+                            base.render(),
+                            name,
+                            name
+                        ),
+                        "an `any` value must be asserted to a concrete type before its fields can be read",
+                    );
+                }
+                self.expr(base);
+            }
             Expr::Call {
                 callee, args, span, ..
             } => {
@@ -747,13 +832,14 @@ impl<'a> Collector<'a> {
                 }
                 self.check_call_operands(callee, args, *span);
             }
-            Expr::StructLit { ty, fields, .. } => {
+            Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
                     self.ty(t);
                 }
                 for f in fields {
                     self.expr(&f.value);
                 }
+                self.check_struct_literal(ty.as_ref(), fields, *span);
             }
             Expr::SliceLit { elem, items, .. } => {
                 if let Some(t) = elem {
@@ -902,6 +988,9 @@ impl<'a> Collector<'a> {
             return self.kind_of_ty(target, depth + 1);
         }
         match name {
+            // #682 U9-U12: `any` is a resolved interface type, not an
+            // unresolved one, so it must not fall through to `Unknown`.
+            "any" | "interface{}" => OpKind::Interface,
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
             "float32" | "float64" | "f32" | "f64" => OpKind::Float,
@@ -1215,6 +1304,111 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// #682 U14/U15 — a struct literal may only name fields the struct
+    /// declares, once each, with a value assignable to the field's type. Go
+    /// refuses the emitted literal otherwise (`unknown field`, `duplicate
+    /// field name`, `cannot use ... as ... value in struct literal`).
+    ///
+    /// Fail-open everywhere the kind model cannot prove a mismatch: an
+    /// unresolved struct name, an `Unknown` value kind, and an `Unknown`
+    /// field type all stay silent.
+    fn check_struct_literal(
+        &mut self,
+        ty: Option<&TypeExpr>,
+        fields: &[FieldInit],
+        span: Span,
+    ) {
+        let Some(t) = ty else { return };
+        let sk = self.kind_of_ty(t, 0);
+        let Some(sname) = self.struct_name(&sk) else {
+            return;
+        };
+        // Clone: the diagnostics below need `&mut self` while the declaration
+        // table is borrowed from it.
+        let Some(declared) = self.ck.structs.get(&sname).cloned() else {
+            return;
+        };
+
+        // U15: a name repeated in one literal. Reported once per name, on the
+        // second and later occurrences.
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for f in fields {
+            let n = seen.entry(f.name.clone()).or_insert(0);
+            *n += 1;
+            if *n == 2 {
+                self.emit_e1002(
+                    f.span,
+                    format!(
+                        "duplicate field `{}` in `{}` literal — Go refuses `duplicate field name {} in struct literal` (HYB-E1002)",
+                        f.name, sname, f.name
+                    ),
+                    "each field may be set at most once in one struct literal",
+                );
+            }
+        }
+
+        // U14 + value type: unknown names, then assignability.
+        for f in fields {
+            match declared.iter().find(|(n, _)| n == &f.name) {
+                None => self.emit_e1002(
+                    f.span,
+                    format!(
+                        "unknown field `{}` in `{}` literal — Go refuses `unknown field {} in struct literal of type {}` (HYB-E1002)",
+                        f.name, sname, f.name, sname
+                    ),
+                    "a struct literal may only name fields the struct declares",
+                ),
+                Some((_, fty)) => {
+                    let want = self.kind_of_ty(fty, 0);
+                    let got = self.kind_of_expr(&f.value);
+                    if kinds_conflict(&want, &got) {
+                        self.emit_e1002(
+                            f.value.span(),
+                            format!(
+                                "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
+                                got.label(),
+                                f.name,
+                                sname,
+                                want.label(),
+                                want.label()
+                            ),
+                            "the field's declared type is fixed; write an explicit conversion when a conversion is intended",
+                        );
+                    }
+                }
+            }
+        }
+        let _ = span;
+    }
+
+    /// #682 U13 — a type conversion takes exactly one argument. Go refuses
+    /// `int(1, 2)` with `too many arguments in conversion to int`.
+    ///
+    /// Only fires for a bare identifier that resolves to a KNOWN type. That
+    /// check does the filtering for free: `kind_of_named("int")` is `Int`,
+    /// while a builtin name (`len`, `append`, `make`, ...) is not a type and
+    /// resolves to `Unknown`, so builtins keep their own arity rules
+    /// (`builtins.rs`, `HYB-E2005`) and user functions keep `check_user_fn_arity`.
+    fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
+        let k = self.kind_of_named(name, 0);
+        if matches!(k, OpKind::Unknown) {
+            return;
+        }
+        if args.len() == 1 {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "a conversion to `{}` takes exactly 1 argument, found {} — Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
+                name,
+                args.len(),
+                name
+            ),
+            "a type conversion has the form `T(x)`: exactly one argument",
+        );
+    }
+
     /// Family A (#425): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
         let k = self.kind_of_expr(cond);
@@ -1409,7 +1603,41 @@ impl<'a> Collector<'a> {
         };
         let tk = self.kind_of_place(target);
         match op {
-            AssignOp::Assign => {}
+            // #682 U16: plain `=` requires the value to be assignable to the
+            // target. Only the single-target/single-value form is checked
+            // positionally; a multi-value right-hand side (`a, b = f()`) is
+            // left to the call-shape rules.
+            AssignOp::Assign => {
+                if targets.len() == 1 && values.len() == 1 {
+                    // O8 slot-loan (adapted during integration): `q = &m["a"]`
+                    // on a value-typed `q` does NOT emit `q = &m["a"]` — the
+                    // emitter lowers the loan to `q = m["a"]` plus a store-back
+                    // into the slot, so a `Struct` target receiving a
+                    // `Pointer` value here is legal Hybrid, not a mismatch
+                    // (map_element_addressable's
+                    // accepts_slot_loan_into_value_var pins the shape).
+                    // Fail open for exactly that shape: an addr-of whose
+                    // operand is an index or field place. Loans are validated
+                    // for addressability by addressable.rs (HYB-E2010), so
+                    // the non-addressable ones still reject.
+                    let is_loan_shape = as_addr_of(&values[0])
+                        .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
+                    let vk = self.kind_of_expr(&values[0]);
+                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                vk.label(),
+                                target.render(),
+                                tk.label(),
+                                tk.label()
+                            ),
+                            "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
+                        );
+                    }
+                }
+            }
             AssignOp::Inc | AssignOp::Dec => {
                 let op_str = if matches!(op, AssignOp::Inc) { "++" } else { "--" };
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float) {
@@ -1674,6 +1902,7 @@ impl<'a> Collector<'a> {
                     }
                 } else {
                     self.check_builtin_operand_kinds(name, args, span);
+                    self.check_conversion_arity(name, args, span);
                 }
             }
             Expr::Field { base, name, .. } => {
