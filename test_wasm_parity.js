@@ -30,11 +30,19 @@ async function main() {
 
         const outPtr = Number(packed >> 32n);
         const outLen = Number(packed & 0xFFFFFFFFn);
+        if (outPtr === 0 || outLen === 0) {
+            throw new Error(`invalid WASM output buffer: ptr=${outPtr}, len=${outLen}`);
+        }
 
-        const outSlice = new Uint8Array(memory.buffer, outPtr, outLen);
+        // Copy before returning ownership to the guest allocator. Keeping a
+        // Uint8Array view after hy_wasm_free would make the harness depend on
+        // freed linear memory and would leak every output buffer across the
+        // corpus loop.
+        const outCopy = new Uint8Array(new Uint8Array(memory.buffer, outPtr, outLen));
+        hy_wasm_free(outPtr, outLen);
+
         const decoder = new TextDecoder();
-        const jsonStr = decoder.decode(outSlice);
-
+        const jsonStr = decoder.decode(outCopy);
         return JSON.parse(jsonStr);
     }
 
