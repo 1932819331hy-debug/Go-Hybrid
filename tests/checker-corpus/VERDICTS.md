@@ -940,3 +940,40 @@ KonstantinPythonLab.)
 - Verified on the merged tree: 109/109 verdict agreement, tripwire not fired;
   differential reject-side 70/70, accept-side 35/37 (the 2 are the known
   cgo-bridge programs); cargo test --workspace green.
+## Additive corpus registration — 2026-10-18: the #577 C9/C10 call-and-return rules
+
+The Go-toolchain oracle (#577, implementing wildcard #565) measured a 38.03%
+accept-side residual on generated programs and named `call_and_return` its
+worst family: **63.33%** — 19 of 30 accepted programs failed `go build`. This
+registration pins the two classes it enumerates, **C9** (call arity) and
+**C10** (return statements), on both sides: three reject fixtures, one per
+closed shape, and one ACCEPT control holding the legal neighbours the rule must
+not touch. All three rejects are `HYB-E1002` (`BUILDABLE`, GUARANTEES.md
+Row 13) — accepting the file lets the emitted Go fail `go build`, which is
+exactly what the row forbids.
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| call-arity-mismatch-reject | REJECT | Row 13 | `HYB-E1002` | `add(1)` for `fn add(a int, b int) int` — Go refuses `not enough arguments in call to add`. The same class covers `add(1, 2, 3)`, `x.bump()` (the receiver is not an argument) and `f(1, 2)` on a closure or `fn`-typed value |
+| return-value-count-reject | REJECT | Row 13 | `HYB-E1002` | `f` declares two unnamed results and `return 1` supplies one: neither legal short form applies (Go's naked `return` needs EVERY result named — corpus 63; the emitter zero-fills only an `error` tail — corpus 13) |
+| return-type-mismatch-reject | REJECT | Row 13 | `HYB-E1002` | `return "not-an-int"` from a function whose result is `int` — Go has no implicit conversion between the string and numeric families. The container forms (a `[]string` returned from a `[]int` function, a map from a slice function, struct `q` from a `p`) are the same rule |
+| call-and-return-controls-accept | ACCEPT | — | — | the legal neighbours: one argument per parameter for a function, a method (receiver not an argument) and a closure; Go's multi-value `return f()`; an untyped int constant returned from a `float64` function — which is why `Int` into a float result must stay allowed; matching container shapes; an interface result |
+
+The ACCEPT control is the reason this batch is safe to land. The rule's first
+draft rejected both legal short-return shapes and the fixture is what pinned
+them: a naked `return` with all-named results (corpus 63) and the emitter's
+zero-filled short return in an `error`-tail signature (corpus 13).
+
+Rules live in `hy-check/tests/call_arity_and_return_types.rs` (11 tests); the
+checker change is `buildable.rs::check_user_fn_arity`, `check_method_arity`,
+`report_local_arity`, `check_return` and `kinds_conflict`. Every reject was
+reproduced as a real `go build` failure against the emitted Go before its
+fixture was committed, and every shape in the ACCEPT control was verified to
+build.
+
+Reproduction (checker built from the branch tree, pinned rustc 1.99.0 /
+go1.26.9): `python3 tools/corpus_harness.py --bin <hyb>` reports **109/109
+verdict agreement, tripwire not fired**.
+
+With this registration the corpus is **109 programs: ACCEPT 34 ·
+ACCEPT-MANAGED 2 · REJECT 73** — main's 105 plus these four.
