@@ -682,6 +682,8 @@ pub(crate) struct Checker<'a> {
     pub path: String,
     /// struct name -> (field name, field type) — file-level struct decls.
     pub structs: HashMap<String, Vec<(String, TypeExpr)>>,
+    /// struct name -> declared type parameters (including empty-field structs, #722).
+    pub struct_type_params: HashMap<String, Vec<hy_syntax::TypeParam>>,
     /// enum name -> declared variant names in source order (T13/T14 HYB-E5001).
     pub enums: HashMap<String, Vec<String>>,
     /// enum name -> whether the first variant is payload-free (N3 HYB-E4002).
@@ -739,6 +741,7 @@ impl<'a> Checker<'a> {
             file,
             path: file.path.clone(),
             structs: HashMap::new(),
+            struct_type_params: HashMap::new(),
             enums: HashMap::new(),
             enum_has_zero_value: HashMap::new(),
             type_aliases: HashMap::new(),

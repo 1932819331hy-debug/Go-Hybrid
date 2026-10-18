@@ -483,6 +483,11 @@ impl<'a> Collector<'a> {
         if let Some(r) = &f.receiver {
             self.exempt(&r.name);
             let rk = self.kind_of_ty(&r.ty, 0);
+            let rk = if r.is_pointer {
+                OpKind::Pointer(Box::new(rk))
+            } else {
+                rk
+            };
             self.bind_kind(&r.name, rk);
         }
         for p in &f.params {
@@ -577,6 +582,15 @@ impl<'a> Collector<'a> {
                 continue;
             }
             if name == "_" {
+                continue;
+            }
+            let existing_let = self
+                .scopes
+                .last()
+                .and_then(|top| top.get(name.as_str()).copied().flatten())
+                .is_some_and(|id| self.defines[id].kind == LocalKind::Let);
+            if existing_let {
+                self.emit_let_reassign_error(name, l.span);
                 continue;
             }
             let Some(top) = self.scopes.last_mut() else {
@@ -844,6 +858,24 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn emit_let_reassign_error(&mut self, name: &str, span: Span) {
+        self.diags.push(
+            Diagnostic::error(
+                "HYB-E3006",
+                self.path.clone(),
+                span,
+                format!(
+                    "cannot assign to `{}` — it is a `let` binding (immutable binding, T22) (HYB-E3006)",
+                    name
+                ),
+            )
+            .with_notes(vec![
+                "`let` declares an immutable binding: reassigning `x = ...`, `x += ...`, or `x++` is rejected (SPEC-LANGUAGE T22 / D14)".to_string(),
+                "declare with `var x = ...` or `x := ...` if the binding must be reassigned".to_string(),
+            ]),
+        );
+    }
+
     fn place_read(&mut self, p: &Place) {
         match &p.kind {
             PlaceKind::Ident(n) => self.read(n),
@@ -852,7 +884,7 @@ impl<'a> Collector<'a> {
                 self.expr(index);
                 let bk = self.kind_of_place(base);
                 let ik = self.kind_of_expr(index);
-                self.check_index_kind(&base.render(), &bk, index, &ik, p.span);
+                self.check_index_kind(&base.render(), None, &bk, index, &ik, p.span);
             }
             PlaceKind::Field { base, .. } => self.place_read(base),
             PlaceKind::AddrOf { base } => self.place_read(base),
@@ -896,7 +928,7 @@ impl<'a> Collector<'a> {
                 self.expr(index);
                 let bk = self.kind_of_expr(base);
                 let ik = self.kind_of_expr(index);
-                self.check_index_kind(&base.render(), &bk, index, &ik, *span);
+                self.check_index_kind(&base.render(), Some(base.as_ref()), &bk, index, &ik, *span);
             }
             Expr::Slice {
                 base, lo, hi, span, ..
@@ -1047,10 +1079,9 @@ impl<'a> Collector<'a> {
 
     fn ty(&mut self, t: &TypeExpr) {
         match t {
-            TypeExpr::Named { name, .. } => {
-                if let Some((root, _)) = name.split_once('.') {
-                    self.roots.insert(root.to_string());
-                }
+            TypeExpr::Named { name, span } => {
+                self.record_type_name_roots(name);
+                self.check_named_type_instantiation(name, *span);
             }
             TypeExpr::Pointer { to, .. } => self.ty(to),
             TypeExpr::Slice { elem, .. } => self.ty(elem),
@@ -1076,6 +1107,84 @@ impl<'a> Collector<'a> {
                     self.ty(r);
                 }
             }
+        }
+    }
+
+    fn record_type_name_roots(&mut self, name: &str) {
+        for seg in name.split(|c: char| matches!(c, '[' | ']' | ',' | '*' | ' ')) {
+            let seg = seg.trim();
+            if let Some((root, _)) = seg.split_once('.') {
+                if !root.is_empty() {
+                    self.roots.insert(root.to_string());
+                }
+            }
+        }
+    }
+
+    fn check_named_type_instantiation(&mut self, name: &str, span: Span) {
+        let name = name.trim();
+        if let Some(rest) = name
+            .strip_prefix('*')
+            .or_else(|| name.strip_prefix("[]"))
+            .or_else(|| name.strip_prefix("[...]"))
+            .or_else(|| name.strip_prefix("<-chan "))
+            .or_else(|| name.strip_prefix("chan<- "))
+            .or_else(|| name.strip_prefix("chan "))
+        {
+            self.check_named_type_instantiation(rest, span);
+            return;
+        }
+        let (head, inner_opt) = match name.find('[') {
+            Some(i) if name.ends_with(']') => (&name[..i], Some(&name[i + 1..name.len() - 1])),
+            _ => (name, None),
+        };
+        if let Some(inner) = inner_opt {
+            for arg in split_top_level_type_args(inner) {
+                self.check_named_type_instantiation(arg, span);
+            }
+        }
+        if head == "set" || head == "option" || head == "map" {
+            return;
+        }
+        let Some(tparams) = self.ck.struct_type_params.get(head) else {
+            return;
+        };
+        let expected = tparams.len();
+        match (expected, inner_opt) {
+            (0, Some(_)) => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` is not a generic type — cannot instantiate `{}` with type arguments (HYB-E1002)",
+                        head, name
+                    ),
+                    "remove the `[...]` type arguments or declare type parameters on the struct",
+                );
+            }
+            (n, None) if n > 0 => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot use generic struct `{}` without type arguments (expected {}) — Go refuses `cannot use generic type {} without instantiation` (HYB-E1002)",
+                        head, n, head
+                    ),
+                    "instantiate the generic struct with explicit type arguments (e.g. `box[int]`)",
+                );
+            }
+            (n, Some(inner)) if n > 0 => {
+                let got = split_top_level_type_args(inner).len();
+                if got != n {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "wrong number of type arguments for `{}` in `{}`: expected {}, found {} (HYB-E1002)",
+                            head, name, n, got
+                        ),
+                        "supply one type argument per declared type parameter on the struct",
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1118,9 +1227,10 @@ impl<'a> Collector<'a> {
         if depth > 8 {
             return OpKind::Unknown;
         }
+        let name = name.trim();
         let base = Checker::base_named_type_str(name);
-        if self.ck.structs.contains_key(base) {
-            return OpKind::Struct(Some(base.to_string()));
+        if self.ck.structs.contains_key(base) || self.ck.struct_type_params.contains_key(base) {
+            return OpKind::Struct(Some(name.to_string()));
         }
         if let Some(target) = self.ck.type_aliases.get(base) {
             return self.kind_of_ty(target, depth + 1);
@@ -1137,6 +1247,98 @@ impl<'a> Collector<'a> {
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
             _ => OpKind::Unknown,
         }
+    }
+
+    fn kind_of_type_str(&self, s: &str, depth: usize) -> OpKind {
+        if depth > 8 {
+            return OpKind::Unknown;
+        }
+        let s = s.trim();
+        if let Some(rest) = s.strip_prefix('*') {
+            return OpKind::Pointer(Box::new(self.kind_of_type_str(rest, depth + 1)));
+        }
+        if let Some(rest) = s.strip_prefix("[]") {
+            return OpKind::Slice(Box::new(self.kind_of_type_str(rest, depth + 1)));
+        }
+        if let Some(rest) = s.strip_prefix("[...]") {
+            return OpKind::Array(Box::new(self.kind_of_type_str(rest, depth + 1)));
+        }
+        if let Some(rest) = s
+            .strip_prefix("<-chan ")
+            .or_else(|| s.strip_prefix("chan<- "))
+            .or_else(|| s.strip_prefix("chan "))
+        {
+            return OpKind::Chan(Box::new(self.kind_of_type_str(rest, depth + 1)));
+        }
+        self.kind_of_named(s, depth)
+    }
+
+    fn kind_of_ty_with_subst(
+        &self,
+        ty: &TypeExpr,
+        subst: &HashMap<String, String>,
+        depth: usize,
+    ) -> OpKind {
+        if depth > 8 {
+            return OpKind::Unknown;
+        }
+        if subst.is_empty() {
+            return self.kind_of_ty(ty, depth);
+        }
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                if let Some(arg) = subst.get(name.as_str()) {
+                    return self.kind_of_type_str(arg, depth + 1);
+                }
+                self.kind_of_named(name, depth)
+            }
+            TypeExpr::Pointer { to, .. } => {
+                OpKind::Pointer(Box::new(self.kind_of_ty_with_subst(to, subst, depth + 1)))
+            }
+            TypeExpr::Slice { elem, .. } => {
+                OpKind::Slice(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
+            }
+            TypeExpr::Array { elem, .. } => {
+                OpKind::Array(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
+            }
+            TypeExpr::Map { key, value, .. } => OpKind::Map(
+                Box::new(self.kind_of_ty_with_subst(key, subst, depth + 1)),
+                Box::new(self.kind_of_ty_with_subst(value, subst, depth + 1)),
+            ),
+            TypeExpr::Chan { elem, .. } => {
+                OpKind::Chan(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
+            }
+            TypeExpr::Option { .. } => OpKind::Unknown,
+            TypeExpr::Fn { results, .. } => OpKind::Fn(
+                results
+                    .iter()
+                    .map(|r| self.kind_of_ty_with_subst(r, subst, depth + 1))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn struct_type_arg_map(&self, full_name: &str) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        let Some(open) = full_name.find('[') else {
+            return map;
+        };
+        if !full_name.ends_with(']') {
+            return map;
+        }
+        let base = &full_name[..open];
+        let inner = &full_name[open + 1..full_name.len() - 1];
+        let Some(tparams) = self.ck.struct_type_params.get(base) else {
+            return map;
+        };
+        let args = split_top_level_type_args(inner);
+        if args.len() != tparams.len() {
+            return map;
+        }
+        for (tp, arg) in tparams.iter().zip(args.into_iter()) {
+            map.insert(tp.name.clone(), arg.to_string());
+        }
+        map
     }
 
     fn kind_of_place(&self, p: &Place) -> OpKind {
@@ -1168,13 +1370,20 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn struct_base_name(&self, k: &OpKind) -> Option<String> {
+        self.struct_name(k)
+            .map(|s| Checker::base_named_type_str(&s).to_string())
+    }
+
     fn struct_field_kind(&self, k: &OpKind, field: &str) -> Option<OpKind> {
-        let sname = self.struct_name(k)?;
-        let fields = self.ck.structs.get(&sname)?;
+        let full_name = self.struct_name(k)?;
+        let base_name = Checker::base_named_type_str(&full_name);
+        let fields = self.ck.structs.get(base_name)?;
+        let subst = self.struct_type_arg_map(&full_name);
         fields
             .iter()
             .find(|(n, _)| n == field)
-            .map(|(_, ty)| self.kind_of_ty(ty, 0))
+            .map(|(_, ty)| self.kind_of_ty_with_subst(ty, &subst, 0))
     }
 
     fn kind_of_expr(&self, e: &Expr) -> OpKind {
@@ -1394,7 +1603,7 @@ impl<'a> Collector<'a> {
                     }
                 }
                 let head = Checker::base_named_type_str(name);
-                if let Some(sname) = self.struct_name(&bk) {
+                if let Some(sname) = self.struct_base_name(&bk) {
                     if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
                         return Some(
                             m.results
@@ -1462,14 +1671,16 @@ impl<'a> Collector<'a> {
     ) {
         let Some(t) = ty else { return };
         let sk = self.kind_of_ty(t, 0);
-        let Some(sname) = self.struct_name(&sk) else {
+        let Some(full_name) = self.struct_name(&sk) else {
             return;
         };
+        let sname = Checker::base_named_type_str(&full_name).to_string();
         // Clone: the diagnostics below need `&mut self` while the declaration
         // table is borrowed from it.
         let Some(declared) = self.ck.structs.get(&sname).cloned() else {
             return;
         };
+        let subst = self.struct_type_arg_map(&full_name);
 
         // U15: a name repeated in one literal. Reported once per name, on the
         // second and later occurrences.
@@ -1482,7 +1693,7 @@ impl<'a> Collector<'a> {
                     f.span,
                     format!(
                         "duplicate field `{}` in `{}` literal — Go refuses `duplicate field name {} in struct literal` (HYB-E1002)",
-                        f.name, sname, f.name
+                        f.name, full_name, f.name
                     ),
                     "each field may be set at most once in one struct literal",
                 );
@@ -1496,12 +1707,12 @@ impl<'a> Collector<'a> {
                     f.span,
                     format!(
                         "unknown field `{}` in `{}` literal — Go refuses `unknown field {} in struct literal of type {}` (HYB-E1002)",
-                        f.name, sname, f.name, sname
+                        f.name, full_name, f.name, full_name
                     ),
                     "a struct literal may only name fields the struct declares",
                 ),
                 Some((_, fty)) => {
-                    let want = self.kind_of_ty(fty, 0);
+                    let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
                     if kinds_conflict(&want, &got) {
                         self.emit_e1002(
@@ -1510,7 +1721,7 @@ impl<'a> Collector<'a> {
                                 "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
                                 got.label(),
                                 f.name,
-                                sname,
+                                full_name,
                                 want.label(),
                                 want.label()
                             ),
@@ -2271,10 +2482,12 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// Family C1 (#425): `base[index]` requires a slice, array, map, or string.
+    /// Family C1 (#425, #708): `base[index]` requires a slice, array, map, or string,
+    /// and constant indices on constant strings must satisfy `0 <= index < len(base)`.
     fn check_index_kind(
         &mut self,
         base_str: &str,
+        base_expr: Option<&Expr>,
         bk: &OpKind,
         index: &Expr,
         ik: &OpKind,
@@ -2317,10 +2530,43 @@ impl<'a> Collector<'a> {
                 ),
                 "slice, array, and string indices must be integers",
             );
+        } else if needs_int_idx {
+            if let Some(v) = self.eval_const_int_at(index, span.start) {
+                if v < 0 {
+                    self.emit_e1002(
+                        index.span(),
+                        format!(
+                            "invalid index `{}` (constant `{}` must not be negative) on `{}` (HYB-E1002)",
+                            index.render(),
+                            v,
+                            bk.label()
+                        ),
+                        "slice, array, and string indices must be non-negative integers",
+                    );
+                } else if matches!(bk, OpKind::Str) {
+                    if let Some(str_len) =
+                        base_expr.and_then(|b| self.eval_const_string_len_at(b, span.start))
+                    {
+                        if v >= str_len {
+                            self.emit_e1002(
+                                index.span(),
+                                format!(
+                                    "invalid string index `{}` (out of bounds for {}-byte string `{}`) (HYB-E1002)",
+                                    index.render(),
+                                    str_len,
+                                    base_str
+                                ),
+                                "a constant index on a constant string must satisfy `0 <= index < len(s)`",
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
-    /// Family C2 (#425): `base[lo:hi]` requires a slice, array, or string.
+    /// Family C2 (#425, #708): `base[lo:hi]` requires a slice, array, or string,
+    /// and constant bounds on constant strings must satisfy `0 <= lo <= hi <= len(base)`.
     fn check_slice_kind(
         &mut self,
         base: &Expr,
@@ -2348,7 +2594,15 @@ impl<'a> Collector<'a> {
             );
             return;
         }
-        for bound in [lo, hi].into_iter().flatten() {
+        let const_str_len = if matches!(bk, OpKind::Str) {
+            self.eval_const_string_len_at(base, span.start)
+        } else {
+            None
+        };
+        let mut lo_const: Option<i128> = None;
+        let mut hi_const: Option<i128> = None;
+        for (idx, bound_opt) in [lo, hi].into_iter().enumerate() {
+            let Some(bound) = bound_opt else { continue };
             let k = self.kind_of_expr(bound);
             if !matches!(k, OpKind::Unknown | OpKind::Int) {
                 self.emit_e1002(
@@ -2360,8 +2614,98 @@ impl<'a> Collector<'a> {
                     ),
                     "slice bounds must be integers",
                 );
+            } else if let Some(v) = self.eval_const_int_at(bound, span.start) {
+                if v < 0 {
+                    self.emit_e1002(
+                        bound.span(),
+                        format!(
+                            "invalid slice index `{}` (constant `{}` must not be negative) (HYB-E1002)",
+                            bound.render(),
+                            v
+                        ),
+                        "slice bounds must be non-negative integers",
+                    );
+                } else {
+                    if let Some(str_len) = const_str_len {
+                        if v > str_len {
+                            self.emit_e1002(
+                                bound.span(),
+                                format!(
+                                    "invalid string slice bound `{}` (out of bounds for {}-byte string `{}`) (HYB-E1002)",
+                                    bound.render(),
+                                    str_len,
+                                    base.render()
+                                ),
+                                "a constant slice bound on a constant string must satisfy `0 <= bound <= len(s)`",
+                            );
+                        }
+                    }
+                    if idx == 0 {
+                        lo_const = Some(v);
+                    } else {
+                        hi_const = Some(v);
+                    }
+                }
             }
         }
+        if let (Some(lo_expr), Some(hi_expr), Some(lo_v), Some(hi_v)) =
+            (lo, hi, lo_const, hi_const)
+        {
+            if lo_v > hi_v {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "invalid slice indices: `{}` > `{}` (`{} > {}`) — Go rejects inverted constant slice bounds at compile time (HYB-E1002)",
+                        lo_expr.render(),
+                        hi_expr.render(),
+                        lo_v,
+                        hi_v
+                    ),
+                    "the lower slice bound `lo` in `x[lo:hi]` must satisfy `lo <= hi`",
+                );
+            }
+        }
+    }
+
+    fn is_non_const_local(&self, name: &str) -> bool {
+        for layer in self.scopes.iter().rev() {
+            if let Some(entry) = layer.get(name) {
+                return match entry {
+                    Some(id) => !matches!(self.defines[*id].kind, LocalKind::Const),
+                    None => true,
+                };
+            }
+        }
+        false
+    }
+
+    fn expr_has_non_const_local(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.is_non_const_local(name),
+            Expr::Unary { operand, .. } => self.expr_has_non_const_local(operand),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_has_non_const_local(lhs) || self.expr_has_non_const_local(rhs)
+            }
+            Expr::Call { callee, args, .. } => {
+                self.expr_has_non_const_local(callee)
+                    || args.iter().any(|a| self.expr_has_non_const_local(&a.value))
+            }
+            _ => false,
+        }
+    }
+
+    fn eval_const_int_at(&self, e: &Expr, use_pos: hy_diag::Pos) -> Option<i128> {
+        if self.expr_has_non_const_local(e) {
+            return None;
+        }
+        self.ck.const_int_value_at(e, use_pos, 0)
+    }
+
+    fn eval_const_string_len_at(&self, e: &Expr, use_pos: hy_diag::Pos) -> Option<i128> {
+        if self.expr_has_non_const_local(e) {
+            return None;
+        }
+        self.ck.const_string_len_at(e, use_pos, 0)
     }
 
     fn check_array_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
@@ -2458,6 +2802,7 @@ impl<'a> Collector<'a> {
                         ),
                     }
                 } else {
+                    self.check_fn_type_arg_arity(name, name, span);
                     self.check_builtin_operand_kinds(name, args, span);
                     self.check_conversion_arity(name, args, span);
                     // #682 U5: `append`'s appended values must be assignable
@@ -2469,12 +2814,61 @@ impl<'a> Collector<'a> {
                 }
             }
             Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if pkg == "errors"
+                        && name == "wrap"
+                        && self.lookup_kind(pkg).is_none()
+                        && args.len() != 2
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`errors.wrap` takes 2 arguments `(err, message)`, got {} (HYB-E1002)",
+                                args.len()
+                            ),
+                            "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
+                        );
+                    }
+                    if self.lookup_kind(pkg).is_none() {
+                        let head = Checker::base_named_type_str(name);
+                        let assoc_key = format!("{}.{}", pkg, head);
+                        self.check_fn_type_arg_arity(&assoc_key, name, span);
+                    }
+                }
                 let bk = self.kind_of_expr(base);
                 // A method has no field entry, so resolve it before the field
                 // lookup: `x.bump()` must reach the arity check even though
                 // `bump` is not a struct field (#577 C9).
+                let head = Checker::base_named_type_str(name);
+                if let OpKind::Struct(Some(sn)) = &bk {
+                    let base_sn = Checker::base_named_type_str(sn);
+                    if let Some(m) = self
+                        .ck
+                        .method_decls
+                        .get(&(base_sn.to_string(), head.to_string()))
+                    {
+                        let ptr_recv = m.receiver.as_ref().is_some_and(|r| r.is_pointer);
+                        if ptr_recv && !self.is_addressable_value_receiver(base) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
+                                    name,
+                                    base.render(),
+                                    sn,
+                                    base.render()
+                                ),
+                                "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
+                            );
+                        }
+                    }
+                }
+                // pr-678: normalize through `struct_base_name` so a generic
+                // instantiation (`cache[int]`, `*lru_cache[k, v]`) resolves to
+                // the base-name key `method_decls` is indexed by — the same
+                // fold `base_named_type` applies for method receivers.
                 let has_method = self
-                    .struct_name(&bk)
+                    .struct_base_name(&bk)
                     .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn, name.clone())));
                 if let Some(fk) = self.struct_field_kind(&bk, name) {
                     if !has_method && !matches!(fk, OpKind::Unknown | OpKind::Fn(..)) {
@@ -2552,6 +2946,44 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_fn_type_arg_arity(&mut self, fn_key: &str, raw_callee: &str, span: Span) {
+        let Some(open) = raw_callee.find('[') else {
+            return;
+        };
+        if !raw_callee.ends_with(']') {
+            return;
+        }
+        let inner = &raw_callee[open + 1..raw_callee.len() - 1];
+        for arg in split_top_level_type_args(inner) {
+            self.check_named_type_instantiation(arg, span);
+        }
+        let base_key = Checker::base_named_type_str(fn_key);
+        let Some(f) = self.ck.fns.get(base_key) else {
+            return;
+        };
+        let expected = f.type_params.len();
+        let got = split_top_level_type_args(inner).len();
+        if expected == 0 {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`{}` is not a generic function — cannot instantiate `{}` with type arguments (HYB-E1002)",
+                    base_key, raw_callee
+                ),
+                "remove the `[...]` type arguments or declare type parameters on the function",
+            );
+        } else if got != expected {
+            self.emit_e1002(
+                span,
+                format!(
+                    "wrong number of type arguments for `{}` in `{}`: expected {}, found {} (HYB-E1002)",
+                    base_key, raw_callee, expected, got
+                ),
+                "supply one type argument per declared type parameter on the function",
+            );
+        }
+    }
+
     fn is_addressable_slice_pop_base(&self, e: &Expr) -> bool {
         match unwrap_parens(e) {
             Expr::Ident { .. } => true,
@@ -2565,6 +2997,33 @@ impl<'a> Collector<'a> {
                 OpKind::Pointer(inner) if matches!(*inner, OpKind::Array(_)) => true,
                 OpKind::Unknown => self.is_addressable_slice_pop_base(base),
                 _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Issue #656: can Go implicitly take `(&e)` to invoke a `*T` receiver
+    /// method on a value-typed struct expression `e`?
+    /// Addressable: local/param variables, pointer dereferences, slice
+    /// indexing (`s[i]`), array indexing of an addressable array, and field
+    /// selection on a pointer or addressable struct.
+    /// Non-addressable: map index (`m[k]`), function/method call result
+    /// (`make_t()`), and struct literal (`T{}`).
+    fn is_addressable_value_receiver(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Ident { .. } => true,
+            Expr::Index { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Map(_, _) | OpKind::Str => false,
+                OpKind::Slice(_) | OpKind::Unknown => true,
+                OpKind::Pointer(inner) => {
+                    matches!(*inner, OpKind::Array(_) | OpKind::Slice(_) | OpKind::Unknown)
+                }
+                OpKind::Array(_) => self.is_addressable_value_receiver(base),
+                _ => false,
+            },
+            Expr::Field { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Pointer(_) | OpKind::Unknown => true,
+                _ => self.is_addressable_value_receiver(base),
             },
             _ => false,
         }
@@ -2615,7 +3074,6 @@ impl<'a> Collector<'a> {
             _ => {}
         }
     }
-
     /// Family E1–E5 (#425): extend `HYB-E2005` (`BUILTIN-ARGS`) from literals
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
@@ -2780,7 +3238,7 @@ impl<'a> Collector<'a> {
             let Decl::Import { path, span } = d else {
                 continue;
             };
-            if path.starts_with("rust/") {
+            if path.starts_with("rust/") || !crate::foreign::is_curated_import(path) {
                 continue;
             }
             let root = path.rsplit('/').next().unwrap_or(path.as_str());
@@ -2879,6 +3337,159 @@ fn builtins_already_flags_len_cap(e: &Expr, is_cap: bool) -> bool {
                 ..
             }
         )
+}
+
+impl<'a> Checker<'a> {
+    /// Issue #722: validate generic type parameter lists on struct and function
+    /// declarations (duplicate parameter names, unsupported constraints outside
+    /// SPEC G3 `any`/`comparable`, and explicit `any` constraint used as a map
+    /// key or set element).
+    pub(crate) fn check_type_params<'t>(
+        &mut self,
+        decl_name: &str,
+        decl_kind: &str,
+        type_params: &[hy_syntax::TypeParam],
+        sig_types: impl Iterator<Item = &'t TypeExpr>,
+        span: Span,
+    ) {
+        if type_params.is_empty() {
+            return;
+        }
+        let mut seen = HashSet::new();
+        for p in type_params {
+            if !seen.insert(p.name.as_str()) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1003",
+                        self.path.clone(),
+                        span,
+                        format!(
+                            "type parameter `{}` redeclared in {} `{}` (HYB-E1003)",
+                            p.name, decl_kind, decl_name
+                        ),
+                    )
+                    .with_notes(vec![
+                        format!(
+                            "why: Go rejects duplicate type parameter names (`{} redeclared in this block`)",
+                            p.name
+                        ),
+                        "fix: give each type parameter a distinct identifier".to_string(),
+                    ]),
+                );
+            }
+            if let Some(c) = &p.constraint {
+                if c != "any" && c != "comparable" {
+                    self.diags.push(
+                        Diagnostic::error(
+                            "HYB-E1002",
+                            self.path.clone(),
+                            span,
+                            format!(
+                                "unknown or unsupported type constraint `{}` on type parameter `{}` in {} `{}` (HYB-E1002)",
+                                c, p.name, decl_kind, decl_name
+                            ),
+                        )
+                        .with_notes(vec![
+                            "SPEC G3 supports only `any` and `comparable` type constraints".to_string(),
+                        ]),
+                    );
+                }
+            }
+        }
+        let param_names: HashSet<&str> = type_params.iter().map(|p| p.name.as_str()).collect();
+        let mut comparable_needed = HashSet::new();
+        for ty in sig_types {
+            collect_comparable_type_params(ty, &param_names, &mut comparable_needed);
+        }
+        for p in type_params {
+            if p.constraint.as_deref() == Some("any")
+                && comparable_needed.contains(p.name.as_str())
+            {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        span,
+                        format!(
+                            "type parameter `{}` has explicit constraint `any` in {} `{}`, but is used as a map key or set element which requires `comparable` (HYB-E1002)",
+                            p.name, decl_kind, decl_name
+                        ),
+                    )
+                    .with_notes(vec![
+                        format!(
+                            "change `[{} any]` to `[{} comparable]` (or omit `any` so the compiler infers `comparable`)",
+                            p.name, p.name
+                        ),
+                    ]),
+                );
+            }
+        }
+    }
+}
+
+fn collect_comparable_type_params<'a>(
+    ty: &'a TypeExpr,
+    param_names: &HashSet<&'a str>,
+    out: &mut HashSet<String>,
+) {
+    match ty {
+        TypeExpr::Map { key, value, .. } => {
+            if let TypeExpr::Named { name, .. } = key.as_ref() {
+                if param_names.contains(name.as_str()) {
+                    out.insert(name.clone());
+                }
+            }
+            collect_comparable_type_params(key, param_names, out);
+            collect_comparable_type_params(value, param_names, out);
+        }
+        TypeExpr::Named { name, .. } => {
+            if let Some(inner) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
+                let elem = inner.trim();
+                if param_names.contains(elem) {
+                    out.insert(elem.to_string());
+                }
+            }
+        }
+        TypeExpr::Pointer { to, .. } => collect_comparable_type_params(to, param_names, out),
+        TypeExpr::Slice { elem, .. }
+        | TypeExpr::Array { elem, .. }
+        | TypeExpr::Chan { elem, .. }
+        | TypeExpr::Option { elem, .. } => {
+            collect_comparable_type_params(elem, param_names, out);
+        }
+        TypeExpr::Fn {
+            params, results, ..
+        } => {
+            for p in params {
+                collect_comparable_type_params(&p.ty, param_names, out);
+            }
+            for r in results {
+                collect_comparable_type_params(r, param_names, out);
+            }
+        }
+    }
+}
+
+fn split_top_level_type_args(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(s[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = s[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2998,6 +3609,121 @@ fn main() {
     close(ch)
     f := fn() int { return 7 }
     fmt.println(f())
+}
+";
+        let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Accept,
+            "unexpected diagnostics: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn rejects_constant_string_index_and_slice_bounds_708() {
+        for src in [
+            "const s = \"ab\"\nfn main() {\n    fmt.println(s[5])\n}\n",
+            "fn main() {\n    fmt.println(\"hello\"[7])\n}\n",
+            "const s = \"ab\"\nfn main() {\n    fmt.println(s[0:5])\n}\n",
+            "fn main() {\n    fmt.println(\"hello\"[1:7])\n}\n",
+            "fn main() {\n    const s = \"ab\" + \"cd\"\n    fmt.println(s[4])\n}\n",
+            "fn main() {\n    fmt.println(\"hello\"[3:2])\n}\n",
+            "fn main() {\n    fmt.println(\"hello\"[-1])\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_constant_string_bounds_controls_708() {
+        let src = "\
+const s = \"ab\"
+fn main() {
+    fmt.println(\"hello\"[4])
+    fmt.println(s[1])
+    fmt.println(\"hello\"[0:5])
+    fmt.println(\"hello\"[2:2])
+    dyn_s := \"ab\"
+    fmt.println(dyn_s[5])
+}
+";
+        let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Accept,
+            "unexpected diagnostics: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_generic_structs_and_instantiations_722() {
+        // Uninstantiated generic struct, wrong type-arg arity, type args on
+        // non-generic struct/fn, wrong field value type after substitution,
+        // non-comparable `any` used as map key, and unsupported constraint.
+        for src in [
+            "struct box[t] { v t }\nfn main() {\n    var b box\n    fmt.println(b.v)\n}\n",
+            "struct box[t] { v t }\nfn main() {\n    b := box{ v: 1 }\n    fmt.println(b.v)\n}\n",
+            "struct box[t] { v t }\nfn main() {\n    b := box[int, string]{ v: 1 }\n    fmt.println(b.v)\n}\n",
+            "struct plain { v int }\nfn main() {\n    p := plain[int]{ v: 1 }\n    fmt.println(p.v)\n}\n",
+            "struct box[t] { v t }\nfn main() {\n    b := box[int]{ v: \"wrong\" }\n    fmt.println(b.v)\n}\n",
+            "struct box[t] { v t }\nfn main() {\n    b := box[int]{ v: 3 }\n    fmt.println(b.v + \"bad\")\n}\n",
+            "struct bad[k any] { m map[k]int }\nfn main() {}\n",
+            "struct bad[t bogus] { v t }\nfn main() {}\n",
+            "fn id[t](x t) t { return x }\nfn main() {\n    fmt.println(id[int, string](1))\n}\n",
+            "fn add(a int, b int) int { return a + b }\nfn main() {\n    fmt.println(add[int](1, 2))\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+
+        // Duplicate type parameter names -> HYB-E1003.
+        for src in [
+            "struct box[t, t] { v t }\nfn main() {}\n",
+            "fn id[t, t](x t) t { return x }\nfn main() {}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1003".to_string()),
+                "expected HYB-E1003, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_valid_generic_struct_and_fn_722() {
+        let src = "\
+struct box[t] {
+    v t
+}
+
+struct pair[k, v] {
+    key k
+    val v
+}
+
+fn id[t](x t) t {
+    return x
+}
+
+fn main() {
+    b := box[int]{ v: 3 }
+    p := pair[string, int]{ key: \"ok\", val: b.v + 1 }
+    fmt.println(p.key, id[int](p.val))
 }
 ";
         let r = check(src);

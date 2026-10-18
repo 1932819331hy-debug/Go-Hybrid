@@ -1326,7 +1326,7 @@ impl<'a> Checker<'a> {
         self.const_int_value_at(&d.value, d.span.start, depth + 1)
     }
 
-    fn const_int_value_at(&self, expr: &Expr, use_pos: hy_diag::Pos, depth: usize) -> Option<i128> {
+    pub(crate) fn const_int_value_at(&self, expr: &Expr, use_pos: hy_diag::Pos, depth: usize) -> Option<i128> {
         if depth > 32 {
             return None;
         }
@@ -1407,7 +1407,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn const_string_len_at(&self, expr: &Expr, use_pos: hy_diag::Pos, depth: usize) -> Option<i128> {
+    pub(crate) fn const_string_len_at(&self, expr: &Expr, use_pos: hy_diag::Pos, depth: usize) -> Option<i128> {
         if depth > 32 {
             return None;
         }
