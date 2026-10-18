@@ -215,9 +215,6 @@ func TestFailureDomainSeparation(t *testing.T) {
 	// 8. Successful calls release both the input and diagnostic output buffers.
 	t.Run("GuestBuffersAreFreed", func(t *testing.T) {
 		envelope := []byte(`{"diagnostics":[],"summary":{"file":"input.hy","verdict":"accept","errors":0,"warnings":0},"version":1}`)
-		// Replace the escaped representation above with real JSON bytes. The raw
-		// string intentionally keeps this test visually close to the wire format.
-		envelope = []byte(`{"diagnostics":[],"summary":{"file":"input.hy","verdict":"accept","errors":0,"warnings":0},"version":1}`)
 		var frees [][2]uint64
 		mock := &MockWasmABI{
 			Memory: make([]byte, 1024),
