@@ -1,4 +1,4 @@
-# VERDICTS.md — the pre-registered verdict table (tests/checker-corpus)
+﻿# VERDICTS.md — the pre-registered verdict table (tests/checker-corpus)
 
 **Status:** pre-registered 2026-10-12, BEFORE any checker existed — per the
 human owner's ruling of 2026-10-12 (QUESTIONS.md Q1, item 2): *"write the
@@ -118,8 +118,9 @@ direction: a primitive-element slice copies by value and shares nothing.
 | 43 | 43-copy-ref-element-alias-freeze | REJECT | A1b | `copy(dst, src)` on a `[]map[...]` makes `dst[i]` and `src[i]` the same map; `task worker(move dst, done)` did not freeze `src`, so the later write through `src` was use-after-move (issue #178; the root cause is a missing `copy` arm in `process_call`, plus `make([]T, n)` dropping its element shape) |
 | 44 | 44-copy-primitive-element-control | ACCEPT | — | the FALSE-POSITIVE GUARD for 43: `copy(dst, src)` on `[]int` copies by value and shares no GC storage, so no may-share edge may be recorded |
 | 45 | 45-composite-literal-embeds-shared-map | REJECT | A1c | O4.6 deep sendability: a fresh `[]T{shared}` composite literal embedding a live shared map at a spawn is not laundered by the wrap (PR #176, maintainer-integrated as #45) |
+| 53 | 53-array-slice-backing-freeze | REJECT | A1b | slicing an addressable array (`s := a[:]` on `[4]int`, also `b.data[:]`, `append(a[0:1], x)`, overlapping windows) shares the array's backing storage even when the element is a primitive; `shape_may_share` only recurses into reference elements, so `move s` froze `s` and not `a`, `hyb check` reported 0 diagnostics, and `go run -race` reported `WARNING: DATA RACE` on `s[0]` vs `a[0]`. A value copy (`b := a`) and `clone(a)[:]` stay unlinked |
 
-**Distribution: ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 30 — 45 programs.**
+**Distribution: ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 34 — 49 programs.**
 
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
 BEFORE any checker existed; see the pre-registration statement. 21, 22, 23
@@ -557,3 +558,238 @@ dated baseline remain unchanged. Verdict-level managed count is 2/28;
 the harness's unchanged historical as-written set {01, 03, 04} reports
 3/28, with the same population qualification noted above. Case 28 adds
 no `managed` block.
+
+## Additive corpus registration — 2026-10-15: buildability declarations (#134)
+
+Four cases derived from issue #134 before these files were run against the
+checker. They pin the accepted-subset contract that an accepted program
+must emit buildable Go (the same contract E6001/E6002 were registered
+under): Go's front-end rejects an unused `:=` binding, an unused import, a
+repeated name on the left of one `:=`, and a `:=` that declares no new
+variable at all. All four reject as the new code `HYB-E1002`
+(`unbuildable-declaration`, rule `BUILDABLE`, registered in
+`hy-diag/data/diagnostics.json`). Reject files name the exact diagnostic
+code in their header; a disagreement must be recorded and resolved, never
+hidden by changing an expected result.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 46 | 46-unused-define-reject | REJECT | BUILDABLE | `HYB-E1002` | `x := 5` is never read — the emitted Go is `declared and not used` |
+| 47 | 47-unused-import-reject | REJECT | BUILDABLE | `HYB-E1002` | the declared import is carried into the emitted header — `imported and not used` |
+| 48 | 48-repeated-define-name-reject | REJECT | BUILDABLE | `HYB-E1002` | `x, x := 1, 2` is `x repeated on left side of :=` |
+| 49 | 49-blank-define-reject | REJECT | BUILDABLE | `HYB-E1002` | `_ := 5` declares no new variable — `no new variables on left side of :=` |
+
+With this four-case addition the registered corpus is **49 programs:
+ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 34** (harness recompute: 49/49
+verdict agreement; tripwire 2/46 = 4.3% verdict-level, 3/46 = 6.5%
+as-written — not fired). None of the four files contains a `managed`
+block; the harness's historical as-written set {01, 03, 04} is unchanged,
+so the tripwire ratios only move with the larger total.
+
+The scope boundary is deliberate and recorded in the HYB-E1002 registry
+entry: an unused `rust/` import is NOT rejected (the emitter never writes
+it as a Go import, so it cannot fail `go build`); unused `var` /
+composite-`const` locals, select-receive names and match bindings stay
+outside this registration (the same Go error family, tracked separately);
+unread `for ... in` bindings are handled at emission (issue #139).
+
+## Additive corpus registration — 2026-10-17: 3-argument slice `make` (#353)
+
+One case added WITH its fix: `make([]T, len, cap)` is valid Go, was
+rejected as HYB-E2005 before the fix, and is accepted now. The 3-argument
+form is slice-only — the same arity on a channel stays E2005, and
+negative/bad-literal sizes still reject, pinned by unit tests in
+`hy-check/tests/builtin_args_defer.rs`. The old diagnostic claimed "Go
+rejects this builtin shape" — false for the slice form, and true for every
+remaining rejection.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 51 | 51-make-slice-cap | ACCEPT | — | — | `make([]int, 3, 10)` is valid Go; zero check-sites, a fresh local |
+
+With this addition the corpus on disk stood at **51 programs:
+ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 36** (recomputed from the files'
+`EXPECTED-VERDICT` markers; #50 carries its registration with its own fix
+PR; the registration below raises the total to 52).
+
+## Additive corpus registration — 2026-10-17: shadowed predeclared types (#326)
+
+One case derived from issue #326 before running this fixture. It pins the
+soundness rule that user-defined structs or type aliases shadowing predeclared
+primitive names (e.g. `struct rune { m map[string]string }`) must resolve to the
+user struct rather than falling through to primitive type shape. When passed
+across tasks, non-sendable contents (such as maps or slices) must be rejected
+with `HYB-E3001` (A1c sendability).
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 52 | 52-shadow-predeclared-struct-reject | REJECT | A1c | `HYB-E3001` | `struct rune { m map[string]string }` passed across tasks must reject because the shadowed struct contains a mutable map |
+
+With this addition the registered corpus is **52 programs:
+ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 37** (harness recompute: 52/52
+verdict agreement; tripwire 2/52 = 3.8% verdict-level, 3/52 = 5.8%
+as-written — not fired).
+
+## Additive corpus registration — 2026-10-17: field store materializes may_share (#392)
+
+`h.m = shared` never created the edge from the composite to the live RHS root,
+so `move h` froze `h` but not `shared` and the emitted Go raced.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 54 | 54-field-store-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `var h holder; h.m = shared` then `task worker(move h)` then a write to `shared` |
+| 55 | 55-field-store-fresh-at-spawn | ACCEPT | — | — | the over-rejection guard: a FRESH map literal stored into the field shares nothing |
+| 56 | 56-defer-live-reference-at-spawn | REJECT | A1b | `HYB-E3003` | `defer report(shared)` then `task worker(move shared)` |
+| 57 | 57-defer-live-reference-at-send | REJECT | A1b | `HYB-E3003` | the send twin: `ch <- move shared` |
+| 58 | 58-defer-live-reference-via-alias | REJECT | A1b | `HYB-E3003` | the deferred call names the ALIAS, the move transfers the ORIGIN |
+| 59 | 59-rebind-forgets-defer-capture | REJECT | A1b | `HYB-E3003` | rebinding the name must not forget the captured storage |
+| 60 | 60-rebind-without-defer-control | ACCEPT | — | — | the over-rejection guard: a rebind with no defer and no boundary |
+
+## Additive corpus registration — 2026-10-17: malformed string escapes fail closed
+
+One case registered WITH its fix. It pins the lexer's fail-closed contract:
+a malformed `\x`/`\u`/`\U` escape in an interpreted string (LX7's Go escape
+set) must reject with `HYB-E0002`, never pass silently with a corrupted
+value. Before the fix `"\u{41}"` was ACCEPTED with 0 diagnostics and lexed
+to the value `"41}"` (the `\u{` was dropped, the rest leaked as literal
+text); `"\xG1"` became `"1"`; `"\u12G4"` became `"4"`. Root cause:
+`escape_char`'s hex-digit error paths returned `None` without recording
+the diagnostic both callers assume, so the string lexer silently kept one
+bumped char verbatim. The brace form after `\u` is LX6 rune-literal
+syntax; in a string it is a malformed escape, and the diagnostic says so.
+Surrogates (`\ud800`) and values above U+10FFFF (`\U0011FFFF`) are the
+same family and reject likewise (unit tests in `hy-syntax/src/lexer.rs`:
+six malformed cases plus the valid-escape over-rejection guard). The new
+diagnostics carry `tier0_rule` `LX6`/`LX7` so this harness can join on
+them; no registry entry changes (HYB-E0002 keeps its parse-error slot).
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 61 | 61-string-escape-fail-closed | REJECT | LX7 | `HYB-E0002` | `s := "\u{41}"` — the LX6 rune form in a string is a malformed LX7 escape; it must be named, not silently dropped |
+
+With this addition the registered corpus is **61 programs:
+ACCEPT 15 · ACCEPT-MANAGED 2 · REJECT 44**. The file contains no `managed`
+block; the harness's historical as-written set {01, 03, 04} is unchanged,
+so the tripwire ratios only move with the larger total.
+
+
+## Additive corpus registration — 2026-10-18: shadowing binder must not stretch the last-use window (#547)
+
+`n := &m["a"]` opens a unique map-slot loan on `n`; a later binder that
+RE-DECLARES `n` (`for n in 0..k { total += n }`) makes the body's `n` a
+different binding. Counting those reads as uses of the loan deferred the O8
+store-back past `task worker(move m, done)` and raced with the worker on the
+moved map (`go run -race`: DATA RACE, 3/3 runs). The source is sound, so the
+registered verdict is ACCEPT: the fix belongs in the emitter's non-lexical
+flush (`remaining_stmts_use_loan`), not in the source.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 62 | 62-shadowing-binder-last-use | ACCEPT | — | — | the source is sound: the loan's last use is `n.x = 1`, before the `move`, and the shadowing `for` binder's `n` is the loop variable (#547). The checker's name-keyed window still covers the loop body (it accepts here only because no rule consumes a slot-loan window at a `move`); the emitter must flush the store-back before the spawn — that is the gate this case pins |
+| 63 | 63-shadowing-binders-at-spawn | ACCEPT | — | — | two more binder shapes behind one move boundary: an `if` INIT (`if n := 2; n > 1`) and a closure NAMED RESULT (`fn() (n int) { n = 7 }`). Both re-declare the loan's name, so the loan's last use stays `n.replicas = 5` before the `move`; counting them deferred the store-back past the spawn (same race as #547) |
+
+With these two additions the registered corpus is **63 programs:
+ACCEPT 17 · ACCEPT-MANAGED 2 · REJECT 44**.
+
+## Additive corpus registration — 2026-10-18: reference-typed element reads
+
+Five fixtures pin the **reference-typed element read**: a binding initialized from
+an element or field whose type is itself a reference (`map`, `slice`) receives a
+COPY (A4) of a *reference*, so the copy aliases the same storage and a later
+`move` of the source freezes it too (A1b). The corpus had **zero** `map[string]map`
+usages and reached `[]map` only through `copy` (43), so this intersection was
+unrepresented.
+
+These files carry no numeric prefix. Eight open PRs currently add fixtures to this
+directory and all claim the numbers 61/62; descriptive names keep this
+registration from colliding with any of them. The harness discovers fixtures by
+glob and reads the `EXPECTED-VERDICT` header, not the filename.
+
+| program | verdict | rule | diagnostic | rationale |
+|---------|---------|------|------------|-----------|
+| map-elem-map-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `inner := m["frontend"]` copies a map HEADER, so `inner` aliases the element `move m` transfers; the write after the move is use-after-move |
+| map-elem-fresh-map-control | ACCEPT | — | — | the over-rejection guard: the same program with a write to an independent map literal |
+| slice-elem-map-alias-at-spawn | REJECT | A1b | `HYB-E3003` | the slice twin: `inner := rows[0]` on a `[]map[string]int` |
+| struct-field-slice-elem-alias | REJECT | A1b | `HYB-E3003` | `d := h.data` copies a slice header, so the element write reaches the array `move h` transferred |
+| append-spare-capacity-backing-alias | REJECT | A1b | `HYB-E3003` | `append` on a slice with SPARE CAPACITY (`make([]int, 1, 4)`) returns the same backing array; 51 pins the 3-arg `make` as a fresh local, this pins that a slice derived from it by `append` is not independent |
+
+Reproduction (checker built from the merged tree, pinned toolchain):
+`python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
+**77/77 verdict agreement, tripwire not fired**. The differential loop's
+reject side was 43/43 at this section's original base; it is not re-measured
+here.
+
+## Additive corpus registration — 2026-10-18: channel-element and type-erasure surfaces
+
+Seven fixtures pin surfaces the corpus had **no** representation of, all on the
+send/boundary side rather than the spawn-argument side:
+
+| surface | corpus coverage before | after |
+|---|---|---|
+| `chan []T` (slice element type) | 0/60 | 2 |
+| `chan map[K]V` with a write after the send | 0/60 (16/17 never touch it again) | 1 |
+| `chan fn()` (channel of closures) | 0/60 | 1 |
+| `*map[K]V` (pointer to a map) | 0/60 (03 is `&struct`) | 1 |
+| `any` erasing a shared reference at a boundary | 0/60 (`any` appears in 27 files, never as an erasing binding at a check site) | 2 |
+
+Each rejection is paired with an ACCEPT control where the over-rejection risk is
+real, so the rule stays pinned as value-based rather than type- or keyword-based.
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| chan-slice-aliased-at-send | REJECT | A1c | `HYB-E3002` | `ch <- shared` where `shared` is a live `[]int` and the sender writes `shared[0]` afterwards — the receiver's `xs` and the sender's `shared` name the same array element |
+| chan-slice-fresh-control | ACCEPT | — | — | the same channel with a fresh literal at the send site: nothing else names the array |
+| chan-map-aliased-at-send | REJECT | A1c | `HYB-E3002` | the map twin, and the write-after-send form the corpus's map cases never reach |
+| any-erasure-shared-map-at-spawn | REJECT | A1c | `HYB-E3001` | `var v any = m` then `task worker(v, done)` — erasing the static type does not change what the value is |
+| any-erasure-primitive-control | ACCEPT | — | — | the pair: an `any` holding an immutable primitive crosses, proving the rejection above is about the map and not the `any` keyword |
+| chan-of-closure-at-send | REJECT (contested) | A1c | `HYB-E3002` | a deliberately CAPTURE-FREE closure still rejects at a send site: the value class is what is refused, not this closure's environment |
+| ptr-to-map-at-spawn | REJECT (contested) | A1c | `HYB-E3001` | `p := &m; task worker(p, done)` with `m` never written afterwards — the rule is type-based, so it does not consult whether the pointee is still named elsewhere |
+
+The two contested rows are registered REJECT because that is what the A1c rule key
+says today (a closure and a `*map` are neither channel/atomic/immutable, nor
+`move`d, nor `managed`). If the maintainer rules either shape should be legal,
+the row moves to ACCEPT by a logged amendment — the fixtures exist so that
+decision is visible either way.
+
+Reproduction (checker built from the merged tree, pinned toolchain):
+`python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
+**77/77 verdict agreement, tripwire not fired**.
+
+## Additive corpus registration — 2026-10-18: deep sendability under `move` (depth 3)
+
+GUARANTEES.md claim 3 promises **deep** sendability — "every reference-typed
+field/element must itself be sendable; a fresh literal wrapping a shared map is
+still rejected". Corpus 45 pins that at depth 2, but it sends **without** `move`,
+so it rejects at the safe-by-type gate and the deep walk is never reached. This
+pair uses `move` on **both** halves, which removes the safe-by-type question
+entirely and isolates the deep-embedding question at depth 3
+(`[]holder` — `holder` — `map[string]int`).
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| deep-composite-move-shared-at-spawn | REJECT | A1b | `HYB-E3003` | `xs := []holder{holder{m: shared}}` then `task worker(move xs, done)` then `shared["a"] = 2` — the move transfers the composite but not the map HEADER embedded in it, so `shared` and `xs[0].m` name one hash table and the write is use-after-move |
+| deep-composite-move-fresh-control | ACCEPT | — | — | structurally identical (same slice, struct, `move`, channel) with a fresh innermost map: nothing outside `xs` names it, so the value is self-contained |
+
+The control matters more than the rejection here: a checker that rejected it
+would ban nested composite literals from every boundary, which would make the
+deep rule unusable. This is corpus 54's finding (a field store materializes the
+edge) taken one level deeper — through a struct nested inside a slice — and
+separated from the safe-by-type gate by the `move`.
+
+Reproduction (checker built from the merged tree, pinned toolchain):
+`python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
+**77/77 verdict agreement, tripwire not fired**.
+
+With all three registrations the corpus is **77 programs: ACCEPT 21 ·
+ACCEPT-MANAGED 2 · REJECT 54** — main's 63 plus these fourteen. Every
+reproduction line above is the merged tree.
+
+## 78-shadowed-unused-import-reject
+
+- Source: PR #535 (filacocta), extracted 2026-10-18.
+- Program: `import "strings"` + `strings := 1` + `fmt.println(strings)` —
+  the only apparent use of the package root is a read of the shadowing local.
+- Verdict: REJECT BUILDABLE (HYB-E1002) — the import is never used; the
+  emitted Go header would fail `imported and not used`.
+- Scope note: LX4 keeps Go lexical scoping — a mention of a shadowed name
+  does not count as package use. Case 47 pins the plain unused form.

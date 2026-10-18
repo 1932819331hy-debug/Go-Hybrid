@@ -1,16 +1,27 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-35 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
-Current registered corpus: **28 programs**. The original pre-checker
-registration described below started with 18 and grew to 20 during the
-2026-10-12 integration. An additive 2026-10-14 registration in VERDICTS.md
-adds the select-send clauses (landed as corpus 32–34 after the renumber): mutable-map rejection, a positive
-string/channel control, and fail-closed rejection of an unresolved name.
-A further additive registration pins case 28, the documented default-arm
-syntax and a nonblocking fallback that prints exactly `idle`.
-Their expected results were recorded before running the new fixtures.
-These four files were initially numbered 21–24 and then 25–28 on the contributor's branch; the 2026-10-15 maintainer integration renumbered them to 32–35 (slots 25–31 were taken by the audit/PR wave) without changing their expected results.
-The dated original tripwire baseline below is preserved as historical.
+**Current registered corpus: 77 programs** — ACCEPT 21 · ACCEPT-MANAGED 2 ·
+REJECT 54 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
+written BEFORE the Phase-1 checker existed; that registration grew to 20
+during the 2026-10-12 integration, and every case after it was added
+additively, still hand-derived from the rule text before it was run.
+
+Two additive registrations are worth naming because they moved cases around.
+The 2026-10-14 select-send registration (mutable-map rejection, a positive
+string/channel control, and fail-closed rejection of an unresolved name)
+landed as corpus **32–34** after a renumber, and a further case pinned the
+documented default-arm syntax and its nonblocking fallback printing exactly
+`idle`. Those four files were initially numbered 21–24 and then 25–28 on the
+contributor's branch; the 2026-10-15 maintainer integration renumbered them
+to 32–35 (slots 25–31 were taken by the audit/PR wave) without changing
+their expected results. Their expected results were recorded before running
+the new fixtures.
+
+The prose below is the original pre-registration statement, kept as written
+on its date: the corpora sizes it names (18, 20) are what the corpus held
+then, not today's 77. The dated tripwire baseline is preserved as historical
+for the same reason.
 
 18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
 
@@ -41,3 +52,13 @@ Tripwire rule: more than ~25% of this corpus needing `managed` reopens G0
 (QUESTIONS.md Q1 item 5). Baseline at pre-registration: 11.1%
 verdict-level / 16.7% as-written — definitions and recompute rules in
 VERDICTS.md §Tripwire baseline.
+
+`78-shadowed-unused-import-reject.hy` — filacocta (PR #535): an explicit
+import whose only apparent use names a shadowing local must still reject
+as HYB-E1002 (the emitted Go would carry an unused import). Behavior
+landed on main via the #475/#430 buildable work; the fixture pins the
+surface with author credit (tests extracted to
+`hy-check/tests/import_shadowing_guards.rs`).
+
+With this registration the corpus is **78 programs: ACCEPT 21 ·
+ACCEPT-MANAGED 2 · REJECT 55**.
