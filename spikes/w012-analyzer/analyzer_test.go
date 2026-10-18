@@ -4,6 +4,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"golang.org/x/tools/go/analysis"
@@ -78,8 +79,9 @@ func TestAnalyzerEmpiricalPassContext(t *testing.T) {
 	}
 
 	// 3. Sibling discovery requires directory scan anchor:
-	t.Logf("C. Discovered .hy files via DirScan: %v", LastContextLog.FoundHyFiles)
-	if len(LastContextLog.FoundHyFiles) == 0 {
+	contextLog := LastContextLogSnapshot()
+	t.Logf("C. Discovered .hy files via DirScan: %v", contextLog.FoundHyFiles)
+	if len(contextLog.FoundHyFiles) == 0 {
 		t.Errorf("Expected to discover sibling .hy file via directory scan")
 	}
 
@@ -98,6 +100,22 @@ func TestAnalyzerEmpiricalPassContext(t *testing.T) {
 	if len(reportedDiags) == 0 {
 		t.Errorf("Expected diagnostics from invalid .hy, got 0")
 	}
+}
+
+func TestContextLogConcurrentAccess(t *testing.T) {
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			setLastContextLog(PassContextLog{PkgPath: "pkg", FilesCount: i})
+		}(i)
+		go func() {
+			defer wg.Done()
+			_ = LastContextLogSnapshot()
+		}()
+	}
+	wg.Wait()
 }
 
 func TestAnalyzerDirectInvocation(t *testing.T) {
