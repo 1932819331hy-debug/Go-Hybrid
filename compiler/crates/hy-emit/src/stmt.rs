@@ -1483,8 +1483,8 @@ impl Emitter {
                 if let Some(inherited) = self.branch_inherit.clone() {
                     self.push("} else {");
                     self.indent += 1;
-                    for (name, place) in inherited {
-                        self.push(&format!("{} = {}", place, name));
+                    for (_, store) in inherited {
+                        self.push(&store);
                     }
                     self.indent -= 1;
                 }
@@ -2245,8 +2245,8 @@ impl Emitter {
                     if let Some(inherited) = self.branch_inherit.clone() {
                         self.push("} else {");
                         self.indent += 1;
-                        for (name, place) in inherited {
-                            self.push(&format!("{} = {}", place, name));
+                        for (_, store) in inherited {
+                            self.push(&store);
                         }
                         self.indent -= 1;
                     }
@@ -2316,8 +2316,8 @@ impl Emitter {
                     if let Some(inherited) = self.branch_inherit.clone() {
                         self.push("} else {");
                         self.indent += 1;
-                        for (name, place) in inherited {
-                            self.push(&format!("{} = {}", place, name));
+                        for (_, store) in inherited {
+                            self.push(&store);
                         }
                         self.indent -= 1;
                     }
@@ -2400,8 +2400,8 @@ impl Emitter {
             } else if let Some(inherited) = self.branch_inherit.clone() {
                 self.push(&format!("if !{} {{", matched_temp));
                 self.indent += 1;
-                for (name, place) in inherited {
-                    self.push(&format!("{} = {}", place, name));
+                for (_, store) in inherited {
+                    self.push(&store);
                 }
                 self.indent -= 1;
                 self.push("}");
@@ -2555,8 +2555,8 @@ impl Emitter {
                     }
                 }
             }
-            for (name, place) in pre_flush {
-                self.push(&format!("{} = {}", place, name));
+            for (_, store) in pre_flush {
+                self.push(&store);
             }
             let saved_inherit = if handoff.is_empty() {
                 None
