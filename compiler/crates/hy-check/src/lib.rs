@@ -342,6 +342,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 shape,
                 ty,
                 immutable: false,
+                is_let: false,
                 managed_taint: false,
                 moved: None,
                 non_owned_origin: Some(format!(
@@ -360,6 +361,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 shape,
                 ty: Some(p.ty.clone()),
                 immutable: false,
+                is_let: false,
                 managed_taint: false,
                 moved: None,
                 non_owned_origin: Some(format!(
@@ -384,6 +386,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         shape: shape.clone(),
                         ty: Some(r.ty.clone()),
                         immutable: false,
+                        is_let: false,
                         managed_taint: false,
                         moved: None,
                         non_owned_origin: None,
@@ -437,7 +440,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             } else {
                                 TypeShape::Primitive
                             };
-                            ck.define_binding(&mut st, n, shape, None, false, managed);
+                            ck.define_binding(&mut st, n, shape, None, false, managed, false);
                         }
                     }
                     walk::ScopeEvent::MatchBind { name, subject } => {
@@ -672,7 +675,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
-                        ck.define_binding(&mut st, name, shape, None, false, managed);
+                        ck.define_binding(&mut st, name, shape, None, false, managed, false);
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(&mut st, name, expr);
@@ -705,7 +708,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         hi,
                         format!("the range bound `{}`", hi.render()),
                     );
-                    ck.define_binding(&mut st, var, TypeShape::Primitive, None, false, managed);
+                    ck.define_binding(&mut st, var, TypeShape::Primitive, None, false, managed, false);
                 }
                 ForKind::While { cond } => {
                     ck.mark_move_in_value(

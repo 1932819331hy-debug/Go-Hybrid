@@ -142,6 +142,8 @@ pub(crate) struct Binding {
     pub ty: Option<TypeExpr>,
     /// `let`/`const` binding or a file-level `const` (class 4).
     pub immutable: bool,
+    /// `let` binding (T22: shallow immutable binding — no rebinding/reassignment).
+    pub is_let: bool,
     /// Born inside a `managed` block (O6.2 taint): sendable everywhere,
     /// outside the §9.2 guarantee for its whole lifetime.
     pub managed_taint: bool,
