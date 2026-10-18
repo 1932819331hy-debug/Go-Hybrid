@@ -396,6 +396,11 @@ impl<'a> Checker<'a> {
                 }
                 // Issue #411/H2: user-defined methods (`c.keys()`).
                 let recv = self.shape_of_expr(st, base);
+                if name == "pop" && args.is_empty() {
+                    if let TypeShape::Slice(elem) = &recv {
+                        return (**elem).clone();
+                    }
+                }
                 if let Some(recv_base) = self
                     .ty_of_expr(st, base)
                     .map(|t| self.resolve_type_alias(&t))
@@ -606,6 +611,15 @@ impl<'a> Checker<'a> {
                 }
                 let base_ty = self.ty_of_expr(st, base)?;
                 let resolved = self.resolve_type_alias(&base_ty);
+                if name == "pop" {
+                    if let TypeExpr::Slice { elem, .. } = &resolved {
+                        return Some(TypeExpr::Fn {
+                            params: Vec::new(),
+                            results: vec![(**elem).clone()],
+                            span: *span,
+                        });
+                    }
+                }
                 let sname = Self::base_named_type(&resolved)?;
                 self.structs
                     .get(&sname)

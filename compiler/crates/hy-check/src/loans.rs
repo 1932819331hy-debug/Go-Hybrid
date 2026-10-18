@@ -6247,6 +6247,29 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+            } else if method_name == "pop"
+                && cr.args.is_empty()
+                && matches!(
+                    self.shape_of_expr(st, base),
+                    TypeShape::Slice(_) | TypeShape::Unknown
+                )
+            {
+                let recv_const = base
+                    .root_ident()
+                    .filter(|root| !declared.contains(*root))
+                    .and_then(|root| {
+                        self.const_write_root(
+                            st,
+                            &Place {
+                                kind: PlaceKind::Ident(root.to_string()),
+                                span: base.span(),
+                            },
+                        )
+                    })
+                    .or_else(|| self.const_arg_root(st, base, declared));
+                if let Some(const_name) = recv_const {
+                    hits.push((const_name, base.span()));
+                }
             }
         }
         for (i, a) in cr.args.iter().enumerate() {
@@ -6873,7 +6896,10 @@ impl<'a> Checker<'a> {
                     .map(|(_, d)| *d)
                     .collect();
                 if Self::expr_reaches_const_aliases(base, aliases)
-                    && (matching.is_empty()
+                    && ((method_name == "pop"
+                        && cr.args.is_empty()
+                        && !matches!(crate::model::unwrap_parens(base), Expr::Ident { .. }))
+                        || matching.is_empty()
                         || matching.iter().any(|d| {
                             d.receiver
                                 .as_ref()

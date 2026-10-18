@@ -586,6 +586,34 @@ impl Emitter {
         self.member_name(base, name)
     }
 
+    fn unwrap_parens(mut e: &Expr) -> &Expr {
+        while let Expr::Paren { inner, .. } = e {
+            e = inner;
+        }
+        e
+    }
+
+    fn is_user_struct_expr(&self, e: &Expr) -> bool {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.var_struct.contains_key(name),
+            Expr::StructLit { .. } => true,
+            Expr::AddrOf { operand, .. } => self.is_user_struct_expr(operand),
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: vn, .. } = Self::unwrap_parens(base) {
+                    if let Some(sn) = self.var_struct.get(vn) {
+                        if let Some(fields) = self.struct_fields.get(sn) {
+                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                                return self.struct_fields.contains_key(fty.as_str());
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn emit_call(
         &mut self,
         callee: &Expr,
@@ -648,13 +676,17 @@ impl Emitter {
 
         // --- slice `.pop()` → prelude helper (example 08's stack shape) ---
         if let Expr::Field { base, name, .. } = callee {
-            if name == "pop" {
-                if let Expr::Ident { .. } = base.as_ref() {
-                    let b = self.emit_expr(base, ATOM)?;
+            if name == "pop" && args.is_empty() && !self.is_user_struct_expr(base) {
+                let peeled = Self::unwrap_parens(base);
+                if matches!(
+                    peeled,
+                    Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
+                ) {
+                    let b = self.emit_expr(peeled, ATOM)?;
                     return Ok(format!("hy_pop(&{})", b));
                 }
                 return Err(EmitError::unsupported(
-                    "`.pop()` on a non-local base (MVP-0 supports plain slice locals)",
+                    "`.pop()` on a non-addressable base (requires a slice variable, field, or element)",
                 ));
             }
         }
