@@ -708,6 +708,15 @@ impl Emitter {
                 let a = self.emit_call_arg(&args[0])?;
                 return Ok(format!("{}({})", go, a));
             }
+            if name == "len" && args.len() == 1 && self.is_set_expr(&args[0].value) {
+                let a = self.emit_call_arg(&args[0])?;
+                return Ok(format!("{}.len()", a));
+            }
+            if name == "delete" && args.len() == 2 && self.is_set_expr(&args[0].value) {
+                let s = self.emit_call_arg(&args[0])?;
+                let v = self.emit_call_arg(&args[1])?;
+                return Ok(format!("{}.remove({})", s, v));
+            }
         }
 
         // --- a slice type-as-value CALLED = a conversion: `[]byte("abc")`

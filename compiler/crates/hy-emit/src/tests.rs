@@ -2645,3 +2645,24 @@ fn main() {
         );
     }
 }
+#[test]
+fn test_emit_t9_set_surface() {
+    let go = emit(
+        "fn main() {\n    seen := set[int]{}\n    seen.insert(1)\n    fmt.println(len(seen))\n    delete(seen, 1)\n    for v in seen {\n        fmt.println(v)\n    }\n}\n",
+    );
+    assert!(go.contains("seen.len()"), "len(seen) should lower to seen.len():\n{}", go);
+    assert!(go.contains("seen.remove(1)"), "delete(seen, 1) should lower to seen.remove(1):\n{}", go);
+    assert!(go.contains("for v := range seen.m {"), "for v in seen should lower to for v := range seen.m:\n{}", go);
+    assert!(go.contains("type set[t comparable] struct {"), "SET_PRELUDE should be included:\n{}", go);
+}
+
+#[test]
+fn test_emit_t20_option_surface() {
+    let go = emit(
+        "fn main() {\n    o := some(5)\n    fmt.println(o.unwrap())\n    fmt.println(o.or(0))\n    fmt.println(o.is_some())\n}\n",
+    );
+    assert!(go.contains("func (o option[v]) unwrap() v {"), "unwrap method in prelude:\n{}", go);
+    assert!(go.contains("func (o option[v]) or(defaultVal v) v {"), "or method in prelude:\n{}", go);
+    assert!(go.contains("func (o option[v]) is_some() bool {"), "is_some method in prelude:\n{}", go);
+}
+

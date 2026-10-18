@@ -41,19 +41,29 @@ impl<'a> Checker<'a> {
             let span = expr.span();
             let before = self.diags.len();
             self.check_range_iterable(st, expr, span);
+            let shape = self.shape_of_expr(st, expr);
+            let is_chan = matches!(shape, TypeShape::Chan(_));
+            let is_set = matches!(shape, TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set");
             if self.diags.len() == before
                 && vars.len() > 1
-                && matches!(self.shape_of_expr(st, expr), TypeShape::Chan(_))
+                && (is_chan || is_set)
             {
+                let kind_str = if is_chan { "channel" } else { "set" };
+                let why_note = if is_chan {
+                    "why: Go permits only a single iteration variable when ranging over a channel (`range over … permits only one iteration variable`), so an accepted Hybrid program would emit unbuildable Go (LX13)".to_string()
+                } else {
+                    "why: ranging over a set yields elements as single values; sets permit only one iteration variable (T9)".to_string()
+                };
                 let msg = format!(
-                    "`for {}, {} in {}` binds {} variables, but ranging over a channel yields only 1 value (HYB-E2009)",
+                    "`for {}, {} in {}` binds {} variables, but ranging over a {} yields only 1 value (HYB-E2009)",
                     vars[0],
                     vars[1],
                     expr.render(),
-                    vars.len()
+                    vars.len(),
+                    kind_str
                 );
                 let notes = vec![
-                    "why: Go permits only a single iteration variable when ranging over a channel (`range over … permits only one iteration variable`), so an accepted Hybrid program would emit unbuildable Go (LX13)".to_string(),
+                    why_note,
                     format!("fix: bind a single variable (`for {} in {} {{ … }}`)", vars[0], expr.render()),
                 ];
                 self.diags.push(
@@ -90,6 +100,7 @@ impl<'a> Checker<'a> {
             // view the emitter iterates; corpus 05/07/11/12). Corpus-driven,
             // NOT a Go range shape — Go cannot range the view struct itself.
             | TypeShape::BorrowHandle(_) => {}
+            TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set" => {}
             TypeShape::Chan(_) => {
                 if let Some(ty) = self.ty_of_expr(st, expr) {
                     let resolved = self.resolve_type_alias(&ty);
