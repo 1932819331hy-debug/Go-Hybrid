@@ -55,6 +55,15 @@ jobs:
           cd spikes/w012-analyzer
           go test -race ./...
 
+      - name: 20k disposable guest lifecycle stress
+        env:
+          HYBRID_WASM_PATH: ${{ github.workspace }}/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm
+          W012_LONG_STRESS: '1'
+        run: |
+          set -euxo pipefail
+          cd spikes/w012-analyzer
+          go test -run '^TestDisposableGuestLifecycle20000$' -count=1 -v
+
       - name: Cache invalidation regression
         env:
           HYBRID_WASM_PATH: ${{ github.workspace }}/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm
