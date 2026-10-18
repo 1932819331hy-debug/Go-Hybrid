@@ -51,7 +51,7 @@ type Engine struct {
 	ctx      context.Context
 	runtime  wazero.Runtime
 	compiled wazero.CompiledModule
-	mod      wazero.CompiledModule // keep ref
+	cache    wazero.CompilationCache // optional, held until Close
 }
 
 var (
@@ -68,29 +68,58 @@ func wasmArtifactPath() string {
 	return filepath.Join("..", "..", "compiler", "target", "wasm32-unknown-unknown", "release", "hy_wasm.wasm")
 }
 
+// newEngine loads the same checker as GetEngine with an optional filesystem
+// compilation cache. A cache is not an analysis-result cache: every request
+// still executes the checker and fail-closed diagnostic validation.
+func newEngine(wasmPath, cacheDir string) (*Engine, error) {
+	wasmBytes, err := os.ReadFile(wasmPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read wasm binary: %w", err)
+	}
+	ctx := context.Background()
+	config := wazero.NewRuntimeConfig().WithCloseOnContextDone(true)
+	var cache wazero.CompilationCache
+	if cacheDir != "" {
+		if err := os.MkdirAll(cacheDir, 0700); err != nil {
+			return nil, fmt.Errorf("prepare WASM compilation cache: %w", err)
+		}
+		cache, err = wazero.NewCompilationCacheWithDir(cacheDir)
+		if err != nil {
+			return nil, fmt.Errorf("open WASM compilation cache: %w", err)
+		}
+		config = config.WithCompilationCache(cache)
+	}
+	r := wazero.NewRuntimeWithConfig(ctx, config)
+	compiled, err := r.CompileModule(ctx, wasmBytes)
+	if err != nil {
+		_ = r.Close(ctx)
+		if cache != nil {
+			_ = cache.Close(ctx)
+		}
+		return nil, fmt.Errorf("failed to compile wasm module: %w", err)
+	}
+	return &Engine{ctx: ctx, runtime: r, compiled: compiled, cache: cache}, nil
+}
+
+func (e *Engine) Close() error {
+	err := e.runtime.Close(e.ctx)
+	if e.cache != nil {
+		cacheErr := e.cache.Close(e.ctx)
+		if err == nil {
+			err = cacheErr
+		}
+	}
+	return err
+}
+
 func GetEngine(wasmPath string) (*Engine, error) {
 	globalEngineOnce.Do(func() {
 		if wasmPath == "" {
 			wasmPath = defaultWasmPath
 		}
-		wasmBytes, err := os.ReadFile(wasmPath)
-		if err != nil {
-			globalEngineErr = fmt.Errorf("failed to read wasm binary: %w", err)
-			return
-		}
-		ctx := context.Background()
-		r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCloseOnContextDone(true))
-		compiled, err := r.CompileModule(ctx, wasmBytes)
-		if err != nil {
-			r.Close(ctx)
-			globalEngineErr = fmt.Errorf("failed to compile wasm module: %w", err)
-			return
-		}
-		globalEngine = &Engine{
-			ctx:      ctx,
-			runtime:  r,
-			compiled: compiled,
-		}
+		// Opt-in: unset preserves the original in-memory-only runtime. The
+		// cache stores compiled WASM machine code, not checker verdicts.
+		globalEngine, globalEngineErr = newEngine(wasmPath, os.Getenv("HYBRID_W012_CACHE_DIR"))
 	})
 	return globalEngine, globalEngineErr
 }
