@@ -158,11 +158,22 @@ def main():
     hyb, baseline_path, progs = args[0], args[1], args[2:]
 
     try:
-        with open(baseline_path) as source:
-            baseline = json.load(source)
+        with open(baseline_path, encoding="utf-8") as f:
+            baseline = json.load(f)
     except FileNotFoundError:
         baseline = {"version": 1, "blocks": {}}
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"GATE ERROR: {baseline_path}: malformed baseline JSON: {e}")
+        sys.exit(2)
+
+    if not isinstance(baseline, dict):
+        print(f"GATE ERROR: {baseline_path}: baseline must be a JSON object, got {type(baseline).__name__}")
+        sys.exit(2)
+
     base = baseline.setdefault("blocks", {})
+    if not isinstance(base, dict):
+        print(f"GATE ERROR: {baseline_path}: baseline blocks must be a JSON object, got {type(base).__name__}")
+        sys.exit(2)
 
     current = {}
     for prog in progs:
