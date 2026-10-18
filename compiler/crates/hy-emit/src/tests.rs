@@ -704,7 +704,7 @@ fn sibling_labeled_loops_get_distinct_go_labels() {
     // emitted two declarations → `go vet`: "label hyLoop already declared",
     // so an accepted program could never build.
     let go = emit(
-        "fn main() {\n    for i in 0..2 {\n        break loop\n    }\n    for j in 0..2 {\n        break loop\n    }\n}\n",
+        "fn main() {\n    loop {\n        break loop\n    }\n    loop {\n        break loop\n    }\n}\n",
     );
     assert_eq!(
         go.matches("hyLoop:").count(),
@@ -729,7 +729,7 @@ fn nested_labeled_loops_break_their_own_loop() {
     // (LX14), so each level carries its own label and each break must name
     // the one it is lexically inside.
     let go = emit(
-        "fn main() {\n    for i in 0..2 {\n        for j in 0..2 {\n            break loop\n        }\n        break loop\n    }\n}\n",
+        "fn main() {\n    loop {\n        loop {\n            break loop\n        }\n        break loop\n    }\n}\n",
     );
     assert_eq!(go.matches("hyLoop:").count(), 1, ":\n{}", go);
     assert_eq!(go.matches("hyLoop1:").count(), 1, ":\n{}", go);
@@ -1828,9 +1828,9 @@ fn match_arm_labeled_break_labels_enclosing_loop() {
 }
 
 #[test]
-fn match_arm_labeled_continue_labels_enclosing_while_for() {
+fn match_arm_labeled_continue_labels_enclosing_loop() {
     let go = emit(
-        "fn main() {\n    o := some(1)\n    x := 1\n    for x > 0 {\n        match o {\n            some(v) => if v > 0 { continue loop }\n            none => {}\n        }\n    }\n}\n",
+        "fn main() {\n    o := some(1)\n    x := 1\n    loop {\n        for x > 0 {\n            match o {\n                some(v) => if v > 0 { continue loop }\n                none => {}\n            }\n        }\n    }\n}\n",
     );
     assert!(go.contains("hyLoop:"), "label missing:\n{}", go);
     assert!(go.contains("continue hyLoop"), ":\n{}", go);
@@ -2529,3 +2529,75 @@ fn parenthesized_slot_loan_lowers_to_copy_and_storeback() {
         go
     );
 }
+
+#[test]
+fn break_loop_and_continue_loop_in_nested_for_bind_nearest_loop_issue_654() {
+    let src = r#"
+package main
+
+import "fmt"
+
+fn main() {
+    rounds := 0
+    loop {
+        rounds += 1
+        if rounds == 4 {
+            fmt.println("loop guard hit")
+            break loop
+        }
+        for i in 0..3 {
+            if i == 1 {
+                break loop
+            }
+        }
+        fmt.println("after for")
+    }
+
+    visits := 0
+    passes := 0
+    loop {
+        passes += 1
+        if passes == 3 {
+            break loop
+        }
+        for v in []int{1, 2, 3} {
+            visits += v
+            continue loop
+        }
+        fmt.println("after for (continue)")
+    }
+}
+"#;
+    let go = emit(src);
+    // Outer loop 1 receives hyLoop:
+    assert!(go.contains("hyLoop:\n\tfor {"), "outer loop 1 must have hyLoop label:\n{}", go);
+    // Inner for i in 0..3 must NOT receive a label
+    assert!(!go.contains("hyLoop1:\n\t\tfor i :="), "inner for must not receive a label:\n{}", go);
+    // break loop inside inner for must break hyLoop
+    assert!(go.contains("break hyLoop\n"), "break loop in inner for must target hyLoop:\n{}", go);
+
+    // Outer loop 2 receives hyLoop1:
+    assert!(go.contains("hyLoop1:\n\tfor {"), "outer loop 2 must have hyLoop1 label:\n{}", go);
+    // continue loop inside inner for must continue hyLoop1
+    assert!(go.contains("continue hyLoop1\n"), "continue loop in inner for must target hyLoop1:\n{}", go);
+}
+
+#[test]
+fn break_loop_inside_for_without_loop_statement_refused_emit() {
+    let src = r#"
+fn main() {
+    for i in 0..3 {
+        if i == 1 {
+            break loop
+        }
+    }
+}
+"#;
+    let err = emit_err(src);
+    assert!(
+        err.contains("break loop` with no enclosing loop"),
+        "expected unsupported error for break loop outside loop statement, got: {}",
+        err
+    );
+}
+

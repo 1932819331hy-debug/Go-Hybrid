@@ -48,6 +48,8 @@ pub(crate) struct FlatInfo<'a> {
     /// for-loop index -> last index inside its body (== the loop index when
     /// the body is empty)
     pub loop_end: HashMap<usize, usize>,
+    /// loop-statement index -> last index inside its body for LoopStmt (ForKind::Infinite).
+    pub infinite_loop_end: HashMap<usize, usize>,
     /// managed-block index -> last index inside its body
     pub managed_end: HashMap<usize, usize>,
     /// binding name -> last statement index referencing it
@@ -81,12 +83,16 @@ impl<'a> FlatInfo<'a> {
         self.managed_end.iter().any(|(&k, &v)| k < idx && idx <= v)
     }
 
-    /// Is statement `idx` lexically inside a `for`/`loop` body (LX14 label
-    /// scope)? `break loop` / `continue loop` outside any loop has no
-    /// target — the checker rejects it (HYB-E3010) instead of letting the
-    /// emitter lower it to `break hyLoop` against an undefined Go label.
+    /// Is statement `idx` lexically inside a `for`/`loop` body?
     pub(crate) fn in_loop(&self, idx: usize) -> bool {
         self.loop_end.iter().any(|(&k, &v)| k < idx && idx <= v)
+    }
+
+    /// Is statement `idx` lexically inside a `loop` statement (`ForKind::Infinite`,
+    /// LX14 label scope)? `break loop` / `continue loop` outside any `loop` statement has no
+    /// target — the checker rejects it (HYB-E3010).
+    pub(crate) fn in_infinite_loop(&self, idx: usize) -> bool {
+        self.infinite_loop_end.iter().any(|(&k, &v)| k < idx && idx <= v)
     }
 
     /// The loop-extent end for a for-statement at `for_idx`.
@@ -177,11 +183,15 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt, named_results: &[String]
             }
             out.mark(out.next, false, true); // Pop at the next stmt (or trailing)
         }
-        Stmt::For { body, .. } => {
+        Stmt::For { kind, body, .. } => {
             // the loop's implicit scope (range/iterate vars) ...
             out.mark(idx, true, false);
             scoped_block(out, body, named_results); // ... and the body's own scope
-            out.loop_end.insert(idx, out.next.saturating_sub(1));
+            let end = out.next.saturating_sub(1);
+            out.loop_end.insert(idx, end);
+            if matches!(kind, hy_syntax::ForKind::Infinite) {
+                out.infinite_loop_end.insert(idx, end);
+            }
             out.mark(out.next, false, true);
         }
         Stmt::Managed { body, .. } => {

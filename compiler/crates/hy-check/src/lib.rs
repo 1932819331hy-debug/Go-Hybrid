@@ -477,7 +477,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         if let Stmt::Break { label: Some(_), span, .. }
         | Stmt::Continue { label: Some(_), span, .. } = stmt
         {
-            if !flat.in_loop(idx) {
+            if !flat.in_infinite_loop(idx) {
                 ck.diags.push(
                     Diagnostic::error(
                         "HYB-E3010",
@@ -486,7 +486,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         "`break loop` / `continue loop` with no enclosing loop — the label has no target here (HYB-E3010)",
                     )
                     .with_notes(vec![
-                        "the `loop` label binds to the nearest enclosing `for`/`loop` (LX14); labels do not cross function or closure boundaries".to_string(),
+                        "the `loop` label binds to the nearest enclosing `loop` statement (LX14); labels do not cross function or closure boundaries".to_string(),
                         "remove the `loop` label (plain `break`/`continue` targets the innermost loop), or move this statement inside a loop".to_string(),
                     ]),
                 );

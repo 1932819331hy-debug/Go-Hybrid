@@ -355,6 +355,7 @@ impl Emitter {
                 // an outer loop's count cannot bless a closure-nested label.
                 let saved_for_depth = self.for_depth;
                 self.for_depth = 0;
+                let saved_loop_labels = std::mem::take(&mut self.loop_labels);
                 let mut out = String::from("func(");
                 out.push_str(&rendered_params);
                 out.push_str(") ");
@@ -383,6 +384,7 @@ impl Emitter {
                 self.body = main_body;
                 self.fnlit_depth -= 1;
                 self.for_depth = saved_for_depth;
+                self.loop_labels = saved_loop_labels;
                 self.handler_writer = saved_writer;
                 self.restore_scope(saved_scope);
                 body_res?;

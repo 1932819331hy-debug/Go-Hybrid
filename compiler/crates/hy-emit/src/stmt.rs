@@ -124,7 +124,7 @@ impl Emitter {
                 // HYB-E3010; this guards closure bodies).
                 match label {
                     Some(_) => {
-                        if self.for_depth == 0 && self.loop_labels.is_empty() {
+                        if self.loop_labels.is_empty() {
                             return Err(EmitError::unsupported(
                                 "`break loop` with no enclosing loop in this function or closure \
                                  — the loop label would have no target (LX14)",
@@ -148,7 +148,7 @@ impl Emitter {
             Stmt::Continue { label, .. } => {
                 match label {
                     Some(_) => {
-                        if self.for_depth == 0 && self.loop_labels.is_empty() {
+                        if self.loop_labels.is_empty() {
                             return Err(EmitError::unsupported(
                                 "`continue loop` with no enclosing loop in this function or \
                                  closure — the loop label would have no target (LX14)",
@@ -1592,9 +1592,12 @@ impl Emitter {
 
     fn emit_for_inner(&mut self, kind: &ForKind, body: &Block) -> Result<(), EmitError> {
         // A labeled `break loop` / `continue loop` inside this loop (NOT
-        // inside a nested loop — that one labels itself) makes this loop the
+        // inside an inner loop statement — that one labels itself) makes this loop the
         // Go label target: `hyLoop:` + the for head, `break hyLoop` inside.
-        let needs_label = self.block_has_loop_break(body);
+        // SPEC LX14: `break loop` / `continue loop` binds ONLY to the nearest enclosing
+        // `loop` statement (`ForKind::Infinite`), NEVER to a `for` (range/iterate/while).
+        let is_infinite_loop = matches!(kind, ForKind::Infinite);
+        let needs_label = is_infinite_loop && self.block_has_loop_break(body);
         // Two sibling loops each owning a `break loop` would both declare
         // `hyLoop:` — Go rejects that (`label hyLoop already declared`), and
         // no emission can fix a duplicate declaration, so each labeled loop
@@ -1838,7 +1841,13 @@ impl Emitter {
                         .map(|o| self.stmt_has_loop_break(o))
                         .unwrap_or(false)
             }
-            Stmt::For { .. } => false, // nested loop labels itself
+            Stmt::For { kind, body, .. } => {
+                if matches!(kind, ForKind::Infinite) {
+                    false // inner infinite loop owns breaks directly inside it
+                } else {
+                    self.block_has_loop_break(body)
+                }
+            }
             Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
                 self.block_has_loop_break(block)
             }
