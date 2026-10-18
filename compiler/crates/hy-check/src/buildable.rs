@@ -206,7 +206,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         OpKind::Map(k, v) => is_fully_resolved(k) && is_fully_resolved(v),
         // A fn kind only carries results here, so it is not evidence about
         // members either way.
-        OpKind::Fn(_) => false,
+        OpKind::Fn(..) => false,
     }
 }
 
@@ -1629,30 +1629,6 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #682 U7 — a lone multi-value call as the whole argument list is legal
-    /// only when the callee takes exactly that many parameters. `g(two())` for
-    /// a 1-param `g` is `too many arguments in call to g`; for a 2-param `g` it
-    /// builds.
-    ///
-    /// Deliberately scoped to the multi-value shape: this does NOT check the
-    /// ordinary one-argument-per-parameter rule (open PR #620 adds that as
-    /// `check_user_fn_arity`), so the two cannot double-report on the same
-    /// call. It fires only when a multi-value call is the sole argument.
-    fn check_multi_value_arg_arity(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
-        let Some(n) = self.multi_value_arg_count(args) else {
-            return;
-        };
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return;
-        };
-        let head = Checker::base_named_type_str(name);
-        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
-            return;
-        };
-        let want = f.params.len();
-        if want == n {
-        );
-    }
     /// #577 C9 — a closure or `fn`-typed value whose declared parameter count
     /// is known (`f := fn(x int) int {...}; f(1, 2)`).
     fn report_local_arity(&mut self, name: &str, want: usize, got: usize, span: Span) {
@@ -1699,6 +1675,14 @@ impl<'a> Collector<'a> {
         // Generic instantiations (`id[int](x)`) carry type arguments the
         // parameter list does not describe; leave them to the type checker.
         if !f.type_params.is_empty() {
+            return;
+        }
+        // A lone multi-value call IS the whole argument list and expands to one
+        // argument per result: `g(two())` for a 2-param `g` is one written
+        // argument but two effective ones, and it builds. #682 U7's
+        // `check_multi_value_arg_arity` owns exactly that comparison, so
+        // counting the written `args.len()` here would reject buildable Go.
+        if self.multi_value_arg_count(args).is_some() {
             return;
         }
         let (want, got) = (f.params.len(), args.len());
@@ -1845,8 +1829,35 @@ impl<'a> Collector<'a> {
 
     fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
         if !kinds_conflict(want, got) {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot return a value of type `{}` from a function declaring `{}` — Go refuses `cannot use ... as {} value in return statement` (HYB-E1002)",
+                got.label(),
+                want.label(),
+                want.label()
+            ),
+            "a returned value must be assignable to its declared result type; write an explicit conversion when a conversion is intended",
         );
     }
+
+    /// #682 U7 — a lone multi-value call as the whole argument list is legal
+    /// only when the callee takes exactly that many parameters.
+    fn check_multi_value_arg_arity(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
+        let Some(n) = self.multi_value_arg_count(args) else {
+            return;
+        };
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        let head = Checker::base_named_type_str(name);
+        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+            return;
+        };
+        let want = f.params.len();
+        if want == n {
             return;
         }
         self.emit_e1002(
@@ -1860,12 +1871,6 @@ impl<'a> Collector<'a> {
                 name
             ),
             "a multi-value call expands to one argument per result; the callee must accept exactly that many",
-                "cannot return a value of type `{}` from a function declaring `{}` — Go refuses `cannot use ... as {} value in return statement` (HYB-E1002)",
-                got.label(),
-                want.label(),
-                want.label()
-            ),
-            "a returned value must be assignable to its declared result type; write an explicit conversion when a conversion is intended",
         );
     }
 
@@ -2484,6 +2489,15 @@ impl<'a> Collector<'a> {
                             "only function-typed struct fields or declared methods can be called",
                         );
                     }
+                    // `u.cb(1, 2)` where `cb fn(x int) int` — the field type
+                    // states the count.
+                    if !has_method {
+                        if let OpKind::Fn(_, Some(want)) = fk {
+                            if want != args.len() {
+                                self.report_local_arity(&callee.render(), want, args.len(), span);
+                            }
+                        }
+                    }
                 } else if name == "pop" {
                     self.check_slice_pop_operands(base, &bk, args, span);
                 } else if !has_method {
@@ -2514,15 +2528,6 @@ impl<'a> Collector<'a> {
                             ),
                             "declare the method on that type, or call something that exists",
                         );
-                    }
-                    // `u.cb(1, 2)` where `cb fn(x int) int` — the field type
-                    // states the count.
-                    if !has_method {
-                        if let OpKind::Fn(_, Some(want)) = fk {
-                            if want != args.len() {
-                                self.report_local_arity(&callee.render(), want, args.len(), span);
-                            }
-                        }
                     }
                 }
                 if has_method {

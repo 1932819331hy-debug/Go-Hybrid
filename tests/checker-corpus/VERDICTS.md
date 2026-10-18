@@ -975,5 +975,5 @@ Reproduction (checker built from the branch tree, pinned rustc 1.99.0 /
 go1.26.9): `python3 tools/corpus_harness.py --bin <hyb>` reports **109/109
 verdict agreement, tripwire not fired**.
 
-With this registration the corpus is **109 programs: ACCEPT 34 ·
-ACCEPT-MANAGED 2 · REJECT 73** — main's 105 plus these four.
+With this registration the corpus is **113 programs: ACCEPT 35 ·
+ACCEPT-MANAGED 2 · REJECT 76** — main's 105 plus these four.
