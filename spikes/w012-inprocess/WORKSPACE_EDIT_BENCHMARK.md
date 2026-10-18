@@ -26,3 +26,22 @@ From the root of the repository, first build both artifacts with the toolchain v
 The benchmark models only the request made *after* an edit. The native path must create a subprocess and read the file; Engine.Check receives source bytes in-process as an embedding host could. The paths are not identical user interfaces and no complete workspace reanalysis is performed. Cold compile time is isolated, never hidden in or misrepresented as warm request latency.
 
 No assertion is made about editor startup, stock gopls, LSP, live type bridging, Docker image size, binary release packaging, or production RSS/long-duration memory use. The original M2 goal requires additional, independently verifiable experiments for these costs. The public Engine.Check may remain slower than the native subprocess; if so, report that falsification instead of substituting a different (faster) reused-instance prototype.
+
+
+## Observed on hosted CI — 2026-10-19 JST
+
+All runs built their own checker artifacts from the tested pull-request checkout; the raw samples are attached to each linked workflow run. These are different runs on hosted Linux workers, not a performance guarantee across machines.
+
+| Validated checkout / run | Native p50 | Public Engine.Check p50 | Sequential reused-guest p50 | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| 7d0a942 / [39172638567](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39172638567) | 1.466 ms | 2.902 ms | not measured | Public WASM path slower |
+| 9c04ee6 / [39173168608](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39173168608) | 1.458 ms | 2.648 ms | 1.789 ms | Reuse reduces guest creation overhead, but remains slower than native |
+| 2e0a2b8 / [39174111506](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39174111506) | 1.485 ms | 2.613 ms | 1.792 ms | Latest fully validated regular edit sample still favors native |
+
+For the 9c04ee6 100-edit sample, the native subprocess finished faster in **all 100 paired trials** than both the public in-process path and the experimental reused guest. The experimental reused guest finished faster than the public in-process path in all 100 pairs. This is limited to one fixture, one Linux job and sequential execution, not a representative IDE workload.
+
+**Cold WASM compilation cache:** The later 2e0a2b8 run executed two *different Go processes* using the same optional HYBRID_W012_CACHE_DIR and matching WASM/native hashes. Public GetEngine cold initialization measured **616.613 ms for the first process** and **19.585 ms for the second**. This is a real cross-process compilation-cache benefit; it does **not** alter Engine.Check's hot request speed. The cache is opt-in; a directory controlled by the user must be protected from external modification. The control never caches source analysis results.
+
+**Go consumer without a Rust compiler invocation:** In [run 39174111506](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39174111506), a separate workflow job downloaded the precompiled WASM from the Rust-capable build job, compiled the Go hybvet executable with no Rust installation step, and executed failing-then-passing .hy source tests while cargo and rustc command names were explicitly poisoned. This verifies an execution boundary without *invoking* the Rust toolchain. It is not proof that the hosted VM contains no Rust installation, nor that a ready-to-install distribution has been shipped.
+
+**Decision consequence:** Do not replace the production per-check disposable instance on these measurements. The proposed long-lived reused guest remains an isolated sequential research control; cancellation and concurrent ownership must be validated before any production pooling. For batch runs, native CLI is currently the faster measured path. A packaged Go host plus shipped WASM and a protected compilation cache is a plausible deployment benefit, but gopls integration, CI Docker footprint, broad-workload latency and RSS remain unproven.
