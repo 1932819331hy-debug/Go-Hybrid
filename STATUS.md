@@ -1,4 +1,5 @@
 # STATUS (for the human — 15 lines max)
+- Contributor installer fix (2026-10-18): relative install destinations now keep working after changing directory; three baseline failures reproduced, all 22 offline installer tests pass. Compiler/upstream CI and bounty review remain pending.
 - Contributor runner fix: required result files now affect job success; reproduced a false green on unchanged main, with offline regressions. Pending upstream CI/review, no bounty award assumed.
 
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
