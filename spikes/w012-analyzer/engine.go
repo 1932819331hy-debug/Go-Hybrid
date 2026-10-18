@@ -26,18 +26,32 @@ type AnalysisResult struct {
 }
 
 // Invariant: AnalysisFailure MUST NEVER become Accept, nor masquerade as Reject.
+// Accept may legitimately carry warning/note diagnostics; only severity=error
+// is incompatible with an Accept verdict.
 func (r *AnalysisResult) CheckInvariant() error {
 	switch r.Verdict {
 	case VerdictAccept:
 		if r.Failure != nil {
 			return errors.New("INVARIANT VIOLATION: Failure present in Accept verdict")
 		}
-		if len(r.Diagnostics) > 0 {
-			return errors.New("INVARIANT VIOLATION: Diagnostics present in Accept verdict")
+		for _, d := range r.Diagnostics {
+			if d.Severity == "error" {
+				return errors.New("INVARIANT VIOLATION: error diagnostic present in Accept verdict")
+			}
 		}
 	case VerdictReject:
 		if r.Failure != nil {
 			return errors.New("INVARIANT VIOLATION: Failure present in Reject verdict (infrastructure failure masquerading as user rejection)")
+		}
+		hasError := false
+		for _, d := range r.Diagnostics {
+			if d.Severity == "error" {
+				hasError = true
+				break
+			}
+		}
+		if !hasError {
+			return errors.New("INVARIANT VIOLATION: Reject verdict without an error diagnostic")
 		}
 	case VerdictAnalysisFailure:
 		if r.Failure == nil {
@@ -49,7 +63,7 @@ func (r *AnalysisResult) CheckInvariant() error {
 	return nil
 }
 
-// WasmABI abstracts the low-level WASM memory and function boundary
+// WasmABI abstracts the low-level WASM memory and default check boundary.
 type WasmABI interface {
 	Alloc(ctx context.Context, byteLen uint64) (uint32, error)
 	Free(ctx context.Context, ptr, byteLen uint64) error
@@ -58,12 +72,21 @@ type WasmABI interface {
 	ReadMemory(offset, byteCount uint32) ([]byte, bool)
 }
 
-// WazeroInstanceABI implements WasmABI backed by a real Wazero api.Module
+// WasmManagedABI is the optional extended boundary that mirrors
+// `hyb check --json --report-managed`. Keeping it separate preserves
+// compatibility with historical WASM artifacts that expose only hy_wasm_check.
+type WasmManagedABI interface {
+	WasmABI
+	CheckManaged(ctx context.Context, ptr, byteLen uint64) (uint64, error)
+}
+
+// WazeroInstanceABI implements WasmABI backed by a real Wazero api.Module.
 type WazeroInstanceABI struct {
-	mod     api.Module
-	allocFn api.Function
-	freeFn  api.Function
-	checkFn api.Function
+	mod            api.Module
+	allocFn        api.Function
+	freeFn         api.Function
+	checkFn        api.Function
+	managedCheckFn api.Function
 }
 
 func NewWazeroInstanceABI(mod api.Module) (*WazeroInstanceABI, error) {
@@ -79,10 +102,11 @@ func NewWazeroInstanceABI(mod api.Module) (*WazeroInstanceABI, error) {
 	}
 
 	return &WazeroInstanceABI{
-		mod:     mod,
-		allocFn: allocFn,
-		freeFn:  freeFn,
-		checkFn: checkFn,
+		mod:            mod,
+		allocFn:        allocFn,
+		freeFn:         freeFn,
+		checkFn:        checkFn,
+		managedCheckFn: mod.ExportedFunction("hy_wasm_check_managed"),
 	}, nil
 }
 
@@ -107,7 +131,18 @@ func (w *WazeroInstanceABI) Free(ctx context.Context, ptr, byteLen uint64) error
 }
 
 func (w *WazeroInstanceABI) Check(ctx context.Context, ptr, byteLen uint64) (uint64, error) {
-	res, err := w.checkFn.Call(ctx, ptr, byteLen)
+	return callPackedCheck(ctx, w.checkFn, ptr, byteLen)
+}
+
+func (w *WazeroInstanceABI) CheckManaged(ctx context.Context, ptr, byteLen uint64) (uint64, error) {
+	if w.managedCheckFn == nil {
+		return 0, errors.New("missing optional export hy_wasm_check_managed")
+	}
+	return callPackedCheck(ctx, w.managedCheckFn, ptr, byteLen)
+}
+
+func callPackedCheck(ctx context.Context, fn api.Function, ptr, byteLen uint64) (uint64, error) {
+	res, err := fn.Call(ctx, ptr, byteLen)
 	if err != nil {
 		return 0, err
 	}
@@ -150,6 +185,14 @@ func (e *WasmEngine) Close() error {
 }
 
 func (e *WasmEngine) CheckSource(ctx context.Context, src string) *AnalysisResult {
+	return e.checkSource(ctx, src, false)
+}
+
+func (e *WasmEngine) CheckSourceManaged(ctx context.Context, src string) *AnalysisResult {
+	return e.checkSource(ctx, src, true)
+}
+
+func (e *WasmEngine) checkSource(ctx context.Context, src string, reportManaged bool) *AnalysisResult {
 	if err := ctx.Err(); err != nil {
 		return &AnalysisResult{
 			Verdict: VerdictAnalysisFailure,
@@ -174,11 +217,26 @@ func (e *WasmEngine) CheckSource(ctx context.Context, src string) *AnalysisResul
 		}
 	}
 
+	if reportManaged {
+		return CheckSourceWithManagedABI(ctx, abi, src)
+	}
 	return CheckSourceWithABI(ctx, abi, src)
 }
 
-// CheckSourceWithABI runs analysis against any WasmABI implementation
+// CheckSourceWithABI runs analysis against the historical/default WASM boundary.
 func CheckSourceWithABI(ctx context.Context, abi WasmABI, src string) *AnalysisResult {
+	return checkSourceWithCall(ctx, abi, src, abi.Check)
+}
+
+// CheckSourceWithManagedABI runs the same validated host boundary but asks the
+// guest to include its managed-audit report in the summary.
+func CheckSourceWithManagedABI(ctx context.Context, abi WasmManagedABI, src string) *AnalysisResult {
+	return checkSourceWithCall(ctx, abi, src, abi.CheckManaged)
+}
+
+type wasmCheckCall func(context.Context, uint64, uint64) (uint64, error)
+
+func checkSourceWithCall(ctx context.Context, abi WasmABI, src string, call wasmCheckCall) *AnalysisResult {
 	if err := ctx.Err(); err != nil {
 		return &AnalysisResult{
 			Verdict: VerdictAnalysisFailure,
@@ -210,7 +268,7 @@ func CheckSourceWithABI(ctx context.Context, abi WasmABI, src string) *AnalysisR
 		}
 	}
 
-	packed, err := abi.Check(ctx, uint64(srcPtr), srcLen)
+	packed, err := call(ctx, uint64(srcPtr), srcLen)
 	if err != nil {
 		return &AnalysisResult{
 			Verdict: VerdictAnalysisFailure,
@@ -264,7 +322,7 @@ func CheckSourceWithABI(ctx context.Context, abi WasmABI, src string) *AnalysisR
 		return &AnalysisResult{Verdict: VerdictAnalysisFailure, Failure: fmt.Errorf("infrastructure error: malformed diagnostic envelope: %w", err)}
 	}
 	if out.Summary.Verdict == "accept" {
-		return &AnalysisResult{Verdict: VerdictAccept, Summary: &out.Summary}
+		return &AnalysisResult{Verdict: VerdictAccept, Diagnostics: out.Diagnostics, Summary: &out.Summary}
 	}
 	return &AnalysisResult{Verdict: VerdictReject, Diagnostics: out.Diagnostics, Summary: &out.Summary}
 }
