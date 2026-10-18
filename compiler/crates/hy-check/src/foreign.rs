@@ -178,6 +178,8 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         // `atomic.load_pointer` / `atomic.swap_pointer` return an
         // unsafe.Pointer to arbitrary state — not a primitive (row 11)
         ("atomic", "load_pointer" | "swap_pointer") => TypeShape::Unknown,
+        ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
+        ("errors", "is" | "Is") => TypeShape::Primitive,
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
