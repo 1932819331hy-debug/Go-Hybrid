@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 89 programs** — ACCEPT 29 · ACCEPT-MANAGED 2 ·
-REJECT 58 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 91 programs** — ACCEPT 30 · ACCEPT-MANAGED 2 ·
+REJECT 59 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -20,7 +20,7 @@ the new fixtures.
 
 The prose below is the original pre-registration statement, kept as written
 on its date: the corpora sizes it names (18, 20) are what the corpus held
-then, not today's 89. The dated tripwire baseline is preserved as historical
+then, not today's 91. The dated tripwire baseline is preserved as historical
 for the same reason.
 
 18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
@@ -84,3 +84,16 @@ reviewer can see why ACCEPT is correct rather than an oversight.
 
 With this registration the corpus is **89 programs: ACCEPT 29 ·
 ACCEPT-MANAGED 2 · REJECT 58**.
+
+`*-addr-of-call-*.hy` — G0st13 (PR #436): the corpus-side pin for the
+address-of launder (#435). `collect_ref_roots` walks `AddrOf` and the
+`UnOp::Addr` spelling, so `p := keep(&h)` contributes its root and `move h`
+freezes it — the escape rejects with `HYB-E3003`. The ACCEPT control keeps a
+read-only `read(&h)` (address taken, scalar returned) legal so the rule
+cannot degrade into "never take an address". Unit tests carried in
+`hy-check/tests/addr_of_alias.rs` (reject, the direct `&h` twin, both
+controls). Registered as 65/66: the PR authored them as 61/62, but 61–64
+were taken before it landed.
+
+With this registration the corpus is **91 programs: ACCEPT 30 ·
+ACCEPT-MANAGED 2 · REJECT 59**.

@@ -867,3 +867,18 @@ pass every case in this corpus and still accept this program.
 
 (Registered as 64: PR #451 authored it as 56, but 56-63 were taken by the
 defer/shadowing waves before it landed. Suifeng-2077.)
+
+## Additive corpus registration — 2026-10-17: address-of launder through a call (#435)
+
+`collect_ref_roots` walks `AddrOf` and the `UnOp::Addr` spelling, so `&h`
+now contributes its root. These two fixtures pin the behaviour from the corpus
+side: the escape must reject, and a read-only use of the same address must stay
+accepted so the rule cannot degrade into "never take an address".
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 65 | 65-addr-of-call-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `p := keep(&h)` then `task worker(move h)` then a write through `p` |
+| 66 | 66-addr-of-call-read-control | ACCEPT | — | — | `read(&h)` returns a scalar, so no alias survives the call |
+
+(Registered as 65/66: PR #436 authored them as 61/62, but 61–64 were taken
+by the string-escape/shadowing/send waves before it landed. G0st13.)
