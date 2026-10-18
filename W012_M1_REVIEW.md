@@ -1,5 +1,27 @@
 # W012 M1 evidence: current validation and historical snapshot
 
+## Maintainer decision memo (2026-10-19 JST)
+
+**Scope:** An executable M1 feasibility spike for [W-012 / #268](https://github.com/limitlessprojects/Go-Hybrid/issues/268), not a request to replace `hyb`, claim a stock-`gopls` plugin, or merge a production IDE feature. This answers solicitation #5 by investigating the *delivery/execution boundary*; W-011 independently attacks the `.hy`/Go syntax surface. The two approaches are adjacent and can compose.
+
+**Latest source/evidence:** [PR #556](https://github.com/limitlessprojects/Go-Hybrid/pull/556), commit `7b4d8c35e7349dba532084ae1555412ce6d314a7`; [W-012 validation run 39171041567](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39171041567) **PASS**; [compiler CI 39171041397](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39171041397) **PASS**. The validation log reports **113/113 corpus expected verdict agreements**, **113/113 full native/WASM normalized JSON-envelope agreements**, `go test -race -count=1 ./...`, and `go vet ./...` successful. Each fixture count belongs to that tested checkout, not an unbounded future corpus.
+
+**Execution/correctness hardening:** Rust's authoritative `hy-check` is compiled as a WASM guest and invoked from a Go `analysis.Analyzer` via wazero. Caller cancellation and an internal 30-second timeout fail closed; trap, malformed envelope and guest-memory errors cannot silently produce an accepted verdict. Anonymous module instances make concurrent checks on the shared runtime viable (the named-instance failure was reproduced on the rescue branch). Managed warning diagnostics remain nonfatal to `go vet`. Unicode-scalar positions convert to Go byte offsets and invalid source coordinates fail closed. Input discovery is deterministic; unreadable declared `.hy` inputs cannot be skipped silently.
+
+**Cache/invalidation boundary:** Stock `go vet -vettool` does not track sibling `.hy` bytes as action-cache dependencies. The supported `hybvet vet` wrapper therefore uses `go vet -a` plus a pre-run SHA-256 workspace snapshot, verifies the actual bytes at each declared/scanned `.hy` read, then verifies the snapshot again after vet. A dedicated regression tests valid→invalid→valid edits, a second `.hy` file, mutated/deleted/added files and stale snapshots. The conservative `-a` choice favors correctness over production-speed cache performance.
+
+**Falsification and cost — three maintainer questions:**
+
+1. **WASM/Wazero versus a native-Go checker rewrite:** The embedded WASM reuses one existing semantic engine instead of maintaining a second borrow-checker implementation. Portability and single-source semantics are plausible gains. This does not by itself prove a no-Rust *build* or no-binary runtime distribution; a compiled WASM artifact still has to be supplied.
+2. **Latency:** The historical `0.269 ms / 18.7×` benchmark measured a pre-instantiated experimental guest path, not today's public `Engine.Check`. The separate 100-sample Linux snapshot for the corrected public wrapper measured p50 **2.143 ms** versus native subprocess+JSON p50 **1.204 ms**, i.e. the implemented wrapper was **slower** on that host. Latest head and real IDE keypress-to-diagnostic latency have not been rebenchmarked. Do not infer sub-millisecond user-visible checks or an end-to-end speedup.
+3. **Fail-closed input/diagnostic contract:** Proven at the WASM ABI and on-disk Go analyzer boundary for the tested corpus and injected failure classes. A stock `gopls` instance does **not** dynamically load third-party analyzers or open `.hy` unsaved buffers. `pass.TypesInfo` supplies Go's *structural types*, not Hybrid's `Produce/Borrow/Mutate/Consume` ownership effects; typed descriptors and an editor-specific LSP/host are still needed.
+
+**M2 acceptance/failure experiment to run next (not yet claimed):** benchmark 100 sequential *real source edits* in a 25-file workspace against a native CLI and a deliberately specified in-process request path on the **same host**, reporting cold startup separately from warm p50/p95/p99, cancellation, memory/RSS and pre/post artifact sizes. Explicitly include CI onboarding/image-footprint cost with and without the Rust toolchain. If the only correct public path remains slower, publish that as a negative result and recommend retaining the native CLI for batch checks while limiting WASM to embedding use cases where deployment characteristics, rather than latency, justify it.
+
+**Review disposition requested:** independent **M1 feasibility verdict** on the measured tradeoff, not a claim of achieved `gopls`, browser playground or a $250 award. The report below retains historical observations unchanged for provenance.
+
+---
+
 ## Latest hosted validation (2026-10-18)
 
 The [latest hosted M1 parity workflow](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39169356538), against PR head `e029d661d8ce7f79e7f362a7ee97bf3251d6a274` merged with its then-current base, passed **113/113 checker-corpus fixture agreements** and **113/113 complete normalized native/WASM JSON-envelope comparisons**. Its `go test -race -count=1 ./...` and `go vet ./...` steps succeeded. The [independent compiler CI](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39169356527) passed as well.
