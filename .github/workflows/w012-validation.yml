@@ -69,3 +69,17 @@ jobs:
           set -euo pipefail
           go test -race -count=1 ./...
           go vet ./...
+      - name: Reproduce 25-file 100-edit request-path comparison
+        working-directory: spikes/w012-analyzer
+        run: |
+          set -euo pipefail
+          go run ./cmd/editbench -root ../.. -files 25 -edits 100 -warmup 10 \
+            -output "$RUNNER_TEMP/w012-edit-benchmark.json"
+      - name: Publish raw request latency samples
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: w012-request-latency-raw
+          path: ${{ runner.temp }}/w012-edit-benchmark.json
+          if-no-files-found: ignore
+          retention-days: 7
