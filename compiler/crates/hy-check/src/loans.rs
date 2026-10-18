@@ -27,9 +27,12 @@ use hy_diag::{Diagnostic, Span};
 use hy_syntax::{AssignOp, Block, Expr, FnDecl, LocalDecl, LocalKind, Place, PlaceKind, Stmt};
 use std::collections::{HashMap, HashSet};
 
-/// Read-only call targets that can never mutate a map argument — the A3
-/// callee scan fails closed on everything else (#111).
-const A3_PURE_FNS: &[&str] = &["len", "cap", "print", "println"];
+/// Read-only / non-map-mutating builtin call targets that can never insert or
+/// delete on a map argument — the A3 callee scan fails closed on everything
+/// else (#111). (`delete` is checked explicitly by `check_delete_conflict`.)
+const A3_PURE_FNS: &[&str] = &[
+    "len", "cap", "print", "println", "append", "copy", "make", "new", "close", "panic", "recover",
+];
 /// Read-only packages (`fmt.println(m)`, `strings.split(...)`) — their
 /// methods receive values without storing to them (#111).
 const A3_PURE_PKGS: &[&str] = &["fmt", "strings", "strconv", "math", "unicode"];
@@ -222,6 +225,7 @@ impl<'a> Checker<'a> {
                 self.check_call_const_writes(st, cr, &HashSet::new());
                 self.record_callee_param_stores(st, cr);
                 let Some(tname) = receiver_type_name(&recv) else {
+                    self.check_a3_method_call(st, cr, idx, &root, &recv, &method);
                     return;
                 };
                 let receiver_moved = self
@@ -299,15 +303,26 @@ impl<'a> Checker<'a> {
                     // A7 borrow-by-default: a handle passed to a Hybrid
                     // function is lent for the call only
                     self.lend_handle_args(st, cr, idx, None);
-                } else if st.closure_mutates.contains_key(&name) {
-                    // A3 #111 form 4: a local closure whose body mutates a
-                    // captured binding — event attributed to this call site.
-                    self.check_a3_closure_call(st, cr, idx, &name);
+                } else {
+                    let resolved_callee = crate::freeze::resolve_alias(st, &name);
+                    if st.closure_mutates.contains_key(&name)
+                        || st.closure_mutates.contains_key(&resolved_callee)
+                    {
+                        // A3 #111 form 4: a local closure whose body mutates a
+                        // captured binding — event attributed to this call site.
+                        self.check_a3_closure_call(st, cr, idx, &name);
+                    } else if !A3_PURE_FNS.contains(&name.as_str()) && name != "delete" {
+                        // Unresolved callee (e.g. a `fn(...)` parameter or local
+                        // function variable): fail-closed on any map argument
+                        // that conflicts with a live slot loan.
+                        self.check_a3_unknown_call_args(st, cr, idx);
+                    }
                 }
             }
             Resolved::None => {
                 self.check_call_const_writes(st, cr, &HashSet::new());
                 self.record_callee_param_stores(st, cr);
+                self.check_a3_inline_or_unknown_call(st, cr, idx);
             }
         }
     }
@@ -398,25 +413,86 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Compute the effective inclusive end index of a loan window, extending
+    /// across any enclosing loop whose body uses the loan (`l.created < lp_idx`
+    /// and `l.last` falls inside `lp_idx..=lp_end`).
+    pub(crate) fn effective_loan_last(&self, st: &FnState, l: &Loan) -> usize {
+        let mut last = l.last;
+        for (&lp_idx, &lp_end) in &st.loop_end {
+            if l.created < lp_end && last >= lp_idx && last <= lp_end {
+                last = last.max(lp_end);
+            }
+        }
+        last
+    }
+
+    pub(crate) fn emit_a3_if_live_pub(
+        &mut self,
+        st: &FnState,
+        path: &str,
+        span: Span,
+        idx: usize,
+        verb: &str,
+    ) {
+        self.emit_a3_if_live(st, path, span, idx, verb);
+    }
+
+    /// Extend any live `LoanTarget::MapSlot` window when a slot-loan binding
+    /// (or an existing alias of one) is copied into `alias_name` (`p := s` or `p = s`).
+    pub(crate) fn extend_map_slot_loan_to_alias(
+        &self,
+        st: &mut FnState,
+        alias_name: &str,
+        val: &Expr,
+        idx: usize,
+    ) {
+        let Expr::Ident { name: src, .. } = unwrap_parens(val) else {
+            return;
+        };
+        let alias_last = st.last_use.get(alias_name).copied().unwrap_or(idx).max(idx);
+        let resolved_src = crate::freeze::resolve_alias(st, src);
+        for loan in &mut st.loans {
+            if let LoanTarget::MapSlot { binding, .. } = &loan.target {
+                if (binding == src || *binding == resolved_src) && loan.created <= idx {
+                    loan.last = loan.last.max(alias_last);
+                }
+            }
+        }
+    }
+
     /// Shared A3 emitter for index-assign inserts and `delete` calls.
     /// Matching is peer-aware (#111): an event on `alias` conflicts with a
     /// loan on `m` when the roots share storage.
     fn emit_a3_if_live(&mut self, st: &FnState, path: &str, span: Span, idx: usize, verb: &str) {
         let Some(loan) = st.loans.iter().find(|l| {
+            let eff_last = self.effective_loan_last(st, l);
             matches!(&l.target, LoanTarget::MapSlot { path: p, .. }
                 if a3_paths_conflict(st, p, path))
                 && l.created <= idx
-                && idx <= l.last
+                && idx <= eff_last
         }) else {
             return;
         };
+        let eff_last = self.effective_loan_last(st, loan);
         let (binding, loan_desc, loan_span, loan_last) = match &loan.target {
             LoanTarget::MapSlot { binding, .. } => {
-                (binding.clone(), loan.desc.clone(), loan.span, loan.last)
+                (binding.clone(), loan.desc.clone(), loan.span, eff_last)
             }
             _ => unreachable!("filtered above"),
         };
         let msg = format!("map {} invalidates the live slot loan `{}`", verb, binding);
+        // One invalidation, one diagnostic: #549's dedicated detectors
+        // (delete/clear/copy) and pr-242's generic mutator scan can both
+        // fire for the SAME call site - same loan, same span. The first,
+        // most specific wording wins; a duplicate would only bury the
+        // signal the corpus count pins.
+        if self.diags.iter().any(|d| {
+            d.code == "HYB-E3102"
+                && d.span == span
+                && d.message.contains(&format!("loan `{}`", binding))
+        }) {
+            return;
+        }
         let notes = vec![
             format!(
                 "{} ({}:{}) is a unique loan on a slot of `{}`, live from creation to its last use (O8, non-lexical window ending at statement {})",
@@ -447,11 +523,14 @@ impl<'a> Checker<'a> {
         let live: Vec<String> = st
             .loans
             .iter()
-            .filter_map(|l| match &l.target {
-                LoanTarget::MapSlot { path, .. } if l.created <= idx && idx <= l.last => {
-                    Some(path.clone())
+            .filter_map(|l| {
+                let eff_last = self.effective_loan_last(st, l);
+                match &l.target {
+                    LoanTarget::MapSlot { path, .. } if l.created <= idx && idx <= eff_last => {
+                        Some(path.clone())
+                    }
+                    _ => None,
                 }
-                _ => None,
             })
             .collect();
         if live.is_empty() {
@@ -489,7 +568,12 @@ impl<'a> Checker<'a> {
     /// #111 form 4: a local closure invoked inside a live slot-loan window
     /// whose recorded mutation roots reach the loaned storage.
     fn check_a3_closure_call(&mut self, st: &FnState, cr: &CallRef, idx: usize, name: &str) {
-        let Some(roots) = st.closure_mutates.get(name) else {
+        let resolved = crate::freeze::resolve_alias(st, name);
+        let Some(roots) = st
+            .closure_mutates
+            .get(name)
+            .or_else(|| st.closure_mutates.get(&resolved))
+        else {
             return;
         };
         if roots.is_empty() {
@@ -500,7 +584,8 @@ impl<'a> Checker<'a> {
             let LoanTarget::MapSlot { path, .. } = &l.target else {
                 continue;
             };
-            if !(l.created <= idx && idx <= l.last) {
+            let eff_last = self.effective_loan_last(st, l);
+            if !(l.created <= idx && idx <= eff_last) {
                 continue;
             }
             if roots.iter().any(|r| a3_paths_conflict(st, path, r)) {
@@ -508,6 +593,161 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
+    }
+
+    /// A3 check for user-defined method calls (`e.bump()`), closure-field calls,
+    /// and unknown method receivers while a map-slot loan is live.
+    fn check_a3_method_call(
+        &mut self,
+        st: &FnState,
+        cr: &CallRef,
+        idx: usize,
+        root: &str,
+        recv: &TypeShape,
+        method: &str,
+    ) {
+        let live: Vec<String> = st
+            .loans
+            .iter()
+            .filter_map(|l| {
+                let eff_last = self.effective_loan_last(st, l);
+                match &l.target {
+                    LoanTarget::MapSlot { path, .. } if l.created <= idx && idx <= eff_last => {
+                        Some(path.clone())
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        let recv_sname = match recv {
+            TypeShape::Struct(Some(s)) => Some(s.clone()),
+            TypeShape::Pointer(inner) => match &**inner {
+                TypeShape::Struct(Some(s)) => Some(s.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let verb = format!("mutation via `{}`", cr.callee.render());
+        let callee_path = walk::expr_path(cr.callee).unwrap_or_else(|| root.to_string());
+        if let Some(sname) = recv_sname {
+            let found_decl = self.file.decls.iter().find_map(|d| match d {
+                hy_syntax::Decl::Fn(f) if f.name == method => {
+                    let r = f.receiver.as_ref()?;
+                    let b = Self::base_named_type(&r.ty)?;
+                    (b == sname).then_some(f)
+                }
+                _ => None,
+            });
+            if let Some(decl) = found_decl {
+                if let Some(r) = &decl.receiver {
+                    if live
+                        .iter()
+                        .any(|p| a3_paths_conflict(st, p, root) || a3_paths_conflict(st, p, &callee_path))
+                        && self.fn_mutates_param(decl, &r.name, 0)
+                    {
+                        for p in &live {
+                            if a3_paths_conflict(st, p, root)
+                                || a3_paths_conflict(st, p, &callee_path)
+                            {
+                                self.emit_a3_if_live(st, p, cr.span, idx, &verb);
+                                return;
+                            }
+                        }
+                    }
+                }
+                for (i, a) in cr.args.iter().enumerate() {
+                    let Some(arg_path) = walk::expr_path(&a.value) else {
+                        continue;
+                    };
+                    if !live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
+                        continue;
+                    };
+                    let mutates = match decl.params.get(i) {
+                        Some(p) => self.fn_mutates_param(decl, &p.name, 0),
+                        None => true,
+                    };
+                    if mutates {
+                        self.emit_a3_if_live(st, &arg_path, cr.span, idx, &verb);
+                        return;
+                    }
+                }
+                return;
+            }
+        }
+        for p in &live {
+            if a3_paths_conflict(st, p, root) || a3_paths_conflict(st, p, &callee_path) {
+                self.emit_a3_if_live(st, p, cr.span, idx, &verb);
+                return;
+            }
+        }
+        self.check_a3_unknown_call_args(st, cr, idx);
+    }
+
+    /// Fail-closed A3 check for calls to unresolved/parameter functions passing
+    /// a loaned map or struct containing a loaned map.
+    fn check_a3_unknown_call_args(&mut self, st: &FnState, cr: &CallRef, idx: usize) {
+        let live: Vec<String> = st
+            .loans
+            .iter()
+            .filter_map(|l| {
+                let eff_last = self.effective_loan_last(st, l);
+                match &l.target {
+                    LoanTarget::MapSlot { path, .. } if l.created <= idx && idx <= eff_last => {
+                        Some(path.clone())
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        let verb = format!("mutation via `{}`", cr.callee.render());
+        for a in cr.args {
+            let Some(arg_path) = walk::expr_path(&a.value) else {
+                continue;
+            };
+            if live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
+                self.emit_a3_if_live(st, &arg_path, cr.span, idx, &verb);
+                return;
+            }
+        }
+    }
+
+    /// A3 check for inline closure calls (`(fn() { m["b"] = ... })()`) or
+    /// other non-identifier call expressions.
+    fn check_a3_inline_or_unknown_call(&mut self, st: &FnState, cr: &CallRef, idx: usize) {
+        if let Expr::FnLit {
+            params,
+            results,
+            body,
+            ..
+        } = unwrap_parens(cr.callee)
+        {
+            let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+            bound.extend(results.iter().filter_map(|r| r.name.clone()));
+            let roots = self.collect_mutation_roots(st, body, &bound);
+            if !roots.is_empty() {
+                let verb = format!("mutation via `{}`", cr.callee.render());
+                for l in &st.loans {
+                    let LoanTarget::MapSlot { path, .. } = &l.target else {
+                        continue;
+                    };
+                    let eff_last = self.effective_loan_last(st, l);
+                    if !(l.created <= idx && idx <= eff_last) {
+                        continue;
+                    }
+                    if roots.iter().any(|r| a3_paths_conflict(st, path, r)) {
+                        self.emit_a3_if_live(st, path, cr.span, idx, &verb);
+                        return;
+                    }
+                }
+            }
+        }
+        self.check_a3_unknown_call_args(st, cr, idx);
     }
 
     /// Does `decl` mutate its parameter `param` (map insert/delete — the
@@ -763,20 +1003,43 @@ impl<'a> Checker<'a> {
                         .or_default()
                         .extend(roots);
                 }
+                let mut cap_bound = bound;
+                let mut caps = Vec::new();
+                collect_capture_idents_block(body, &mut cap_bound, &mut caps);
+                if let Some(&closure_last) = st.last_use.get(name) {
+                    for loan in &mut st.loans {
+                        if let LoanTarget::MapSlot { binding, .. } = &loan.target {
+                            if caps.iter().any(|c| c == binding) {
+                                loan.last = loan.last.max(closure_last);
+                            }
+                        }
+                    }
+                }
             }
             Expr::Ident { name: src, .. } => {
-                if let Some(def) = st.closure_defs.get(src).cloned() {
+                let resolved = crate::freeze::resolve_alias(st, src);
+                if let Some(def) = st
+                    .closure_defs
+                    .get(src)
+                    .or_else(|| st.closure_defs.get(&resolved))
+                    .cloned()
+                {
                     st.closure_defs.insert(name.to_string(), def);
                 }
                 if let Some(existing_fnlit) = st.closure_fnlits.get(src).cloned() {
                     st.closure_fnlits.insert(name.to_string(), existing_fnlit);
                 }
-                if let Some(existing) = st.closure_mutates.get(src).cloned() {
-                    if !existing.is_empty() {
+                let inherited = st
+                    .closure_mutates
+                    .get(src)
+                    .or_else(|| st.closure_mutates.get(&resolved))
+                    .cloned();
+                if let Some(roots) = inherited {
+                    if !roots.is_empty() {
                         st.closure_mutates
                             .entry(name.to_string())
                             .or_default()
-                            .extend(existing);
+                            .extend(roots);
                     }
                 }
             }
@@ -1087,22 +1350,6 @@ impl<'a> Checker<'a> {
             }
             out.extend(added);
         }
-        for _ in 0..8 {
-            let mut added = Vec::new();
-            for r in &out {
-                if let Some(targets) = match_aliases.get(r) {
-                    for t in targets {
-                        if !bound.contains(t) && !out.contains(t) {
-                            added.push(t.clone());
-                        }
-                    }
-                }
-            }
-            if added.is_empty() {
-                break;
-            }
-            out.extend(added);
-        }
         out
     }
 
@@ -1120,6 +1367,7 @@ impl<'a> Checker<'a> {
         // A3 loan creation: `svc := &e.services[existing]` (including parallel defines)
         if l.names.len() == l.values.len() {
             for (name, val) in l.names.iter().zip(l.values.iter()) {
+                self.check_addr_of_const_loan(st, val);
                 if let Some(path) = walk::addr_of_index_base_path(val) {
                     let binding = name.clone();
                     let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
@@ -1133,6 +1381,8 @@ impl<'a> Checker<'a> {
                         span: val.span(),
                         desc: format!("`{} := {}`", binding, val.render()),
                     });
+                } else {
+                    self.extend_map_slot_loan_to_alias(st, name, val, idx);
                 }
             }
         }
@@ -3222,6 +3472,7 @@ impl<'a> Checker<'a> {
                         if src != *name {
                             let matched = self.lookup_binding(st, &src).map(|b| {
                                 let ok = !b.shape.is_sendable_by_type()
+                                    || b.immutable
                                     || self.binding_can_be_borrowed(st, &src);
                                 (ok, b.non_owned_origin.clone())
                             });
@@ -3280,6 +3531,7 @@ impl<'a> Checker<'a> {
                             if src != *name {
                                 let matched = self.lookup_binding(st, &src).map(|b| {
                                     let ok = !b.shape.is_sendable_by_type()
+                                        || b.immutable
                                         || self.binding_can_be_borrowed(st, &src);
                                     (ok, b.non_owned_origin.clone())
                                 });
@@ -4581,7 +4833,7 @@ impl<'a> Checker<'a> {
         self.preserve_peers_before_sever(st, name, shadows_outer);
         st.aliases.remove(name);
         st.share_clear(name);
-        let non_owned_origin = if immutable && !shape.is_sendable_by_type() {
+        let non_owned_origin = if immutable {
             Some(format!("`const {}`", name))
         } else {
             None
@@ -4729,6 +4981,7 @@ impl<'a> Checker<'a> {
         // A3 loan creation on assignment: `x = &m[k]`
         if op == AssignOp::Assign && targets.len() == values.len() {
             for (t, v) in targets.iter().zip(values.iter()) {
+                self.check_addr_of_const_loan(st, v);
                 if let PlaceKind::Ident(name) = &t.kind {
                     if let Some(path) = walk::addr_of_index_base_path(v) {
                         let binding = name.clone();
@@ -4743,6 +4996,8 @@ impl<'a> Checker<'a> {
                             span: v.span(),
                             desc: format!("`{} = {}`", binding, v.render()),
                         });
+                    } else {
+                        self.extend_map_slot_loan_to_alias(st, name, v, idx);
                     }
                     if matches!(self.shape_of_expr(st, v), TypeShape::BorrowHandle(_)) {
                         self.extend_call_loans_to_view(st, v, name, idx);
@@ -5282,6 +5537,29 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// O8 slot/field loans (`&m[k]`, `&c.field`) lower in `hy-emit` to a copy
+    /// plus an unconditional store-back (`m[k] = s`, `c.field = f`) at the end
+    /// of the declaring block. Taking an index or field loan of a `const`
+    /// therefore writes to the `const` at runtime (T22, HYB-E3006).
+    pub(crate) fn check_addr_of_const_loan(&mut self, st: &FnState, val: &Expr) {
+        let Some(operand) = as_addr_of(val) else {
+            return;
+        };
+        if !matches!(operand, Expr::Index { .. } | Expr::Field { .. }) {
+            return;
+        }
+        let Some(root) = operand.root_ident() else {
+            return;
+        };
+        let place = Place {
+            kind: PlaceKind::Ident(root.to_string()),
+            span: val.span(),
+        };
+        if let Some(const_name) = self.const_write_root(st, &place) {
+            self.emit_const_write_error(&const_name, val.span());
+        }
+    }
+
     /// HYB-E3006 — the shared T22 deep-immutability diagnostic (issue #37 /
     /// #123): the write site's span, the resolved const in the message.
     fn emit_const_write_error(&mut self, name: &str, span: Span) {
@@ -5413,7 +5691,13 @@ impl<'a> Checker<'a> {
 
             match stmt {
                 Stmt::Local(l) => {
+                    if check_writes {
+                        for v in &l.values {
+                            self.check_addr_of_const_loan(&cst, v);
+                        }
+                    }
                     self.process_closure_const_local(&mut cst, l);
+                    self.record_local_borrow_aliases(&mut cst, l);
                 }
                 Stmt::Assign {
                     targets,
@@ -5421,6 +5705,11 @@ impl<'a> Checker<'a> {
                     values,
                     ..
                 } => {
+                    if check_writes {
+                        for v in values {
+                            self.check_addr_of_const_loan(&cst, v);
+                        }
+                    }
                     let is_const_write: Vec<bool> = targets
                         .iter()
                         .map(|t| match self.const_write_root(&cst, t) {
@@ -7078,11 +7367,7 @@ impl<'a> Checker<'a> {
                 self.ty_of_expr(&empty, &c.value)
             }
         };
-        let non_owned_origin = if !shape.is_sendable_by_type() {
-            Some(format!("file-level `const {}`", c.name))
-        } else {
-            None
-        };
+        let non_owned_origin = Some(format!("file-level `const {}`", c.name));
         Binding {
             shape,
             ty,
@@ -7483,6 +7768,397 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    fn check_codes(src: &str) -> Vec<String> {
+        let r = check(src);
+        r.diagnostics.into_iter().map(|d| d.code).collect()
+    }
+
+    #[test]
+    fn block_scoped_closure_capture_rejects_shadowed_map_spawn() {
+        let src = "\
+fn worker(m map[string]int, done chan int) {
+    m[\"k\"] = 1
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 1)
+    m := 1
+    _ = m
+    if true {
+        m := map[string]int{\"k\": 0}
+        f := fn() {
+            task worker(m, done)
+        }
+        f()
+        m[\"k\"] = 2
+    }
+    <-done
+}
+";
+        let codes = check_codes(src);
+        assert!(
+            codes.iter().any(|c| c == "HYB-E3001"),
+            "expected HYB-E3001 for block-shadowed map capture, got {:?}",
+            codes
+        );
+    }
+
+    #[test]
+    fn block_scoped_closure_rejects_move_of_ascribed_alias() {
+        let src = "\
+fn worker(m map[string]int, done chan int) {
+    m[\"k\"] = 1
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 2)
+    if true {
+        m := map[string]int{\"k\": 0}
+        f := fn() {
+            var alias map[string]int = m
+            task worker(move alias, done)
+        }
+        f()
+        f()
+    }
+    <-done
+    <-done
+}
+";
+        let codes = check_codes(src);
+        assert!(
+            codes.iter().any(|c| c == "HYB-E3004"),
+            "expected HYB-E3004 for ascribed alias move of block capture, got {:?}",
+            codes
+        );
+    }
+
+    #[test]
+    fn block_scoped_closure_rejects_use_after_move_and_const_write() {
+        let src_uam = "\
+fn worker(m map[string]int, done chan int) {
+    m[\"k\"] = 1
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 1)
+    if true {
+        m := map[string]int{\"k\": 0}
+        task worker(move m, done)
+        f := fn() {
+            m[\"k\"] = 99
+        }
+        f()
+    }
+    <-done
+}
+";
+        let codes_uam = check_codes(src_uam);
+        assert!(
+            codes_uam.iter().any(|c| c == "HYB-E3003"),
+            "expected HYB-E3003 for moved block-scoped map captured in closure, got {:?}",
+            codes_uam
+        );
+
+        let src_const = "\
+fn main() {
+    if true {
+        const c = map[string]int{\"k\": 0}
+        f := fn() {
+            c[\"k\"] = 1
+        }
+        f()
+    }
+}
+";
+        let codes_const = check_codes(src_const);
+        assert!(
+            codes_const.iter().any(|c| c == "HYB-E3006"),
+            "expected HYB-E3006 for block-scoped const write in closure, got {:?}",
+            codes_const
+        );
+    }
+
+    #[test]
+    fn const_map_and_struct_slot_loan_rejected_as_const_write() {
+        let src_map = "\
+struct svc {
+    count int
+}
+
+const shared = map[string]svc{\"a\": svc{count: 1}}
+
+fn worker(done chan int) {
+    s := &shared[\"a\"]
+    _ = s.count
+    done <- 1
+}
+";
+        let codes_map = check_codes(src_map);
+        assert!(
+            codes_map.iter().any(|c| c == "HYB-E3006"),
+            "expected HYB-E3006 for O8 slot loan on const map, got {:?}",
+            codes_map
+        );
+
+        let src_struct = "\
+struct inner {
+    v int
+}
+
+struct cfg {
+    s inner
+}
+
+const global_cfg = cfg{s: inner{v: 1}}
+
+fn main() {
+    p := &global_cfg.s
+    _ = p.v
+}
+";
+        let codes_struct = check_codes(src_struct);
+        assert!(
+            codes_struct.iter().any(|c| c == "HYB-E3006"),
+            "expected HYB-E3006 for O8 field loan on const struct, got {:?}",
+            codes_struct
+        );
+    }
+
+    #[test]
+    fn const_array_and_struct_pointer_borrow_enforces_const_and_origin() {
+        let src_arr = "\
+const arr [2]int = [10, 20]
+
+fn main() {
+    p := &arr
+    p[0] = 99
+}
+";
+        let codes_arr = check_codes(src_arr);
+        assert!(
+            codes_arr.iter().any(|c| c == "HYB-E3006"),
+            "expected HYB-E3006 for write through pointer borrow of const array, got {:?}",
+            codes_arr
+        );
+
+        let src_spawn = "\
+struct cfg {
+    count int
+}
+
+const global_cfg = cfg{count: 1}
+
+fn worker(p *cfg) {
+    p.count = 99
+}
+
+fn main() {
+    p := &global_cfg
+    task worker(move p)
+}
+";
+        let codes_spawn = check_codes(src_spawn);
+        assert!(
+            codes_spawn.iter().any(|c| c == "HYB-E3004"),
+            "expected HYB-E3004 for moving pointer borrow of file-level const struct, got {:?}",
+            codes_spawn
+        );
+    }
+
+    #[test]
+    fn slot_loan_alias_extends_a3_window() {
+        let src = "\
+struct svc {
+    count int
+}
+
+fn main() {
+    m := map[string]svc{\"a\": svc{count: 1}}
+    s := &m[\"a\"]
+    p := s
+    m[\"b\"] = svc{count: 2}
+    p.count = 99
+}
+";
+        let codes = check_codes(src);
+        assert!(
+            codes.iter().any(|c| c == "HYB-E3102"),
+            "expected HYB-E3102 when map is mutated before slot-loan alias use, got {:?}",
+            codes
+        );
+    }
+
+    #[test]
+    fn loop_carried_slot_loan_rejects_post_use_insert_in_loop() {
+        let src = "\
+struct svc {
+    count int
+}
+
+fn main() {
+    m := map[string]svc{\"a\": svc{count: 1}}
+    s := &m[\"a\"]
+    for i in 0..3 {
+        s.count += i
+        m[\"b\"] = svc{count: i}
+    }
+}
+";
+        let codes = check_codes(src);
+        assert!(
+            codes.iter().any(|c| c == "HYB-E3102"),
+            "expected HYB-E3102 for loop-carried slot loan invalidated before next iteration, got {:?}",
+            codes
+        );
+    }
+
+    #[test]
+    fn user_method_and_callee_alias_and_closure_slot_loan_enforce_a3() {
+        let src_method = "\
+struct svc {
+    count int
+}
+
+struct env {
+    m map[string]svc
+}
+
+fn (e *env) bump() {
+    e.m[\"b\"] = svc{count: 2}
+}
+
+fn main() {
+    e := env{m: map[string]svc{\"a\": svc{count: 1}}}
+    s := &e.m[\"a\"]
+    e.bump()
+    s.count = 99
+}
+";
+        assert!(
+            check_codes(src_method).iter().any(|c| c == "HYB-E3102"),
+            "expected HYB-E3102 for user-defined method mutating loaned map"
+        );
+
+        let src_alias_fn = "\
+struct svc {
+    count int
+}
+
+fn mutate_via_alias(t map[string]svc) {
+    alias := t
+    alias[\"b\"] = svc{count: 2}
+}
+
+fn main() {
+    m := map[string]svc{\"a\": svc{count: 1}}
+    s := &m[\"a\"]
+    mutate_via_alias(m)
+    s.count = 99
+}
+";
+        assert!(
+            check_codes(src_alias_fn).iter().any(|c| c == "HYB-E3102"),
+            "expected HYB-E3102 for callee mutating parameter through local alias"
+        );
+
+        let src_closure_loan = "\
+struct svc {
+    count int
+}
+
+fn main() {
+    m := map[string]svc{\"a\": svc{count: 1}}
+    f := fn() {
+        s := &m[\"a\"]
+        m[\"b\"] = svc{count: 2}
+        s.count = 99
+    }
+    f()
+}
+";
+        assert!(
+            check_codes(src_closure_loan).iter().any(|c| c == "HYB-E3102"),
+            "expected HYB-E3102 for map-slot loan invalidated inside closure body"
+        );
+    }
+
+    #[test]
+    fn parenthesized_addr_of_enforces_a3_and_a6() {
+        let src_a3 = "\
+struct svc {
+    count int
+}
+
+fn main() {
+    m := map[string]svc{\"a\": svc{count: 1}}
+    s := (&m[\"a\"])
+    m[\"b\"] = svc{count: 2}
+    s.count = 99
+}
+";
+        assert!(
+            check_codes(src_a3).iter().any(|c| c == "HYB-E3102"),
+            "expected HYB-E3102 for parenthesized (&m[\"a\"])"
+        );
+
+        let src_a3_inner = "\
+struct svc {
+    count int
+}
+
+fn main() {
+    m := map[string]svc{\"a\": svc{count: 1}}
+    s := &(m[\"a\"])
+    m[\"b\"] = svc{count: 2}
+    s.count = 99
+}
+";
+        assert!(
+            check_codes(src_a3_inner).iter().any(|c| c == "HYB-E3102"),
+            "expected HYB-E3102 for inner-parenthesized &(m[\"a\"])"
+        );
+
+        let src_a3_closure = "\
+struct svc {
+    count int
+}
+
+fn main() {
+    m := map[string]svc{\"a\": svc{count: 1}}
+    s := (&m[\"a\"])
+    f := fn() {
+        s.count = 99
+    }
+    m[\"b\"] = svc{count: 2}
+    f()
+}
+";
+        assert!(
+            check_codes(src_a3_closure).iter().any(|c| c == "HYB-E3102"),
+            "expected HYB-E3102 for parenthesized (&m[\"a\"]) captured by closure across map insert"
+        );
+
+        let src_a6 = "\
+struct holder {
+    p *int
+}
+
+fn main() {
+    var h holder
+    x := 1
+    h.p = &(x)
+}
+";
+        assert!(
+            check_codes(src_a6).iter().any(|c| c == "HYB-E3103"),
+            "expected HYB-E3103 for parenthesized &(x) stored in struct field"
+        );
     }
 }
 
