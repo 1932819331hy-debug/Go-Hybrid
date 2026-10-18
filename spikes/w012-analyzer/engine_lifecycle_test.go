@@ -14,7 +14,15 @@ import (
 // the ownership protocol survives sustained use without verdict drift or an
 // obvious guest-lifecycle failure; RSS/heap stability still requires separate
 // measurement.
+//
+// The long loop is opt-in so `go test -race ./...` can still race-check the
+// complete ordinary/concurrent suite without multiplying 20k guest startups
+// by race-detector overhead. CI runs this test separately with W012_LONG_STRESS=1.
 func TestDisposableGuestLifecycle20000(t *testing.T) {
+	if os.Getenv("W012_LONG_STRESS") != "1" {
+		t.Skip("set W012_LONG_STRESS=1 to run the 20k guest lifecycle stress test")
+	}
+
 	wasmBytes, err := os.ReadFile(defaultWasmPath)
 	if err != nil {
 		t.Fatalf("fresh WASM artifact required: %v", err)
