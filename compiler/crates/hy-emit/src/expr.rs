@@ -126,6 +126,11 @@ impl Emitter {
                         "`none` outside a return (MVP-0 lowers `return none` against the declared option result)",
                     ));
                 }
+                let (head, type_args) = split_type_args(name);
+                if let Some(ta) = type_args {
+                    let translated = self.translate_type_args_suffix(ta);
+                    return Ok(format!("{}{}", head, translated));
+                }
                 Ok(name.clone())
             }
 
@@ -403,7 +408,6 @@ impl Emitter {
                 self.body = main_body;
                 self.fnlit_depth -= 1;
                 self.for_depth = saved_for_depth;
-                self.loop_labels = saved_loop_labels;
                 self.handler_writer = saved_writer;
                 self.restore_scope(saved_scope);
                 body_res?;
@@ -739,6 +743,9 @@ impl Emitter {
                     let (head, type_args) = split_type_args(name);
                     let full = format!("{}.{}", root, head);
                     if self.assoc_fns.contains(&full) {
+                        let translated_ta = type_args
+                            .map(|ta| self.translate_type_args_suffix(ta))
+                            .unwrap_or_default();
                         let mut parts = Vec::new();
                         for a in args {
                             parts.push(self.emit_call_arg(a)?);
@@ -747,7 +754,7 @@ impl Emitter {
                             "{}_{}{}({})",
                             root,
                             head,
-                            type_args.unwrap_or_default(),
+                            translated_ta,
                             parts.join(", ")
                         ));
                     }
@@ -824,7 +831,8 @@ impl Emitter {
         // pre-registered corpus).
         let mut ptr_params: Vec<bool> = Vec::new();
         if let Expr::Ident { name, .. } = callee {
-            if let Some((_, _, _, params)) = self.fn_shapes.get(name.as_str()) {
+            let (fn_head, _) = split_type_args(name);
+            if let Some((_, _, _, params)) = self.fn_shapes.get(fn_head) {
                 ptr_params = params.iter().map(|p| p.is_some()).collect();
             }
         }

@@ -195,6 +195,15 @@ fn build_tables(ck: &mut Checker<'_>) {
                 // Issue #201-C: package-scope names are unique across
                 // fns / consts / structs (Go's single package block).
                 ck.declare_pkg_name(&s.name, "struct", s.span);
+                ck.struct_type_params
+                    .insert(s.name.clone(), s.type_params.clone());
+                ck.check_type_params(
+                    &s.name,
+                    "struct",
+                    &s.type_params,
+                    s.fields.iter().map(|f| &f.ty),
+                    s.span,
+                );
                 // `type X = int` aliases parse as zero-field struct decls;
                 // they are not containers — leave them unresolved (Unknown
                 // is permissive, and alias-of-primitive values must never
@@ -240,6 +249,16 @@ fn build_tables(ck: &mut Checker<'_>) {
                 );
             }
             Decl::Fn(f) => {
+                ck.check_type_params(
+                    &f.name,
+                    "function",
+                    &f.type_params,
+                    f.params
+                        .iter()
+                        .map(|p| &p.ty)
+                        .chain(f.results.iter().map(|r| &r.ty)),
+                    f.span,
+                );
                 // Only top-level functions belong in `ck.fns` (methods have a
                 // receiver and must not overwrite or impersonate top-level fns).
                 if let Some(r) = &f.receiver {
