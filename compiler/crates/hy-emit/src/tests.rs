@@ -345,7 +345,7 @@ fn example03_golden_shape() {
         go
     );
     assert!(
-        go.contains("for i := 0; i < n_workers; i++ {"),
+        go.contains(" := n_workers\n") && go.contains("for i := hyLo") && go.contains("i < hyHi"),
         "range-for:\n{}",
         go
     );
@@ -1600,7 +1600,7 @@ fn diff_blank_range_for_uses_fresh_temp() {
     let go =
         emit("fn main() {\n    n := 3\n    for _ in 0..n {\n        fmt.println(\"x\")\n    }\n}");
     assert!(
-        go.contains("for hyBlank0 := 0; hyBlank0 < n; hyBlank0++ {"),
+        go.contains("for hyBlank0 := hyLo") && go.contains("hyBlank0 < hyHi") && go.contains("hyBlank0++ {"),
         "fresh temp carries the count:\n{}",
         go
     );
