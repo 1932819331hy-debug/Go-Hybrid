@@ -9,9 +9,9 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
-	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/packages"
