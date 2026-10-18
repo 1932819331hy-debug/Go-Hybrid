@@ -2029,6 +2029,11 @@ impl Parser {
             }
             match self.cur() {
                 Tok::Punct(".") => {
+                    // Newline sensitivity (#659): a `.` that opens a new line
+                    // must not fold into the expression on the previous line.
+                    if !self.same_line_as_prev() {
+                        break;
+                    }
                     self.bump();
                     let name = self.expect_ident()?;
                     let span = self.span_to_prev(e.span().start);
@@ -3930,4 +3935,48 @@ fn main() {
         );
     }
 
+    #[test]
+    fn float_trailing_dot_parses_as_statement_without_cross_line_folding_issue_659() {
+        let src = r#"
+package main
+
+import "fmt"
+
+fn main() {
+    var scale f64 = 2.
+    fmt.println(scale)
+    fmt.println(scale * 3.0)
 }
+"#;
+        let f = parse_src(src);
+        let main_fn = f.decls.iter().find_map(|d| match d {
+            Decl::Fn(f) if f.name == "main" => Some(f),
+            _ => None,
+        }).expect("main fn decl");
+        let body = main_fn.body.as_ref().expect("main body");
+        assert_eq!(body.stmts.len(), 3, "must have 3 statements, not 2 folded statements: {:?}", body.stmts);
+        assert!(
+            matches!(&body.stmts[0], Stmt::Local(LocalDecl { kind: LocalKind::Var, names, values, .. })
+                if names == &["scale"] && matches!(values.first(), Some(Expr::Lit { kind: LitKind::Float(s), .. }) if s == "2.")),
+            "first statement is var scale f64 = 2., got {:?}", body.stmts[0]
+        );
+        assert!(
+            matches!(&body.stmts[1], Stmt::Expr { expr: Expr::Call { .. }, .. }),
+            "second statement is fmt.println(scale)"
+        );
+        assert!(
+            matches!(&body.stmts[2], Stmt::Expr { expr: Expr::Call { .. }, .. }),
+            "third statement is fmt.println(scale * 3.0)"
+        );
+    }
+
+    #[test]
+    fn line_leading_dot_does_not_fold_into_previous_statement_issue_659() {
+        // A newline-separated `.` must not fold into the previous expression statement
+        let src = "fn main() {\n    x := 1\n    .foo\n}";
+        let r = parse_file("t.hy", src);
+        assert!(r.is_err(), "leading dot on new line must not fold into statement");
+    }
+
+}
+

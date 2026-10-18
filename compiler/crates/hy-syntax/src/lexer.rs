@@ -504,20 +504,32 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        // fractional part — only when a digit follows the dot (so `0..n`
-        // lexes as Int(0) + `..` + Int(n), and `1..=8` as Int + `..=` + Int)
-        if self.at(0) == Some('.') && self.at(1).map(|d| d.is_ascii_digit()) == Some(true) {
-            is_float = true;
-            s.push('.');
-            self.bump();
-            while let Some(c) = self.at(0) {
-                if c == '_' || c.is_ascii_digit() {
-                    if c != '_' {
-                        s.push(c);
+        // fractional part — SPEC LX6: `1.5`, `2.`, `.5`, `1e9`.
+        // A dot after digits is part of a float unless:
+        // 1. It is followed by `.` (ranges `0..n`, `1..=8`, ellipsis `...`)
+        // 2. It is followed by an identifier/keyword start (e.g. `2.foo`),
+        //    UNLESS that starts an exponent (`2.e3`, `2.e+3`, `2.e-3`).
+        if self.at(0) == Some('.') {
+            let is_range = self.at(1) == Some('.');
+            let is_exp = matches!(self.at(1), Some('e') | Some('E')) && {
+                let k = if matches!(self.at(2), Some('+') | Some('-')) { 3 } else { 2 };
+                self.at(k).map(|d| d.is_ascii_digit()) == Some(true)
+            };
+            let is_ident_start = self.at(1).map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false);
+
+            if !is_range && (!is_ident_start || is_exp) {
+                is_float = true;
+                s.push('.');
+                self.bump();
+                while let Some(c) = self.at(0) {
+                    if c == '_' || c.is_ascii_digit() {
+                        if c != '_' {
+                            s.push(c);
+                        }
+                        self.bump();
+                    } else {
+                        break;
                     }
-                    self.bump();
-                } else {
-                    break;
                 }
             }
         }
@@ -1129,6 +1141,27 @@ mod tests {
         assert!(t.contains(&Tok::Int("0x1F".into())));
         assert!(t.contains(&Tok::Float("1.5e3".into())));
         assert!(t.contains(&Tok::Punct("..")));
+    }
+
+    #[test]
+    fn float_trailing_dot_and_ranges_issue_659() {
+        // LX6: Float literals include `2.`, `.5`, `1.5`, `1e9`.
+        let t = toks("var scale f64 = 2.\nx := 2. + 1.0\ny := .5\nz := 2.e3\nw := 2.e+3\nfor i in 0..n {}\nfor j in 1..=8 {}");
+        assert!(t.contains(&Tok::Float("2.".into())));
+        assert!(t.contains(&Tok::Float(".5".into())));
+        assert!(t.contains(&Tok::Float("2.e3".into())));
+        assert!(t.contains(&Tok::Float("2.e+3".into())));
+        assert!(t.contains(&Tok::Punct("..")));
+        assert!(t.contains(&Tok::Punct("..=")));
+
+        // Range operators keep their leading integer intact
+        let r1 = toks("0..n");
+        assert_eq!(r1[0], Tok::Int("0".into()));
+        assert_eq!(r1[1], Tok::Punct(".."));
+
+        let r2 = toks("1..=8");
+        assert_eq!(r2[0], Tok::Int("1".into()));
+        assert_eq!(r2[1], Tok::Punct("..="));
     }
 
     #[test]
