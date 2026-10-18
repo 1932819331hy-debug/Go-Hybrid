@@ -41,10 +41,7 @@ unsafe fn pack_check_output(diags: &[hy_diag::Diagnostic], summary: &hy_diag::Ch
     ((ptr as u32 as u64) << 32) | (len as u64)
 }
 
-/// Takes source code, checks it, returns a pointer to a JSON envelope in memory.
-/// Returns (ptr, len) packed as u64.
-#[no_mangle]
-pub unsafe extern "C" fn hy_wasm_check(src_ptr: *const u8, src_len: usize) -> u64 {
+unsafe fn hy_wasm_check_impl(src_ptr: *const u8, src_len: usize, report_managed: bool) -> u64 {
     let slice = if src_len == 0 {
         &[]
     } else {
@@ -88,12 +85,18 @@ pub unsafe extern "C" fn hy_wasm_check(src_ptr: *const u8, src_len: usize) -> u6
                 .iter()
                 .filter(|d| d.severity == hy_diag::Severity::Warning)
                 .count();
+            let verdict = res.verdict.as_str().to_string();
+            let managed = if report_managed {
+                Some(res.managed)
+            } else {
+                None
+            };
             let summary = hy_diag::CheckSummary {
                 file: "input.hy".into(),
-                verdict: res.verdict.as_str().to_string(),
+                verdict,
                 errors,
                 warnings,
-                managed: None,
+                managed,
             };
             (res.diagnostics, summary)
         }
@@ -110,4 +113,20 @@ pub unsafe extern "C" fn hy_wasm_check(src_ptr: *const u8, src_len: usize) -> u6
     };
 
     pack_check_output(&diags, &summary)
+}
+
+/// Takes source code, checks it, and returns the default JSON envelope.
+/// This intentionally matches `hyb check --json` and therefore omits the
+/// optional managed-audit report, preserving the historical parity contract.
+#[no_mangle]
+pub unsafe extern "C" fn hy_wasm_check(src_ptr: *const u8, src_len: usize) -> u64 {
+    hy_wasm_check_impl(src_ptr, src_len, false)
+}
+
+/// Same checker boundary, but includes the full managed-audit report in the
+/// summary. This mirrors `hyb check --json --report-managed` without changing
+/// the default ABI used by the preregistered parity benchmark.
+#[no_mangle]
+pub unsafe extern "C" fn hy_wasm_check_managed(src_ptr: *const u8, src_len: usize) -> u64 {
+    hy_wasm_check_impl(src_ptr, src_len, true)
 }

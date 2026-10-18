@@ -1,0 +1,89 @@
+name: W-012 rescue validation
+
+on:
+  pull_request:
+    paths:
+      - 'compiler/crates/hy-wasm/**'
+      - 'spikes/w012-analyzer/**'
+      - 'spikes/w012-inprocess/**'
+      - 'test_wasm_parity.js'
+      - '.github/workflows/w012-rescue-validation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install pinned Go and Rust
+        run: |
+          set -euxo pipefail
+          curl -sSL -o /tmp/go.tgz https://go.dev/dl/go1.26.9.linux-amd64.tar.gz
+          sudo rm -rf /usr/local/go
+          sudo tar -C /usr/local -xzf /tmp/go.tgz
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.0
+          echo '/usr/local/go/bin' >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust validation components
+        run: |
+          set -euxo pipefail
+          rustup component add rustfmt
+          rustup target add wasm32-unknown-unknown
+          go version
+          rustc --version
+          cargo fmt --version
+
+      - name: Format and build fresh native/WASM artifacts
+        run: |
+          set -euxo pipefail
+          cd compiler
+          cargo fmt --package hy-wasm -- --check
+          cargo build -p hyb --release
+          cargo build -p hy-wasm --target wasm32-unknown-unknown --release
+
+      - name: W-012 Go tests under race detector
+        env:
+          HYBRID_WASM_PATH: ${{ github.workspace }}/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm
+        run: |
+          set -euxo pipefail
+          cd spikes/w012-analyzer
+          go test -race ./...
+
+      - name: 20k disposable guest lifecycle stress
+        env:
+          HYBRID_WASM_PATH: ${{ github.workspace }}/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm
+          W012_LONG_STRESS: '1'
+        run: |
+          set -euxo pipefail
+          cd spikes/w012-analyzer
+          go test -run '^TestDisposableGuestLifecycle20000$' -count=1 -v
+
+      - name: Cache invalidation regression
+        env:
+          HYBRID_WASM_PATH: ${{ github.workspace }}/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm
+        run: |
+          set -euxo pipefail
+          cd spikes/w012-analyzer
+          go test -run '^TestVetWrapperInvalidatesEveryHybridInput$' -count=1 -v
+
+      - name: Managed warning/audit regression
+        env:
+          HYBRID_WASM_PATH: ${{ github.workspace }}/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm
+        run: |
+          set -euxo pipefail
+          cd spikes/w012-analyzer
+          go test -run '^TestManagedWarningsAndAuditPreserved$' -count=1 -v
+
+      - name: Native/WASM default-envelope parity
+        env:
+          HYBRID_WASM_PATH: ${{ github.workspace }}/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm
+          HYBRID_NATIVE_PATH: ${{ github.workspace }}/compiler/target/release/hyb
+        run: |
+          set -euxo pipefail
+          node test_wasm_parity.js
