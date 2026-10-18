@@ -346,6 +346,19 @@ class KaggleArgumentTests(unittest.TestCase):
         self.assertIn("[slug]", result.stdout)
         self.assertNotIn("Traceback", result.stdout + result.stderr)
 
+    def test_status_without_slug_uses_default(self):
+        # 0xSixtos PR #564: an omitted slug must still call the service once,
+        # with None so kaggle_status falls back to the configured kernel id.
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("job_module", ENTRY)
+        job_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(job_mod)
+        with mock.patch.object(sys, "argv", ["job.py", "kaggle", "status"]), \
+             mock.patch.object(job_mod, "kaggle_status") as mock_status:
+            job_mod.main()
+            mock_status.assert_called_once_with(None)
+
     def test_status_passes_slug_argument(self):
         import importlib.util
         from unittest import mock
