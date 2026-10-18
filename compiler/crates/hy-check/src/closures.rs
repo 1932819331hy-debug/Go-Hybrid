@@ -597,6 +597,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     // and cannot bypass O5.1 / O5.4 move restrictions.
                     ck.record_may_share(st, name, value);
                     ck.record_alias(st, name, value);
+                    ck.record_closure_mutations(st, name, value);
                     if let Some(origin) = shadowed_origin {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
@@ -621,6 +622,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
                     mark_nested_overwritten(st, name, nested);
                     ck.define_binding(st, name, shape, ty, immutable, managed);
+                }
+                if let Some(v) = l.values.first() {
+                    ck.link_multi_value_return_aliases(st, v, &l.names);
                 }
             }
             sync_nested_moves(st, nested);
