@@ -1,6 +1,6 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 81 programs** — ACCEPT 22 · ACCEPT-MANAGED 2 ·
+**Current registered corpus: 88 programs** — ACCEPT 29 · ACCEPT-MANAGED 2 ·
 REJECT 57 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
@@ -20,7 +20,7 @@ the new fixtures.
 
 The prose below is the original pre-registration statement, kept as written
 on its date: the corpora sizes it names (18, 20) are what the corpus held
-then, not today's 81. The dated tripwire baseline is preserved as historical
+then, not today's 88. The dated tripwire baseline is preserved as historical
 for the same reason.
 
 18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
@@ -63,13 +63,24 @@ surface with author credit (tests extracted to
 With this registration the corpus is **78 programs: ACCEPT 21 ·
 ACCEPT-MANAGED 2 · REJECT 55**.
 
-`n5-zero-map-first-write.hy` — the accept-side pin for issue #645: N5's
-first-write allocation of zero-value maps (a `var` local, a map field of a
-zero-valued / partially keyed / nested struct, an aliased map type, and
-`new(T)`). It used to pass the checker, build, and panic at the first
-write with `assignment to entry in nil map`. Its header carries its single
-stdout line as a `// EXPECTED-OUTPUT:` marker, diffed byte-exact by the
-differential loop and by `compiler/crates/hyb/tests/spec_n5_zero_maps.rs`.
+`control-*.hy` — isHeSatoshi (PR #598): seven **negative controls** for the
+accept-side oracle wave. The Go-toolchain oracle (#577) measured a 38%
+accept-side residual on generated programs and named ten accepted-but-
+unbuildable classes to fix; fixing those means adding range, bounds and shape
+checks to more contexts, and every check added can over-reject. A corpus that
+only grows the REJECT side cannot detect that. Each control is ACCEPT today
+**and builds under `go build`**, verified before commit — an accept-side
+control that does not build would pin the wrong thing. Four fence off-by-ones
+in the const-overflow wave (the exact int8 edges `127`/`-128` in one file, the
+unsigned `255` edge, a folded constant expression `100 + 27`, and the
+in-range twin of #519's composite-literal overflow). Three are legal Go the
+wave must not confuse with the array form: `xs[300]` on a **slice** compiles
+and panics at run time while `a[300]` on `[2]int` does not, `-n` on an int8
+**variable** wraps at run time because Go does not fold it, and
+`var a [300]int8` bounds an array **length** by a count, not by the element
+type's range. Each header states what it fences and cites GUARANTEES.md Row 13
+(BUILDABLE) or the Row 16 "No claim" position for run-time panics, so a
+reviewer can see why ACCEPT is correct rather than an oversight.
 
-With this registration the corpus is **81 programs: ACCEPT 22 ·
-ACCEPT-MANAGED 2 · REJECT 57**.
+With this registration the corpus is **86 programs: ACCEPT 28 ·
+ACCEPT-MANAGED 2 · REJECT 56**.

@@ -827,3 +827,28 @@ reproduction line above is the merged tree.
 - No checker rule or existing verdict changes. Verified on the fixed tree:
   81/81 verdict agreement, tripwire not fired; differential FULL 24+57;
   ACCEPT 22 · ACCEPT-MANAGED 2 · REJECT 57.
+
+## Additive corpus registration — 2026-10-18: negative controls for the accept-side oracle wave (PR #598)
+
+Seven `control-*.hy` fixtures (isHeSatoshi, PR #598): programs that are
+ACCEPT today and **must stay accepted** while the Go-toolchain oracle wave
+(#577; 38% accept-side residual on generated programs) lands its range,
+bounds and shape fixes. Every check added to fix an accepted-but-unbuildable
+class can over-reject; a corpus that only grows the REJECT side cannot see
+that. Each control builds and runs under `go build` before registration
+(GUARANTEES.md Row 13, BUILDABLE); run-time hazards are fenced so the
+program still exits 0 (Row 16 makes no claim about panics).
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| control-int8-boundaries | ACCEPT | — | — | the exact int8 edges `127` and `-128` in one file — an off-by-one in any new range check rejects a value that is legal by definition |
+| control-uint8-max | ACCEPT | — | — | `var n uint8 = 255`: the unsigned edge; a signed-only range check must not reject the legal maximum |
+| control-const-expr-within-range | ACCEPT | — | — | `var n int8 = 100 + 27`: a constant expression whose folded result fits — the check must test the folded value, not reject the arithmetic |
+| control-composite-literal-in-range | ACCEPT | — | — | `user{age: 127}` / `[]int8{127}`: the in-range twins of the #519 composite-literal overflow, pinning the accept half of that fix |
+| control-large-array-length | ACCEPT | — | — | `var a [300]int8`: an array LENGTH is a count, not a value of the element type; a fix must not bound lengths by the element range |
+| control-negate-variable-wraps | ACCEPT | — | — | `var m int8 = -n` where `n = -128`: Go folds nothing here; a checker must not reject a run-time wrap it never evaluates |
+| control-slice-index-past-length | ACCEPT | — | — | `xs[300]` on a **slice** (access guarded so the program still runs): a slice's length is not part of its type, so the fixed-array compile-time rule must not be written as a blanket index check |
+
+Reproduction (checker built from the merged tree, pinned toolchain):
+`python3 tools/corpus_harness.py` reports **88/88 verdict agreement, tripwire
+not fired**.
