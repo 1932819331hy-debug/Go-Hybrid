@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 77 programs** — ACCEPT 21 · ACCEPT-MANAGED 2 ·
-REJECT 54 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 83 programs** — ACCEPT 22 · ACCEPT-MANAGED 2 ·
+REJECT 59 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -62,3 +62,20 @@ surface with author credit (tests extracted to
 
 With this registration the corpus is **78 programs: ACCEPT 21 ·
 ACCEPT-MANAGED 2 · REJECT 55**.
+
+`conversion-arity-reject.hy`, `struct-literal-unknown-field-reject.hy`,
+`field-assign-wrong-type-reject.hy`, `struct-and-conversion-controls-accept.hy`
+— isHeSatoshi (issue #682): the U13–U16 accept-but-unbuildable type/shape gaps.
+Each of the three rejects was reproduced as a real `go build` failure against
+the emitted Go before its fixture was committed, and all three are
+`HYB-E1002` (`BUILDABLE`, Row 13). The fourth fixture is the ACCEPT half and is
+the reason the batch is safe to land: it holds the legal neighbours the new
+checks must not touch — a one-argument conversion, a variadic builtin's own
+arity, declared struct fields including a subset, an untyped int constant
+assigned to a `float64` field (which is why `Int` into a float target must stay
+allowed), a same-typed struct assignment, an `any` target, and a multi-value
+binding that is not a single-target assignment. Rules live in
+`hy-check/tests/struct_and_conversion_shape_guards.rs` (8 tests).
+
+With this registration the corpus is **83 programs: ACCEPT 22 ·
+ACCEPT-MANAGED 2 · REJECT 59**.
