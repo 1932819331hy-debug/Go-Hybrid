@@ -305,7 +305,9 @@ fn channel_direction_nested_place_recv_and_two_var_chan_range_reject() {
         "HYB-E2008",
     );
 
-    // Receive from send-only channel `chan<- int` -> HYB-E2008.
+    // Receive from send-only channel `chan<- int` -> HYB-E3008
+    // (chan-direction-mismatch owns directed-channel misuse since #443;
+    // the generic E2008 arm yields to it on the same site).
     assert_rejects(
         "fn sink(out chan<- int) {\n\
            x := <-out\n\
@@ -315,10 +317,12 @@ fn channel_direction_nested_place_recv_and_two_var_chan_range_reject() {
            ch := make(chan int, 1)\n\
            sink(ch)\n\
          }\n",
-        "HYB-E2008",
+        "HYB-E3008",
     );
 
-    // Send to receive-only channel `<-chan int` -> HYB-E3007.
+    // Send to receive-only channel `<-chan int` -> HYB-E3008
+    // (chan-direction-mismatch owns directed-channel misuse since #443;
+    // the generic E3007 arm yields to it on the same site).
     assert_rejects(
         "fn source(inp <-chan int) {\n\
            inp <- 1\n\
@@ -327,7 +331,7 @@ fn channel_direction_nested_place_recv_and_two_var_chan_range_reject() {
            ch := make(chan int, 1)\n\
            source(ch)\n\
          }\n",
-        "HYB-E3007",
+        "HYB-E3008",
     );
 
     // Range over send-only channel `chan<- int` -> HYB-E2009.

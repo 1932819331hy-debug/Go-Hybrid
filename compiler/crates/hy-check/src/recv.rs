@@ -247,19 +247,29 @@ impl<'a> Checker<'a> {
                             ..
                         }
                     ) {
-                        let msg = format!(
-                            "cannot receive from `{}` (`{}`) — channel is send-only (HYB-E2008)",
-                            chan.render(),
-                            resolved.render()
-                        );
-                        let notes = vec![
-                            "why: Go rejects `<-ch` on a `chan<- T` send-only channel (`invalid operation: cannot receive from send-only channel`), so an accepted Hybrid program would emit unbuildable Go".to_string(),
-                            "fix: declare the parameter or binding as a bidirectional (`chan T`) or receive-only (`<-chan T`) channel".to_string(),
-                        ];
-                        self.diags.push(
-                            Diagnostic::error("HYB-E2008", self.path.clone(), span, msg)
-                                .with_notes(notes),
-                        );
+                        // HYB-E3008 (chan-direction-mismatch) owns directed-channel
+                        // misuse on main; this generic arm only reports when E3008
+                        // has not already diagnosed the same site, so a defect is
+                        // reported once by its precise code.
+                        if !self
+                            .diags
+                            .iter()
+                            .any(|d| d.code == "HYB-E3008" && d.span == span)
+                        {
+                            let msg = format!(
+                                "cannot receive from `{}` (`{}`) — channel is send-only (HYB-E2008)",
+                                chan.render(),
+                                resolved.render()
+                            );
+                            let notes = vec![
+                                "why: Go rejects `<-ch` on a `chan<- T` send-only channel (`invalid operation: cannot receive from send-only channel`), so an accepted Hybrid program would emit unbuildable Go".to_string(),
+                                "fix: declare the parameter or binding as a bidirectional (`chan T`) or receive-only (`<-chan T`) channel".to_string(),
+                            ];
+                            self.diags.push(
+                                Diagnostic::error("HYB-E2008", self.path.clone(), span, msg)
+                                    .with_notes(notes),
+                            );
+                        }
                         return false;
                     }
                 }
