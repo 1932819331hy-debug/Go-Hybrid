@@ -56,6 +56,11 @@ impl<'a> Checker<'a> {
                         for (name, value) in l.names.iter().zip(l.values.iter()) {
                             self.check_const_overflow_init(name, ty, value, Some(st));
                         }
+                    } else if l.kind != hy_syntax::LocalKind::Const {
+                        for (name, value) in l.names.iter().zip(l.values.iter()) {
+                            self.check_default_int_overflow(name, value, Some(st));
+                            self.check_default_float_overflow(name, value, Some(st));
+                        }
                     }
                     self.bind_closure_local_for_emit_guard(st, l);
                     self.mark_slot_loans_local(st, l);
@@ -78,6 +83,13 @@ impl<'a> Checker<'a> {
                     self.check_negative_shift(&values[0], *span);
                 }
                 if deep {
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        if !matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) {
+                            if let Some(target_ty) = self.place_target_ty(st, t) {
+                                self.check_const_overflow_assign(&t.render(), &target_ty, v);
+                            }
+                        }
+                    }
                     self.mark_slot_loans_assign(st, targets, *op, values);
                 }
             }
