@@ -1589,6 +1589,34 @@ fn diff_elided_map_value_struct_literal() {
 }
 
 #[test]
+fn diff_elided_map_value_struct_literal_under_parens() {
+    // Same elision, one redundant paren deeper: `({replicas: 2, tag: "prod"})`
+    // is the same expression, so the expected TYPE must still be applied.
+    // Before the peel this fell through to the "spell the type" refusal — a
+    // check-accepts / emit-rejects gap.
+    let go = emit(
+        "struct service {\n    replicas int\n    tag string\n}\n\nfn main() {\n    e := env{services: map[string]service{\n        \"frontend\": ({replicas: 2, tag: \"prod\"}),\n    }}\n    _ = e\n}\n\nstruct env {\n    services map[string]service\n}",
+    );
+    assert!(
+        go.contains("\"frontend\": service{replicas: 2, tag: \"prod\"}"),
+        "elided head filled through parens:\n{}",
+        go
+    );
+}
+
+#[test]
+fn diff_elided_slice_elem_struct_literal_under_parens() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn main() {\n    s := []service{({replicas: 2}), (({replicas: 3}))}\n    _ = s\n}\n",
+    );
+    assert!(
+        go.contains("[]service{service{replicas: 2}, service{replicas: 3}}"),
+        "elided heads filled through (nested) parens:\n{}",
+        go
+    );
+}
+
+#[test]
 fn diff_short_return_fills_error_slot() {
     // corpus 13: `return v` in a (value, error) fn → `return v, nil`.
     let go = emit(
