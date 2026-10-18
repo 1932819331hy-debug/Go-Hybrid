@@ -6836,7 +6836,7 @@ impl<'a> Checker<'a> {
     /// The declared type of an assignment place, when it resolves (drives
     /// HYB-E6002 constant overflow checks on assignment targets).
     // ponytail: resolves direct ident, index, and struct field targets via package struct definitions.
-    fn place_target_ty(&self, st: &FnState, p: &Place) -> Option<hy_syntax::TypeExpr> {
+    pub(crate) fn place_target_ty(&self, st: &FnState, p: &Place) -> Option<hy_syntax::TypeExpr> {
         enum Step<'a> {
             Index,
             Field(&'a str),

@@ -1333,3 +1333,273 @@ fn const_alias_into_untyped_decl_is_rejected() {
     );
     assert_eq!(r.verdict, Verdict::Reject);
 }
+
+// -----------------------------------------------------------------------
+// Issue #576: constant overflow and float truncation in binary comparisons,
+// binary arithmetic, and map indexing.
+// -----------------------------------------------------------------------
+
+#[test]
+fn binary_comparison_overflow_lhs_var_is_rejected() {
+    let src = "
+fn main() {
+    var x int8 = 10
+    if x == 300 {
+        fmt.println(\"unreachable\")
+    }
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for x == 300 under int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn binary_comparison_overflow_rhs_var_is_rejected() {
+    let src = "
+fn main() {
+    var x int8 = 10
+    if 300 == x {
+        fmt.println(\"unreachable\")
+    }
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for 300 == x under int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn binary_comparison_float_truncation_is_rejected() {
+    let src = "
+fn main() {
+    var x int8 = 10
+    if x == 2.5 {
+        fmt.println(\"unreachable\")
+    }
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for x == 2.5 under int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn binary_arithmetic_overflow_lhs_var_is_rejected() {
+    let src = "
+fn main() {
+    var x int8 = 10
+    _ = x + 300
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for x + 300 under int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn binary_arithmetic_overflow_rhs_var_is_rejected() {
+    let src = "
+fn main() {
+    var x int8 = 10
+    _ = 300 - x
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for 300 - x under int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn binary_arithmetic_float_truncation_is_rejected() {
+    let src = "
+fn main() {
+    var x int8 = 10
+    _ = x + 2.5
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for x + 2.5 under int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_index_read_overflow_is_rejected() {
+    let src = "
+fn main() {
+    var m map[int8]string
+    _ = m[300]
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for m[300] under map[int8]string, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_index_read_float_truncation_is_rejected() {
+    let src = "
+fn main() {
+    var m map[int8]string
+    _ = m[2.5]
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for m[2.5] under map[int8]string, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_index_assign_overflow_is_rejected() {
+    let src = "
+fn main() {
+    var m map[int8]string
+    m[300] = \"overflow\"
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for m[300] = \"overflow\" under map[int8]string, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_index_assign_float_truncation_is_rejected() {
+    let src = "
+fn main() {
+    var m map[int8]string
+    m[2.5] = \"truncated\"
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for m[2.5] = \"truncated\" under map[int8]string, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_delete_overflow_is_rejected() {
+    let src = "
+fn main() {
+    var m map[int8]string
+    delete(m, 300)
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for delete(m, 300) under map[int8]string, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_delete_float_truncation_is_rejected() {
+    let src = "
+fn main() {
+    var m map[int8]string
+    delete(m, 2.5)
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for delete(m, 2.5) under map[int8]string, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_index_aliased_key_overflow_is_rejected() {
+    let src = "
+type my_byte = uint8
+
+fn main() {
+    var m map[my_byte]string
+    m[300] = \"overflow\"
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for map with aliased key my_byte, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn binary_op_and_map_fitting_values_accept() {
+    let src = "
+fn main() {
+    var x int8 = 10
+    if x == 100 {
+        _ = x + 20
+    }
+    var m map[int8]string
+    _ = m[10]
+    m[10] = \"ok\"
+    delete(m, 10)
+}
+";
+    let r = check(src);
+    assert!(
+        error_codes(&r).is_empty(),
+        "expected fitting operations under int8 to accept, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}

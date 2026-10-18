@@ -664,6 +664,15 @@ impl<'a> Checker<'a> {
                     if name == "make" {
                         return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
                     }
+                    if self.lookup_binding(st, name).is_none()
+                        && crate::const_overflow::fixed_width_int_range(name).is_some()
+                        && args.len() == 1
+                    {
+                        return Some(TypeExpr::Named {
+                            name: name.clone(),
+                            span: *span,
+                        });
+                    }
                     let head = Self::base_named_type_str(name);
                     self.fns
                         .get(name.as_str())
@@ -723,6 +732,23 @@ impl<'a> Checker<'a> {
                     }
                 }
             },
+            Expr::Binary { op, lhs, rhs, .. } => {
+                if matches!(
+                    op,
+                    hy_syntax::BinOp::Add
+                        | hy_syntax::BinOp::Sub
+                        | hy_syntax::BinOp::Mul
+                        | hy_syntax::BinOp::Div
+                        | hy_syntax::BinOp::Mod
+                        | hy_syntax::BinOp::BitAnd
+                        | hy_syntax::BinOp::BitOr
+                        | hy_syntax::BinOp::BitXor
+                ) {
+                    self.ty_of_expr(st, lhs).or_else(|| self.ty_of_expr(st, rhs))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }

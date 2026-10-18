@@ -792,7 +792,136 @@ impl<'a> Checker<'a> {
         self.diags
             .push(Diagnostic::error("HYB-E6006", self.path.clone(), span, msg).with_notes(notes));
     }
+
+    /// When comparing or operating on a typed fixed-width integer operand and a constant,
+    /// or indexing a map with fixed-width integer key using a constant, emit HYB-E6002
+    /// if the constant overflows or is a float (issue #576).
+    pub(crate) fn check_const_overflow_op(
+        &mut self,
+        context: &str,
+        ty_name: &str,
+        ty_span: Option<Span>,
+        value: &Expr,
+        st: Option<&FnState>,
+    ) {
+        let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
+            return;
+        };
+        match const_int_fold_with(value, &self.const_values, 0, st) {
+            ConstFold::NotConst => {}
+            ConstFold::TooBig => {
+                let span = value.span();
+                let msg = format!(
+                    "constant expression `{}` overflows `{}` in {} (HYB-E6002)",
+                    value.render(),
+                    ty_name,
+                    context
+                );
+                let mut notes = vec![
+                    format!(
+                        "why: Go folds the constant expression before the range check and rejects a value outside `{}` (`cannot use … as {} value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #576)",
+                        ty_name, ty_name
+                    ),
+                    format!("fix: use a constant in [{}, {}]", lo, hi),
+                ];
+                if let Some(t_span) = ty_span {
+                    notes.push(format!(
+                        "note: the type was written here ({})",
+                        span_hint(t_span)
+                    ));
+                }
+                self.diags.push(
+                    Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                );
+                return;
+            }
+            ConstFold::Val(v) => {
+                if v >= lo && v <= hi {
+                    return;
+                }
+                let span = value.span();
+                let msg = format!(
+                    "constant `{}` overflows `{}` in {} (HYB-E6002)",
+                    value.render(),
+                    ty_name,
+                    context
+                );
+                let mut notes = vec![
+                    format!(
+                        "why: Go rejects a constant outside `{}`'s range in a {} (`cannot use … as {} value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #576)",
+                        ty_name, context, ty_name
+                    ),
+                    format!("fix: use a constant in [{}, {}]", lo, hi),
+                ];
+                if let Some(t_span) = ty_span {
+                    notes.push(format!(
+                        "note: the type was written here ({})",
+                        span_hint(t_span)
+                    ));
+                }
+                self.diags.push(
+                    Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                );
+                return;
+            }
+        }
+        if const_float_value(value).is_some() {
+            let span = value.span();
+            let msg = format!(
+                "float constant `{}` used as `{}` in {} (HYB-E6002)",
+                value.render(),
+                ty_name,
+                context
+            );
+            let mut notes = vec![
+                format!(
+                    "why: Go rejects a float constant as an `{}` value in a {} (`cannot use … as {} value (truncated)`), so an accepted Hybrid program would emit unbuildable Go (issue #576)",
+                    ty_name, context, ty_name
+                ),
+                format!("fix: use an integer constant or convert explicitly at runtime"),
+            ];
+            if let Some(t_span) = ty_span {
+                notes.push(format!(
+                    "note: the type was written here ({})",
+                    span_hint(t_span)
+                ));
+            }
+            self.diags.push(
+                Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+            );
+        }
+    }
+
+    /// Check whether a constant expression overflows or is a float when used in a context
+    /// expecting the given `TypeExpr` (issue #576).
+    pub(crate) fn check_const_overflow_type(
+        &mut self,
+        context: &str,
+        ty: &TypeExpr,
+        value: &Expr,
+        st: Option<&FnState>,
+    ) {
+        let resolved = self.resolve_type_alias(ty);
+        let TypeExpr::Named {
+            name: ty_name,
+            span: ty_span,
+        } = &resolved
+        else {
+            return;
+        };
+        self.check_const_overflow_op(context, ty_name, Some(*ty_span), value, st);
+    }
+
+    /// Returns true if `expr` is an integer constant expression (or float literal)
+    /// that can be evaluated at check time.
+    pub(crate) fn is_const_operand(&self, expr: &Expr, st: &FnState) -> bool {
+        matches!(
+            const_int_fold_with(expr, &self.const_values, 0, Some(st)),
+            ConstFold::Val(_) | ConstFold::TooBig
+        ) || const_float_value(expr).is_some()
+    }
 }
+
 
 /// A literal-constant conversion operand (the literal-only scope shared with
 /// E6001/E6002). Anything else — idents, binary ops, calls — is out of
@@ -957,7 +1086,7 @@ pub(crate) fn target_uint_range() -> (i128, i128) {
 /// name (SPEC-LANGUAGE §11 / Go's typed-constant assignment rule).
 /// Platform-word `int`/`uint`/`isize`/`usize` use the 64-bit LP64 ranges
 /// the emitter targets (SPEC B9 / X7).
-fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
+pub(crate) fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
     Some(match name {
         "i8" | "int8" => (i8::MIN as i128, i8::MAX as i128),
         "u8" | "uint8" | "byte" => (0, u8::MAX as i128),
