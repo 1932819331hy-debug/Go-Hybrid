@@ -6,7 +6,9 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
+	"time"
 
 	"github.com/tetratelabs/wazero"
 	"golang.org/x/tools/go/analysis"
@@ -91,9 +93,22 @@ func GetEngine(wasmPath string) (*Engine, error) {
 	return globalEngine, globalEngineErr
 }
 
+// Check bounds a single analysis even when the go/analysis driver does not
+// provide a cancellation context. Infrastructure timeout remains fail-closed.
 func (e *Engine) Check(src string) (*CheckOutput, error) {
+	ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
+	defer cancel()
+	return e.CheckContext(ctx, src)
+}
+
+// CheckContext permits an IDE or other embedding host to cancel one request
+// without closing the shared wazero runtime or poisoning later checks.
+func (e *Engine) CheckContext(ctx context.Context, src string) (*CheckOutput, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("nil analysis context")
+	}
 	engine := &WasmEngine{ctx: e.ctx, runtime: e.runtime, compiled: e.compiled}
-	res := engine.CheckSource(e.ctx, src)
+	res := engine.CheckSource(ctx, src)
 	if res.Verdict == VerdictAnalysisFailure {
 		return nil, res.Failure
 	}
@@ -120,18 +135,29 @@ var (
 	lastContextLog   PassContextLog
 )
 
+// Clone the slices as well as the struct: copying only its slice headers would
+// expose mutable internal arrays to callers even while protecting assignments
+// to lastContextLog with a mutex.
+func clonePassContextLog(log PassContextLog) PassContextLog {
+	log.GoFiles = slices.Clone(log.GoFiles)
+	log.OtherFiles = slices.Clone(log.OtherFiles)
+	log.IgnoredFiles = slices.Clone(log.IgnoredFiles)
+	log.FoundHyFiles = slices.Clone(log.FoundHyFiles)
+	return log
+}
+
 func setLastContextLog(log PassContextLog) {
 	lastContextLogMu.Lock()
-	lastContextLog = log
+	lastContextLog = clonePassContextLog(log)
 	lastContextLogMu.Unlock()
 }
 
-// LastContextLogSnapshot returns the latest research observation without
-// exposing mutable shared state to concurrent analyzer runs.
+// LastContextLogSnapshot returns an independent snapshot. Callers may modify
+// its slices without racing with later analyzer runs or other snapshots.
 func LastContextLogSnapshot() PassContextLog {
 	lastContextLogMu.RLock()
 	defer lastContextLogMu.RUnlock()
-	return lastContextLog
+	return clonePassContextLog(lastContextLog)
 }
 
 var Analyzer = &analysis.Analyzer{
