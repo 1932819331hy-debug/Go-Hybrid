@@ -169,6 +169,12 @@ var Analyzer = &analysis.Analyzer{
 }
 
 func run(pass *analysis.Pass) (interface{}, error) {
+	// The cache-safe vet wrapper supplies a pre-run digest snapshot. Malformed
+	// snapshots fail closed before analyzing any package.
+	snapshot, err := hybridSnapshotFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("read Hybrid input snapshot: %w", err)
+	}
 	log := PassContextLog{
 		PkgPath:      pass.Pkg.Path(),
 		FilesCount:   len(pass.Files),
@@ -213,6 +219,9 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve declared .hy path %q: %w", of, err)
 		}
+		if err := snapshot.VerifyFile(name, data); err != nil {
+			return nil, fmt.Errorf("verify declared .hy input: %w", err)
+		}
 		if previous, exists := hyFiles[name]; exists && previous != string(data) {
 			return nil, fmt.Errorf("conflicting content for declared .hy file %q", name)
 		}
@@ -252,6 +261,9 @@ func run(pass *analysis.Pass) (interface{}, error) {
 						data, err := os.ReadFile(fullPath)
 						if err != nil {
 							return nil, fmt.Errorf("read %s: %w", fullPath, err)
+						}
+						if err := snapshot.VerifyFile(fullPath, data); err != nil {
+							return nil, fmt.Errorf("verify scanned .hy input: %w", err)
 						}
 						hyFiles[fullPath] = string(data)
 					}
