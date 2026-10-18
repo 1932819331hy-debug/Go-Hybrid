@@ -1,5 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor candidate: workload runs now isolate and clean scratch files; overlap/data-preservation regressions 9/9 and shape tests 10/10 pass offline. Go/Rust integration and upstream CI remain unverified.
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-21: old-wave recons + wave triage #248–#336 + const-stack all CONSUMED (24 PRs landed, 7 credit closes, 3 issues verified closed) — cargo 1143/0 (63 binaries), corpus 79/79, differential FULL (23+56), main CI green (28754ab)
 - **M1 VERDICTS: all 21 drafts DONE** (`VERDICTS-M1-DRAFT.md` — maintainer copy): 9 ACCEPTED, 4 CONDITIONAL, 5 DECLINED w/ learnings, 2 DEFERRED, 1 ACCEPTED-AS-LEARNING — post to #365 on 2026-11-01 per the file's checklist; W-015 spike #379 mergeable+green awaiting the window
 - **Session-21 landings:** old-wave recons complete (#173/#210/#207/#213/#226/#191 verified landed; #99/#223/#197/#198 credit-closed/extracted; #220 subsumed); agents landed #249/#252/#254/#255-close/#256/#258/#260/#261/#267-close#291/#297/#303/#310/#314/#219-close/#231/#232/#275; supervisor landed #237 (integration) #264 #270 (integration) #267 (integration, corpus 79) #242 (TRUE merge push, closes #241) #524 (author-reworked per guidance, fixes #523)

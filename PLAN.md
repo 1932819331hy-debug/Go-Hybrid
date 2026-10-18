@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation: workload scratch isolation (2026-10-18)
+- Base `0ca08c2`: overlapping workload runners share `/tmp/gowl`; the second removes an input still needed by the first. A normal run also deletes preexisting scratch data. Use one `mktemp` directory per invocation for the Go workspace and temporary executables, cleaned on success or failure.
+- Real shell regressions with offline Go/Cargo/Hybrid substitutes: before the fix, all six existing tests pass and all three new test methods fail (five failed assertions including cleanup subcases); after, 9/9 pass. Workload-shape suite 10/10, shell syntax, test-registration guard and diff whitespace checks pass. Pinned Go/Rust builds, compiler/corpus/differential suites and upstream CI have not run locally; no benchmark-performance claim is made.
+
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
 
