@@ -1179,6 +1179,12 @@ impl<'a> Checker<'a> {
                     &format!("receive into `{}`", l.names[0]),
                 );
             }
+            let moved_non_owned = self.moved_non_owned_origin_in_expr(st, &l.values[0]);
+            self.mark_move_in_value(
+                st,
+                &l.values[0],
+                format!("the move-define `{}`", l.values[0].render()),
+            );
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
             let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
             struct MultiDefInfo {
@@ -1248,6 +1254,7 @@ impl<'a> Checker<'a> {
                 .collect();
             for info in resolved {
                 let is_view = matches!(info.shape, TypeShape::BorrowHandle(_));
+                let carries = self.shape_may_share(&info.shape);
                 self.define_binding(st, &info.name, info.shape.clone(), info.ty, immutable, managed);
                 if is_view {
                     self.extend_call_loans_to_view(st, &l.values[0], &info.name, idx);
@@ -1267,6 +1274,16 @@ impl<'a> Checker<'a> {
                             b.non_owned_origin = Some(origin);
                         }
                     }
+                }
+                if carries {
+                    if let Some(origin) = &moved_non_owned {
+                        if let Some(b) = st.env_lookup_mut(&info.name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin.clone());
+                            }
+                        }
+                    }
+                    self.record_move_const_and_a3_loans(st, &info.name, &l.values[0], idx);
                 }
             }
             // Every name is bound now: join results the callee returns twice.
@@ -1363,6 +1380,7 @@ impl<'a> Checker<'a> {
                             b.non_owned_origin = Some(origin);
                         }
                     }
+                    self.record_move_const_and_a3_loans(st, name, value, idx);
                     continue;
                 }
                 // Self-shadowing define (`m := m`, `h := h`, `m := same(m)`
@@ -1477,6 +1495,7 @@ impl<'a> Checker<'a> {
                 // mutable GC storage with its source — so a later `move` of
                 // either must freeze the other (O5.2).
                 self.record_may_share(st, name, value);
+                self.record_move_const_and_a3_loans(st, name, value, idx);
                 // alias recording: `m2 := agg` (single-parent link, the
                 // friendlier "frozen alias" diagnostic) — and call results
                 // that hand back argument storage (#38).
@@ -1490,7 +1509,7 @@ impl<'a> Checker<'a> {
                 // binding's non-owned origin — the RHS read the outer
                 // storage, so the inner binding inherits O5.1's restriction
                 // (move-at-boundary still rejects E3004).
-                if let Some(origin) = shadowed_origin {
+                if let Some(origin) = shadowed_origin.or(moved_non_owned) {
                     if let Some(b) = st.env_lookup_mut(name) {
                         if b.non_owned_origin.is_none() {
                             b.non_owned_origin = Some(origin);
@@ -1997,7 +2016,6 @@ impl<'a> Checker<'a> {
             }
         }
     }
-
     /// True when `value` contains a slice whose base is an addressable
     /// array rooted at `root`. A call that returns an array by value
     /// (`clone(a)[:]`) is a copy: the slice base is the call, so it does
@@ -2082,6 +2100,61 @@ impl<'a> Checker<'a> {
     // bare (`holder{m: agg}`), projected (`holder{m: h1.m}`) or produced by
     // a call (`wrap{items: same(agg)}`) — is covered by one collector.
 
+    /// Preserve T22 `const` root linkage and live A3 map-slot loans across
+    /// `move` expressions (`c := move K`, `c = move K`, `h := holder{s: move K}`,
+    /// `m2 := move m` during a live `&m[k]` loan). Linking `name` only to a
+    /// resolved `const` root or propagating live `MapSlot` loans avoids
+    /// adding `may_share` edges on ordinary mutable bindings, which would
+    /// reclassify `use-after-move` on the source binding as `frozen alias`.
+    pub(crate) fn record_move_const_and_a3_loans(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        value: &Expr,
+        idx: usize,
+    ) {
+        let mut moved_srcs = Vec::new();
+        collect_move_ident_sources(value, &mut moved_srcs);
+        if moved_srcs.is_empty() {
+            return;
+        }
+        for src in moved_srcs {
+            if src == name {
+                continue;
+            }
+            let place = Place {
+                kind: PlaceKind::Ident(src.clone()),
+                span: value.span(),
+            };
+            if let Some(const_root) = self.const_write_root(st, &place) {
+                st.share_edge(name, &const_root);
+            }
+            let inherited: Vec<Loan> = st
+                .loans
+                .iter()
+                .filter_map(|l| match &l.target {
+                    LoanTarget::MapSlot { binding, path }
+                        if l.created <= idx
+                            && idx <= l.last
+                            && a3_paths_conflict(st, path, &src) =>
+                    {
+                        Some(Loan {
+                            target: LoanTarget::MapSlot {
+                                binding: binding.clone(),
+                                path: name.to_string(),
+                            },
+                            created: l.created,
+                            last: l.last,
+                            span: l.span,
+                            desc: l.desc.clone(),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            st.loans.extend(inherited);
+        }
+    }
     /// Record the may-share edge created by the builtin `copy(dst, src)`
     /// (#178). For a slice whose ELEMENT carries mutable GC storage
     /// (map / slice / pointer, or a struct/array of them) `copy` is
@@ -4787,7 +4860,7 @@ impl<'a> Checker<'a> {
         // whole-binding rebind: `rows = append(rows, ...)`, parallel
         // `m2, x = m, 1`, and multi-value unpack `n, m = make_pair()`.
         if op == AssignOp::Assign {
-            self.rebind_assign_targets(st, targets, values, &is_const_write);
+            self.rebind_assign_targets(st, targets, values, &is_const_write, idx);
         }
     }
 
@@ -4806,7 +4879,7 @@ impl<'a> Checker<'a> {
         }
         if op == AssignOp::Assign {
             let no_const_mask = vec![false; targets.len()];
-            self.rebind_assign_targets(st, targets, values, &no_const_mask);
+            self.rebind_assign_targets(st, targets, values, &no_const_mask, 0);
         }
         self.record_assign_borrow_aliases(st, targets, op, values);
     }
@@ -4817,6 +4890,7 @@ impl<'a> Checker<'a> {
         targets: &[Place],
         values: &[Expr],
         is_const_write: &[bool],
+        idx: usize,
     ) {
         if values.len() == targets.len() {
             // Evaluate all RHS shapes, types, and alias sources before
@@ -4951,6 +5025,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     self.record_may_share(st, name, v);
+                    self.record_move_const_and_a3_loans(st, name, v, idx);
                     // rebind may create a fresh alias — ident copies AND
                     // call results that hand back argument storage (#38)
                     self.record_alias(st, name, v);
@@ -4975,6 +5050,7 @@ impl<'a> Checker<'a> {
                 }
             }
         } else if values.len() == 1 && targets.len() > 1 {
+            let moved_non_owned = self.moved_non_owned_origin_in_expr(st, &values[0]);
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             let tys = self.multi_value_tys(st, &values[0], targets.len());
             let mut ref_roots = Vec::new();
@@ -5043,7 +5119,11 @@ impl<'a> Checker<'a> {
                             b.ty = ty;
                         }
                         b.moved = None;
-                        b.non_owned_origin = None;
+                        b.non_owned_origin = if may_share {
+                            moved_non_owned.clone()
+                        } else {
+                            None
+                        };
                     }
                     st.aliases.remove(name);
                     st.share_clear(name);
@@ -5096,6 +5176,9 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    if may_share {
+                        self.record_move_const_and_a3_loans(st, name, &values[0], idx);
+                    }
                 } else {
                     let root = t.root();
                     if !root.is_empty() && self.binding_may_share(st, root) {
@@ -5117,7 +5200,7 @@ impl<'a> Checker<'a> {
 
 
 
-    fn emit_a6_field_borrow_error(&mut self, t: &Place) {
+    pub(crate) fn emit_a6_field_borrow_error(&mut self, t: &Place) {
         let msg = format!(
             "a borrow value cannot be stored in the field `{}`",
             t.render()
@@ -5383,6 +5466,7 @@ impl<'a> Checker<'a> {
                                 cst.aliases.remove(name);
                                 cst.share_clear(name);
                                 self.record_may_share(&mut cst, name, v);
+                                self.record_move_const_and_a3_loans(&mut cst, name, v, 0);
                                 self.record_alias(&mut cst, name, v);
                                 cst.closure_mutates.remove(name);
                                 cst.closure_defs.remove(name);
@@ -5609,6 +5693,7 @@ impl<'a> Checker<'a> {
                 self.record_alias(st, name, value);
             }
             self.record_closure_mutations(st, name, value);
+            self.record_move_const_and_a3_loans(st, name, value, 0);
         }
     }
 
@@ -5655,6 +5740,7 @@ impl<'a> Checker<'a> {
         let mut roots = Vec::new();
         collect_ref_roots(inner, &mut roots);
         self.collect_callee_const_return_roots(st, inner, &mut roots, 0);
+        collect_move_ident_sources(inner, &mut roots);
         if roots.is_empty() {
             if let Some(r) = inner.root_ident() {
                 roots.push(r.to_string());
@@ -5877,6 +5963,7 @@ impl<'a> Checker<'a> {
         }
         let mut roots = Vec::new();
         collect_ref_roots(inner, &mut roots);
+        collect_move_ident_sources(inner, &mut roots);
         roots.iter().any(|r| aliases.contains(r))
     }
 
@@ -6441,7 +6528,7 @@ impl<'a> Checker<'a> {
 
     /// The shape of an assignment place, when it resolves (drives the N1
     /// nil checks on assignment targets).
-    fn place_shape(&self, st: &FnState, p: &Place) -> Option<TypeShape> {
+    pub(crate) fn place_shape(&self, st: &FnState, p: &Place) -> Option<TypeShape> {
         match &p.kind {
             PlaceKind::Ident(name) => self.lookup_binding(st, name).map(|b| b.shape.clone()),
             PlaceKind::Field { base, name } => {
@@ -6605,6 +6692,62 @@ impl<'a> Checker<'a> {
                 self.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
             }
         }
+    }
+}
+
+/// Collect root identifiers of `move` operands inside `expr` (including
+/// top-level `move x` and `move` expressions nested inside composite literals
+/// or call arguments).
+fn collect_move_ident_sources(expr: &Expr, out: &mut Vec<String>) {
+    match unwrap_parens(expr) {
+        Expr::Move { operand, .. } => {
+            if let Some(root) = unwrap_parens(operand).root_ident() {
+                out.push(root.to_string());
+            }
+            collect_move_ident_sources(operand, out);
+        }
+        Expr::StructLit { fields, .. } => {
+            for f in fields {
+                collect_move_ident_sources(&f.value, out);
+            }
+        }
+        Expr::SliceLit { items, .. } => {
+            for it in items {
+                collect_move_ident_sources(it, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                collect_move_ident_sources(k, out);
+                collect_move_ident_sources(v, out);
+            }
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_move_ident_sources(callee, out);
+            for a in args {
+                collect_move_ident_sources(&a.value, out);
+            }
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            collect_move_ident_sources(base, out);
+            if let Some(lo) = lo {
+                collect_move_ident_sources(lo, out);
+            }
+            if let Some(hi) = hi {
+                collect_move_ident_sources(hi, out);
+            }
+        }
+        Expr::Field { base, .. }
+        | Expr::Unary { operand: base, .. }
+        | Expr::AddrOf { operand: base, .. }
+        | Expr::Try { operand: base, .. } => {
+            collect_move_ident_sources(base, out);
+        }
+        Expr::Index { base, index, .. } | Expr::Binary { lhs: base, rhs: index, .. } => {
+            collect_move_ident_sources(base, out);
+            collect_move_ident_sources(index, out);
+        }
+        _ => {}
     }
 }
 
