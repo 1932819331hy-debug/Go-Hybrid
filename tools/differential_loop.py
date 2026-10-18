@@ -112,7 +112,8 @@ def checker_rejects(bin_path, hy_path, expected_rule):
     # Envelope validation (PR #260): a well-formed JSON scalar/list, a
     # non-dict summary, non-list diagnostics, or non-dict diagnostic items
     # used to escape as AttributeError tracebacks; a summary "errors" count
-    # contradicting the diagnostics was silently accepted.
+    # contradicting the diagnostics was silently accepted (#601 extended the
+    # count check to "warnings" too).
     if not isinstance(payload, dict):
         return False, "invalid checker JSON envelope: expected an object"
     summary = payload.get("summary", {})
@@ -121,11 +122,16 @@ def checker_rejects(bin_path, hy_path, expected_rule):
         not isinstance(d, dict) for d in diags
     ):
         return False, "invalid checker JSON envelope: summary/diagnostics"
-    if "errors" in summary:
-        count = summary["errors"]
-        actual = sum(d.get("severity") == "error" for d in diags)
-        if type(count) is not int or count < 0 or count != actual:
-            return False, f"inconsistent summary errors count: {count!r} vs {actual}"
+    # Match the corpus harness's protocol checks (PR #260 + its #601 residual):
+    # a contradictory error OR warning count cannot establish rejection
+    # agreement, even with a matching rule. Older checker fixtures may omit
+    # counts entirely.
+    for field, severity in (("errors", "error"), ("warnings", "warning")):
+        if field in summary:
+            count = summary[field]
+            actual = sum(d.get("severity") == severity for d in diags)
+            if type(count) is not int or count < 0 or count != actual:
+                return False, f"inconsistent summary {field} count: {count!r} vs {actual}"
     if proc.returncode != 1:
         return False, (
             f"checker exit/verdict mismatch: exit {proc.returncode}, "
