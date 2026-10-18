@@ -1,13 +1,15 @@
 # W012 validation snapshots — 2026-10-18
 
-> **Newer hosted evidence supersedes the fixture count below:** [GitHub Actions run
-> 39143438366](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39143438366)
-> checked PR head `fef92eecf31ee1c3fe383a2953e17ea1840b9ff0` merged against its
-> current base: **79/79 native/WASM corpus parity**, plus Go race tests and Go vet.
-> [Compiler CI](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39143438385)
-> also passed. This older 60-fixture benchmark snapshot remains here unchanged for
-> reproducibility; it does not measure the subsequent 30-second timeout boundary,
-> `CheckContext`, or the later corpus additions.
+> **Latest hosted correctness evidence, not a new benchmark:** [W012 validation run
+> 39169356538](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39169356538)
+> checked PR head `e029d661d8ce7f79e7f362a7ee97bf3251d6a274` against the
+> then-current main: **113/113 full native/WASM envelope parity**, Go race suite,
+> and Go vet passed; the [compiler CI](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39169356527)
+> passed too. This head also guards declared `.hy` read failures and duplicate
+> paths. Earlier hosted run 39143438366 passed 79/79 and is superseded only as
+> a corpus-count snapshot. This **60-fixture** benchmark and its original raw
+> samples remain unchanged for reproducibility. No new public-path latency
+> benchmark or editor/LSP integration result is implied.
 
 ## Scope and provenance
 
