@@ -63,7 +63,6 @@ surface with author credit (tests extracted to
 With this registration the corpus is **78 programs: ACCEPT 21 ·
 ACCEPT-MANAGED 2 · REJECT 55**.
 
-<<<<<<< HEAD
 `control-*.hy` — isHeSatoshi (PR #598): seven **negative controls** for the
 accept-side oracle wave. The Go-toolchain oracle (#577) measured a 38%
 accept-side residual on generated programs and named ten accepted-but-
