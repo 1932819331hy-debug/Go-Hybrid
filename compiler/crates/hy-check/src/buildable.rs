@@ -400,6 +400,11 @@ impl<'a> Collector<'a> {
         if let Some(r) = &f.receiver {
             self.exempt(&r.name);
             let rk = self.kind_of_ty(&r.ty, 0);
+            let rk = if r.is_pointer {
+                OpKind::Pointer(Box::new(rk))
+            } else {
+                rk
+            };
             self.bind_kind(&r.name, rk);
         }
         for p in &f.params {
@@ -488,6 +493,15 @@ impl<'a> Collector<'a> {
                 continue;
             }
             if name == "_" {
+                continue;
+            }
+            let existing_let = self
+                .scopes
+                .last()
+                .and_then(|top| top.get(name.as_str()).copied().flatten())
+                .is_some_and(|id| self.defines[id].kind == LocalKind::Let);
+            if existing_let {
+                self.emit_let_reassign_error(name, l.span);
                 continue;
             }
             let Some(top) = self.scopes.last_mut() else {
@@ -734,6 +748,7 @@ impl<'a> Collector<'a> {
     fn place(&mut self, p: &Place, op: AssignOp) {
         match &p.kind {
             PlaceKind::Ident(n) => {
+                self.check_let_write(n, p.span);
                 // A bare `x = v` store is the ONE target form Go does not
                 // count as a read; `x++`, `x += 1` and every non-ident
                 // target (`x[k] = v`, `x.f = v`, `&x`) read the root.
@@ -747,6 +762,40 @@ impl<'a> Collector<'a> {
                 self.place_read(p)
             }
         }
+    }
+
+    fn check_let_write(&mut self, name: &str, span: Span) {
+        if name == "_" {
+            return;
+        }
+        for layer in self.scopes.iter().rev() {
+            if let Some(entry) = layer.get(name) {
+                if let Some(id) = entry {
+                    if self.defines[*id].kind == LocalKind::Let {
+                        self.emit_let_reassign_error(name, span);
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    fn emit_let_reassign_error(&mut self, name: &str, span: Span) {
+        self.diags.push(
+            Diagnostic::error(
+                "HYB-E3006",
+                self.path.clone(),
+                span,
+                format!(
+                    "cannot assign to `{}` — it is a `let` binding (immutable binding, T22) (HYB-E3006)",
+                    name
+                ),
+            )
+            .with_notes(vec![
+                "`let` declares an immutable binding: reassigning `x = ...`, `x += ...`, or `x++` is rejected (SPEC-LANGUAGE T22 / D14)".to_string(),
+                "declare with `var x = ...` or `x := ...` if the binding must be reassigned".to_string(),
+            ]),
+        );
     }
 
     fn place_read(&mut self, p: &Place) {
@@ -2054,7 +2103,42 @@ impl<'a> Collector<'a> {
                 }
             }
             Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if pkg == "errors"
+                        && name == "wrap"
+                        && self.lookup_kind(pkg).is_none()
+                        && args.len() != 2
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`errors.wrap` takes 2 arguments `(err, message)`, got {} (HYB-E1002)",
+                                args.len()
+                            ),
+                            "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
+                        );
+                    }
+                }
                 let bk = self.kind_of_expr(base);
+                let head = Checker::base_named_type_str(name);
+                if let OpKind::Struct(Some(sn)) = &bk {
+                    if let Some(m) = self.ck.method_decls.get(&(sn.clone(), head.to_string())) {
+                        let ptr_recv = m.receiver.as_ref().is_some_and(|r| r.is_pointer);
+                        if ptr_recv && !self.is_addressable_value_receiver(base) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
+                                    name,
+                                    base.render(),
+                                    sn,
+                                    base.render()
+                                ),
+                                "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
+                            );
+                        }
+                    }
+                }
                 if let Some(fk) = self.struct_field_kind(&bk, name) {
                     let has_method = self
                         .struct_name(&bk)
@@ -2111,6 +2195,33 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// Issue #656: can Go implicitly take `(&e)` to invoke a `*T` receiver
+    /// method on a value-typed struct expression `e`?
+    /// Addressable: local/param variables, pointer dereferences, slice
+    /// indexing (`s[i]`), array indexing of an addressable array, and field
+    /// selection on a pointer or addressable struct.
+    /// Non-addressable: map index (`m[k]`), function/method call result
+    /// (`make_t()`), and struct literal (`T{}`).
+    fn is_addressable_value_receiver(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Ident { .. } => true,
+            Expr::Index { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Map(_, _) | OpKind::Str => false,
+                OpKind::Slice(_) | OpKind::Unknown => true,
+                OpKind::Pointer(inner) => {
+                    matches!(*inner, OpKind::Array(_) | OpKind::Slice(_) | OpKind::Unknown)
+                }
+                OpKind::Array(_) => self.is_addressable_value_receiver(base),
+                _ => false,
+            },
+            Expr::Field { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Pointer(_) | OpKind::Unknown => true,
+                _ => self.is_addressable_value_receiver(base),
+            },
+            _ => false,
+        }
+    }
+
     fn check_slice_pop_operands(&mut self, base: &Expr, bk: &OpKind, args: &[CallArg], span: Span) {
         match bk {
             OpKind::Slice(_) => {
@@ -2156,7 +2267,6 @@ impl<'a> Collector<'a> {
             _ => {}
         }
     }
-
     /// Family E1–E5 (#425): extend `HYB-E2005` (`BUILTIN-ARGS`) from literals
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {

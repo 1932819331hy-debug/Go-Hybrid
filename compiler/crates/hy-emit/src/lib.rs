@@ -717,17 +717,24 @@ impl Emitter {
         let mut out = String::from("package ");
         out.push_str(&self.package_name);
         out.push('\n');
-        if !self.imports.is_empty() {
+        let active_imports: Vec<&String> = self
+            .imports
+            .iter()
+            .filter(|root| {
+                // An explicit `import "errors"` whose only Hybrid call was
+                // `errors.wrap(err, msg)` lowers to `fmt.Errorf(...)` and
+                // leaves no `errors.` reference in the emitted Go body (#657).
+                !(root.as_str() == "errors" && !self.body.contains("errors."))
+            })
+            .collect();
+        if !active_imports.is_empty() {
             out.push_str("\nimport (\n");
             // Roots map to their real Go import paths (http → net/http,
             // SPEC M5's curated allowlist); binding packages live under the
             // configured prefix (hybrid.program for program builds, the
             // consumer's package path in package mode). The CODE keeps the
             // root spelling — Go's package name for those imports.
-            for root in &self.imports {
-                if root == "errors" && !self.body.contains("errors.") {
-                    continue;
-                }
+            for root in active_imports {
                 let path = if let Some(p) = self.explicit_imports.get(root) {
                     p.clone()
                 } else if shapes::RUST_CRATES

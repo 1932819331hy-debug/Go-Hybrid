@@ -398,6 +398,7 @@ impl Emitter {
                 let saved_loans = std::mem::take(&mut self.loan_frames);
                 let body_res = self.emit_block_body(&body.stmts);
                 self.loan_frames = saved_loans;
+                self.loop_labels = saved_loop_labels;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
