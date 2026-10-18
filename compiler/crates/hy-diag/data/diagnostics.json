@@ -395,6 +395,21 @@
       "tier0_rule_id": "A1c"
     },
     {
+      "code": "HYB-E3012",
+      "name": "chan-direction-coercion",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "channel value cannot convert to the target channel direction",
+      "summary": "Go's implicit channel conversion is one-way: a bidirectional `chan T` may convert to `chan<- T` or `<-chan T`, but a unidirectional channel (`chan<- T` or `<-chan T`) can never convert to the opposite direction or widen back to `chan T` (issue #623). Passing or assigning a channel with an incompatible direction at a value-flow coercion site (`var`/`const` ascription, assignment, call/task/method/closure argument, return, composite-literal field/element, or channel send/receive of a channel element) emits Go that fails `go vet` / `go build` (`cannot use ... as ... value`). Only certain direction mismatches are rejected — unresolvable shapes fail open.",
+      "fixits": [
+        "declare the source channel as bidirectional (`chan T`) so it can narrow to `chan<- T` or `<-chan T`",
+        "change the destination's declared channel direction (`<-chan T` / `chan<- T` / `chan T`) to match the source channel"
+      ],
+      "example": "var sc chan<- int = make(chan int, 1)\nvar rc <-chan int = sc   // reject: HYB-E3012 — `chan<- int` cannot convert to `<-chan int`",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
+    },
+    {
       "code": "HYB-E3101",
       "name": "handle-loan-conflict",
       "category": "ownership-loans",
