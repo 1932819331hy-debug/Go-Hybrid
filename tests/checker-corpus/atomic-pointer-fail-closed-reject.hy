@@ -1,5 +1,5 @@
 // ============================================================================
-// 56-atomic-pointer-fail-closed-reject — Checker corpus #53 (corpus GROWTH,
+// atomic-pointer-fail-closed-reject — Additive checker corpus (corpus GROWTH,
 // added AFTER the checker existed — the "adversarial corpus tests" track of
 // BOUNTY.md, not a rewrite of a pre-registered verdict).
 //

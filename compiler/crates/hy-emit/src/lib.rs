@@ -322,6 +322,8 @@ pub struct Emitter {
     indent: usize,
     /// Package roots used anywhere in the body → import lines (sorted).
     imports: BTreeSet<String>,
+    /// Explicit package root → full Go import path mapping from `Decl::Import`.
+    explicit_imports: BTreeMap<String, String>,
     /// Per-function binding hints. A flat map per function: MVP-0's hints
     /// are bound at fn-body top level, and closure bodies share the frame.
     bindings: BTreeMap<String, BindingKind>,
@@ -359,6 +361,12 @@ pub struct Emitter {
     /// (O9's honesty: Go-heap reads are copies). Frames are block-scoped:
     /// a loan flushes at the end of the block that declared it.
     loan_frames: Vec<Vec<(String, String)>>,
+    /// #546: outer slot loans handed down into the branches of an `if`
+    /// whose branches spawn/send using the loan's base. Every branch body
+    /// of that `if` starts with these loans in its frame (and a missing
+    /// `else` gets a synthetic one), so the store-back runs on each path
+    /// before any move instead of once after the whole `if`.
+    branch_inherit: Option<Vec<(String, String)>>,
     /// E11 handler contract: inside a closure that converts to a
     /// propagation-carrying target (`http.handler`), `?` fires
     /// `http.Error(w, err, 400)` + return instead of the E3 error-return.
@@ -405,6 +413,20 @@ pub struct Emitter {
     /// var → (shape-known dotted type, is_pointer): `var hits atomic.int64`
     /// / `hits *atomic.int64` — the MethodFunc receiver's address-of form.
     var_ty: BTreeMap<String, (String, bool)>,
+    /// Variables known to hold a pointer type in the current function frame.
+    pointer_vars: BTreeSet<String>,
+    /// Local/parameter/receiver/result names bound in the current function frame.
+    local_vars: BTreeSet<String>,
+    /// Functions whose first result is a pointer type.
+    ptr_returning_fns: BTreeSet<String>,
+}
+
+pub(crate) struct ScopeSnapshot {
+    local_vars: BTreeSet<String>,
+    bindings: BTreeMap<String, BindingKind>,
+    var_ty: BTreeMap<String, (String, bool)>,
+    var_struct: BTreeMap<String, String>,
+    pointer_vars: BTreeSet<String>,
 }
 
 impl Emitter {
@@ -423,6 +445,7 @@ impl Emitter {
             loop_labels: Vec::new(),
             loop_label_n: 0,
             loan_frames: Vec::new(),
+            branch_inherit: None,
             handler_writer: None,
             pending_fnlit_conv: None,
             cur_fn_conv_result: None,
@@ -436,6 +459,48 @@ impl Emitter {
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
+            pointer_vars: BTreeSet::new(),
+            local_vars: BTreeSet::new(),
+            ptr_returning_fns: BTreeSet::new(),
+            explicit_imports: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn is_unshadowed_pkg_root(&self, name: &str) -> bool {
+        !self.local_vars.contains(name) && is_package_root(name)
+    }
+
+    pub(crate) fn save_scope(&self) -> ScopeSnapshot {
+        ScopeSnapshot {
+            local_vars: self.local_vars.clone(),
+            bindings: self.bindings.clone(),
+            var_ty: self.var_ty.clone(),
+            var_struct: self.var_struct.clone(),
+            pointer_vars: self.pointer_vars.clone(),
+        }
+    }
+
+    pub(crate) fn restore_scope(&mut self, saved: ScopeSnapshot) {
+        self.local_vars = saved.local_vars;
+        self.bindings = saved.bindings;
+        self.var_ty = saved.var_ty;
+        self.var_struct = saved.var_struct;
+        self.pointer_vars = saved.pointer_vars;
+    }
+
+    pub(crate) fn shadow_local_name(&mut self, name: &str) {
+        if name != "_" {
+            self.local_vars.insert(name.to_string());
+            self.bindings.remove(name);
+            self.var_ty.remove(name);
+            self.var_struct.remove(name);
+            self.pointer_vars.remove(name);
+        }
+    }
+
+    pub(crate) fn shadow_local_names(&mut self, names: &[String]) {
+        for n in names {
+            self.shadow_local_name(n);
         }
     }
 
@@ -489,6 +554,19 @@ impl Emitter {
                 )),
                 _ => None,
             })
+            .collect();
+        self.ptr_returning_fns = file
+            .fns()
+            .filter(|f| {
+                matches!(
+                    f.results.first(),
+                    Some(FnResult {
+                        ty: TypeExpr::Pointer { .. },
+                        ..
+                    })
+                )
+            })
+            .map(|f| f.name.clone())
             .collect();
         self.fn_shapes = file
             .fns()
@@ -558,6 +636,7 @@ impl Emitter {
                     // import set ("net/http" → root "http"; the body says
                     // `http.X`, and import_path_of maps the line back).
                     let root = path.split('/').next_back().unwrap_or(path);
+                    self.explicit_imports.insert(root.to_string(), path.clone());
                     self.imports.insert(root.to_string());
                 }
                 Decl::Const(c) => self.emit_file_const(c)?,
@@ -591,7 +670,9 @@ impl Emitter {
             // consumer's package path in package mode). The CODE keeps the
             // root spelling — Go's package name for those imports.
             for root in &self.imports {
-                let path = if shapes::RUST_CRATES
+                let path = if let Some(p) = self.explicit_imports.get(root) {
+                    p.clone()
+                } else if shapes::RUST_CRATES
                     .iter()
                     .any(|c| c.binding_root == root.as_str())
                 {
@@ -692,6 +773,10 @@ impl Emitter {
 
     fn emit_fn(&mut self, f: &FnDecl) -> Result<(), EmitError> {
         self.bindings.clear();
+        self.var_struct.clear();
+        self.var_ty.clear();
+        self.pointer_vars.clear();
+        self.local_vars.clear();
         self.temp_n = 0;
         self.try_temps.clear();
         self.loop_labels.clear();
@@ -755,8 +840,38 @@ impl Emitter {
             }
         }
 
+        for r in &f.results {
+            if let Some(name) = &r.name {
+                if name != "_" {
+                    self.shadow_local_name(name);
+                    if matches!(r.ty, TypeExpr::Pointer { .. }) {
+                        self.pointer_vars.insert(name.clone());
+                    }
+                    if let Some(kind) = self.binding_kind_of_ty(&r.ty) {
+                        self.bindings.insert(name.clone(), kind);
+                    }
+                    self.register_var_ty(name, &r.ty);
+                }
+            }
+        }
+
         // Hints from parameter types (dotted foreign types → Foreign).
         if let Some(recv) = &f.receiver {
+            if recv.name != "_" {
+                self.local_vars.insert(recv.name.clone());
+            }
+            if recv.is_pointer {
+                self.pointer_vars.insert(recv.name.clone());
+            }
+            if let Some(kind) = self.binding_kind_of_ty(&recv.ty) {
+                self.bindings.insert(recv.name.clone(), kind);
+            }
+            self.register_var_ty(&recv.name, &recv.ty);
+            if recv.is_pointer {
+                if let Some((_, ptr)) = self.var_ty.get_mut(&recv.name) {
+                    *ptr = true;
+                }
+            }
             let recv_ty = self.type_text(&recv.ty);
             let star = if recv.is_pointer { "*" } else { "" };
             self.push_raw(&format!(
@@ -919,12 +1034,33 @@ impl Emitter {
 
     fn emit_hints_from_params(&mut self, params: &[Param]) {
         for p in params {
+            self.shadow_local_name(&p.name);
             if let Some(kind) = self.binding_kind_of_ty(&p.ty) {
                 self.bindings.insert(p.name.clone(), kind);
             } else if matches!(p.ty, TypeExpr::Chan { .. }) {
                 self.bindings.insert(p.name.clone(), BindingKind::Chan);
             }
+            if matches!(p.ty, TypeExpr::Pointer { .. }) {
+                self.pointer_vars.insert(p.name.clone());
+            }
             self.register_var_ty(&p.name, &p.ty);
+        }
+    }
+
+    pub(crate) fn expr_is_pointer(&self, e: &Expr) -> bool {
+        match e {
+            Expr::AddrOf { .. } => true,
+            Expr::Paren { inner, .. } => self.expr_is_pointer(inner),
+            Expr::Try { operand, .. } => self.expr_is_pointer(operand),
+            Expr::Ident { name, .. } => self.pointer_vars.contains(name),
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    self.ptr_returning_fns.contains(name)
+                } else {
+                    false
+                }
+            }
+            _ => false,
         }
     }
 
@@ -952,6 +1088,9 @@ impl Emitter {
     /// table knows gives ForeignTy(key) — members resolve field-vs-method;
     /// any other dotted type stays generic Foreign.
     fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
+        if matches!(t, TypeExpr::Chan { .. }) {
+            return Some(BindingKind::Chan);
+        }
         let name = match t {
             TypeExpr::Named { name, .. } => name.as_str(),
             TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
@@ -1008,9 +1147,16 @@ impl Emitter {
     fn stmt_has_try(&self, s: &Stmt) -> bool {
         match s {
             Stmt::Local(l) => l.values.iter().any(|v| self.expr_has_try(v)),
-            Stmt::Assign { values, .. } => values.iter().any(|v| self.expr_has_try(v)),
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                targets.iter().any(Self::place_has_hoistable_try)
+                    || values.iter().any(|v| self.expr_has_try(v))
+            }
             Stmt::Expr { expr, .. } => self.expr_has_try(expr),
-            Stmt::Send { value, .. } => self.expr_has_try(value),
+            Stmt::Send { chan, value, .. } => {
+                self.expr_has_try(chan) || self.expr_has_try(value)
+            }
             Stmt::If {
                 init,
                 cond,
@@ -1041,7 +1187,9 @@ impl Emitter {
             Stmt::Defer { call, .. } => self.expr_has_try(call),
             Stmt::Block { block, .. } => self.block_has_try(block),
             Stmt::Managed { body, .. } => self.block_has_try(body),
-            Stmt::Task { args, .. } => args.iter().any(|a| self.expr_has_try(&a.value)),
+            Stmt::Task { callee, args, .. } => {
+                self.expr_has_try(callee) || args.iter().any(|a| self.expr_has_try(&a.value))
+            }
             Stmt::Match { subject, arms, .. } => {
                 self.expr_has_try(subject)
                     || arms.iter().any(|a| {
