@@ -94,7 +94,11 @@ func (w *WazeroInstanceABI) Alloc(ctx context.Context, byteLen uint64) (uint32, 
 	if len(res) == 0 {
 		return 0, errors.New("alloc returned empty result")
 	}
-	return uint32(res[0]), nil
+	ptr := uint32(res[0])
+	if ptr == 0 && byteLen > 0 {
+		return 0, errors.New("alloc returned null pointer")
+	}
+	return ptr, nil
 }
 
 func (w *WazeroInstanceABI) Free(ctx context.Context, ptr, byteLen uint64) error {
@@ -192,6 +196,12 @@ func CheckSourceWithABI(ctx context.Context, abi WasmABI, src string) *AnalysisR
 			Failure: fmt.Errorf("infrastructure error: guest memory alloc failed: %w", err),
 		}
 	}
+	sourceFreed := false
+	defer func() {
+		if !sourceFreed {
+			_ = abi.Free(ctx, uint64(srcPtr), srcLen)
+		}
+	}()
 
 	if !abi.WriteMemory(srcPtr, srcBytes) {
 		return &AnalysisResult{
@@ -208,7 +218,13 @@ func CheckSourceWithABI(ctx context.Context, abi WasmABI, src string) *AnalysisR
 		}
 	}
 
-	_ = abi.Free(ctx, uint64(srcPtr), srcLen)
+	if err := abi.Free(ctx, uint64(srcPtr), srcLen); err != nil {
+		return &AnalysisResult{
+			Verdict: VerdictAnalysisFailure,
+			Failure: fmt.Errorf("infrastructure error: failed freeing guest source buffer: %w", err),
+		}
+	}
+	sourceFreed = true
 
 	if err := ctx.Err(); err != nil {
 		return &AnalysisResult{
@@ -219,6 +235,12 @@ func CheckSourceWithABI(ctx context.Context, abi WasmABI, src string) *AnalysisR
 
 	outPtr := uint32(packed >> 32)
 	outLen := uint32(packed & 0xFFFFFFFF)
+	if outPtr == 0 || outLen == 0 {
+		return &AnalysisResult{
+			Verdict: VerdictAnalysisFailure,
+			Failure: fmt.Errorf("infrastructure error: invalid guest output buffer: ptr=%d, len=%d", outPtr, outLen),
+		}
+	}
 
 	outBytes, ok := abi.ReadMemory(outPtr, outLen)
 	if !ok {
@@ -227,8 +249,17 @@ func CheckSourceWithABI(ctx context.Context, abi WasmABI, src string) *AnalysisR
 			Failure: fmt.Errorf("infrastructure error: out-of-bounds guest memory read: ptr=%d, len=%d", outPtr, outLen),
 		}
 	}
+	// Wazero exposes a view into guest memory. Copy it before returning ownership
+	// of the guest buffer so decoding never observes freed linear memory.
+	outCopy := append([]byte(nil), outBytes...)
+	if err := abi.Free(ctx, uint64(outPtr), uint64(outLen)); err != nil {
+		return &AnalysisResult{
+			Verdict: VerdictAnalysisFailure,
+			Failure: fmt.Errorf("infrastructure error: failed freeing guest output buffer: %w", err),
+		}
+	}
 
-	out, err := decodeCheckOutput(outBytes)
+	out, err := decodeCheckOutput(outCopy)
 	if err != nil {
 		return &AnalysisResult{Verdict: VerdictAnalysisFailure, Failure: fmt.Errorf("infrastructure error: malformed diagnostic envelope: %w", err)}
 	}
