@@ -64,7 +64,7 @@ impl<'a> Checker<'a> {
             return false;
         }
         match unwrap_parens(e) {
-            Expr::Lit { .. } => true,
+            Expr::Lit { kind, .. } => !matches!(kind, LitKind::Nil),
             Expr::Unary {
                 op: UnOp::Neg | UnOp::Not,
                 operand,
