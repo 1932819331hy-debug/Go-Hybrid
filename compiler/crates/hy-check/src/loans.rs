@@ -4551,7 +4551,7 @@ impl<'a> Checker<'a> {
     /// a `return` of the called function, method, or closure (`return m, m`,
     /// `m2 := m; return m, m2`, `return s[0:1], s[1:2]`, `return box{m: m}, m`,
     /// or bare `return` with named results).
-    fn callee_shared_return_pairs(&self, st: &FnState, value: &Expr) -> Vec<(usize, usize)> {
+    pub(crate) fn callee_shared_return_pairs(&self, st: &FnState, value: &Expr) -> Vec<(usize, usize)> {
         let call = match unwrap_parens(value) {
             Expr::Try { operand, .. } => unwrap_parens(operand),
             other => other,
