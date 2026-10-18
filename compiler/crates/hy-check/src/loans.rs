@@ -6441,7 +6441,7 @@ impl<'a> Checker<'a> {
 
     /// The shape of an assignment place, when it resolves (drives the N1
     /// nil checks on assignment targets).
-    fn place_shape(&self, st: &FnState, p: &Place) -> Option<TypeShape> {
+    pub(crate) fn place_shape(&self, st: &FnState, p: &Place) -> Option<TypeShape> {
         match &p.kind {
             PlaceKind::Ident(name) => self.lookup_binding(st, name).map(|b| b.shape.clone()),
             PlaceKind::Field { base, name } => {

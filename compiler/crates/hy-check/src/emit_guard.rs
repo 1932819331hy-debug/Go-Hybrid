@@ -45,6 +45,8 @@ impl<'a> Checker<'a> {
                 }
                 for v in &l.values {
                     self.check_expr_emit_guard(st, v);
+                    // `n := &m[k].f` — the O8 store-back place must build.
+                    self.check_slot_loan_operand_addressable(st, v);
                 }
                 if deep {
                     if matches!(l.kind, hy_syntax::LocalKind::Const) {
@@ -69,9 +71,12 @@ impl<'a> Checker<'a> {
             } => {
                 for t in targets {
                     self.check_place_emit_guard(st, t);
+                    // `m[k].f = v` — a Go map element is not addressable.
+                    self.check_assign_target_addressable(st, t);
                 }
                 for v in values {
                     self.check_expr_emit_guard(st, v);
+                    self.check_slot_loan_operand_addressable(st, v);
                 }
                 // `x <<= -1` — the compound form of HYB-E6005.
                 if matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) && values.len() == 1 {
@@ -449,9 +454,11 @@ impl<'a> Checker<'a> {
                     }
                 }
                 cst.result_types = results.iter().map(|r| r.ty.clone()).collect();
+                self.push_closure_bound(params, body);
                 for stmt in &body.stmts {
                     self.check_stmt_emit_guard_inner(&mut cst, stmt, /*deep=*/ true);
                 }
+                self.pop_closure_bound();
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
         }

@@ -989,6 +989,32 @@ fn assign_slot_loan_copies_and_stores_back() {
 }
 
 #[test]
+fn assign_slot_loan_into_pointer_var_points_at_copy() {
+    // A pointer-typed target cannot hold the copied element itself
+    // (`cannot use g.nodes[from] (variable of struct type node) as *node`):
+    // it points at a fresh copy, and the store-back dereferences it.
+    let go = emit(
+        "struct node {\n    edges []int\n}\n\nstruct graph {\n    nodes map[int]node\n}\n\nfn (g *graph) connect(from int, to int) {\n    var n *node\n    n = &g.nodes[from]\n    n.edges = append(n.edges, to)\n}\n",
+    );
+    assert!(
+        go.contains("hyLoan0 := g.nodes[from]"),
+        "copy into a temp:\n{}",
+        go
+    );
+    assert!(go.contains("n = &hyLoan0"), "pointer at the copy:\n{}", go);
+    assert!(
+        !go.contains("n = g.nodes[from]"),
+        "value copy into a pointer var cannot build:\n{}",
+        go
+    );
+    assert!(
+        go.contains("g.nodes[from] = *n"),
+        "dereferenced store-back:\n{}",
+        go
+    );
+}
+
+#[test]
 fn single_var_iterate_value_semantics() {
     // Slices: `for w in shard` binds the VALUE (Go's range binds the index).
     let go = emit("fn f(shard []int) {\n    for w in shard {\n        _ = w\n    }\n}\n");

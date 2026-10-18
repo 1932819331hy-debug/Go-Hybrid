@@ -385,7 +385,7 @@ impl Emitter {
                         self.emit_slot_loan_place(operand, name, rest)?;
                     val_texts.push(read_place);
                     if name != "_" {
-                        new_loans.push((name.clone(), write_place));
+                        new_loans.push((name.clone(), format!("{} = {}", write_place, name)));
                     }
                 } else {
                     val_texts.push(self.emit_expr(v, 0)?);
@@ -1007,23 +1007,27 @@ impl Emitter {
     /// Binding hints from the defining values (see `BindingKind`).
     fn hint_from_values(&mut self, names: &[String], values: &[Expr]) {
         let single_hint = if names.len() == 1 && values.len() == 1 && names[0] != "_" {
-            Some((
-                self.binding_kind_of(&values[0]),
-                self.expr_is_pointer(&values[0]),
-            ))
+            Some(self.binding_kind_of(&values[0]))
         } else {
             None
         };
+        let ptr_flags: Vec<bool> = if names.len() == values.len() {
+            values.iter().map(|v| self.expr_is_pointer(v)).collect()
+        } else {
+            Vec::new()
+        };
         self.shadow_local_names(names);
-        if let Some((kind, is_ptr)) = single_hint {
+        if let Some(kind) = single_hint {
             if kind != BindingKind::Plain {
                 self.bindings.insert(names[0].clone(), kind);
             }
-            if is_ptr {
-                self.pointer_vars.insert(names[0].clone());
-            }
             if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
                 self.register_var_ty(&names[0], t);
+            }
+        }
+        for (name, is_ptr) in names.iter().zip(ptr_flags) {
+            if name != "_" && is_ptr {
+                self.pointer_vars.insert(name.clone());
             }
         }
     }
@@ -1184,9 +1188,19 @@ impl Emitter {
                 if let Some(operand) = Self::as_slot_loan_operand(v) {
                     let (read_place, write_place) =
                         self.emit_slot_loan_place(operand, name, rest)?;
-                    rhs_texts.push(read_place);
-                    if name != "_" {
-                        new_loans.push((name.clone(), write_place));
+                    if self.pointer_vars.contains(name) {
+                        // A pointer-typed target (`var x *T`, a `*T` param,
+                        // `x := &T{}`) keeps its Go type: point it at a copy
+                        // of the slot and store the pointee back.
+                        let copy = self.next_temp("hyLoan");
+                        self.push(&format!("{} := {}", copy, read_place));
+                        rhs_texts.push(format!("&{}", copy));
+                        new_loans.push((name.clone(), format!("{} = *{}", write_place, name)));
+                    } else {
+                        rhs_texts.push(read_place);
+                        if name != "_" {
+                            new_loans.push((name.clone(), format!("{} = {}", write_place, name)));
+                        }
                     }
                 } else {
                     rhs_texts.push(self.emit_expr(v, 0)?);
@@ -1198,12 +1212,17 @@ impl Emitter {
             }
             return Ok(());
         }
-        if targets.len() == 1 && values.len() == 1 && op == AssignOp::Assign {
-            if let PlaceKind::Ident(name) = &targets[0].kind {
-                if self.expr_is_pointer(&values[0]) {
-                    self.pointer_vars.insert(name.clone());
-                } else {
-                    self.pointer_vars.remove(name);
+        if targets.len() == values.len() && op == AssignOp::Assign {
+            let ptr_flags: Vec<bool> = values.iter().map(|v| self.expr_is_pointer(v)).collect();
+            for (t, is_ptr) in targets.iter().zip(ptr_flags) {
+                if let PlaceKind::Ident(name) = &t.kind {
+                    if name != "_" {
+                        if is_ptr {
+                            self.pointer_vars.insert(name.clone());
+                        } else {
+                            self.pointer_vars.remove(name);
+                        }
+                    }
                 }
             }
         }
@@ -1348,8 +1367,8 @@ impl Emitter {
                 self.hoist_tries_expr(cond)?;
                 self.emit_if_at(None, cond, then, otherwise, true)?;
                 let frame = self.loan_frames.pop().unwrap_or_default();
-                for (name, place) in frame {
-                    self.push(&format!("{} = {}", place, name));
+                for (_, store) in frame {
+                    self.push(&store);
                 }
                 self.indent -= 1;
                 self.push("}");
@@ -1556,12 +1575,12 @@ impl Emitter {
             if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
                 continue;
             }
-            for (name, place) in frame {
-                stores.push((name.clone(), place.clone()));
+            for entry in frame {
+                stores.push(entry.clone());
             }
         }
-        for (name, place) in stores {
-            self.push(&format!("{} = {}", place, name));
+        for (_, store) in stores {
+            self.push(&store);
         }
     }
 
@@ -1574,12 +1593,12 @@ impl Emitter {
                 }
                 continue;
             }
-            for (name, place) in frame {
-                stores.push((name.clone(), place.clone()));
+            for entry in frame {
+                stores.push(entry.clone());
             }
         }
-        for (name, place) in stores {
-            self.push(&format!("{} = {}", place, name));
+        for (_, store) in stores {
+            self.push(&store);
         }
     }
 
@@ -2369,8 +2388,8 @@ impl Emitter {
                 }
             }
         }
-        for (name, place) in to_flush {
-            self.push(&format!("{} = {}", place, name));
+        for (_, store) in to_flush {
+            self.push(&store);
         }
     }
 
@@ -2402,8 +2421,8 @@ impl Emitter {
                 }
             }
         }
-        for (name, place) in unused {
-            self.push(&format!("{} = {}", place, name));
+        for (_, store) in unused {
+            self.push(&store);
         }
         for (idx, st) in stmts.iter().enumerate() {
             let rest = &stmts[idx + 1..];
@@ -2464,18 +2483,18 @@ impl Emitter {
                         }
                     }
                 }
-                for (name, place) in early_flush {
+                for (name, store) in early_flush {
                     if !name.is_empty() {
-                        self.push(&format!("{} = {}", place, name));
+                        self.push(&store);
                     }
                 }
             }
         }
         let frame = self.loan_frames.pop().unwrap_or_default();
         if !stmts.iter().any(Self::stmt_terminates) {
-            for (name, place) in frame {
+            for (name, store) in frame {
                 if !name.is_empty() {
-                    self.push(&format!("{} = {}", place, name));
+                    self.push(&store);
                 }
             }
         }
