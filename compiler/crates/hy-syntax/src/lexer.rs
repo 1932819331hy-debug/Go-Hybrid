@@ -489,6 +489,29 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
+            let digits = &s[2..];
+            if digits.is_empty() {
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed 0{base} integer literal: expected at least one digit after `0{base}`"
+                    ),
+                );
+            } else if let Some(bad) = digits.chars().find(|&c| match base {
+                'x' => !c.is_ascii_hexdigit(),
+                'o' => !matches!(c, '0'..='7'),
+                'b' => !matches!(c, '0' | '1'),
+                _ => true,
+            }) {
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed 0{base} integer literal: invalid digit `{bad}` for `0{base}` base"
+                    ),
+                );
+            }
             return self.tok(start, Tok::Int(s));
         }
 
@@ -563,6 +586,17 @@ impl<'a> Lexer<'a> {
         if is_float {
             self.tok(start, Tok::Float(s))
         } else {
+            if s.starts_with('0') && s.len() > 1 {
+                if let Some(bad) = s.chars().find(|&c| !matches!(c, '0'..='7')) {
+                    self.escape_diag(
+                        start,
+                        false,
+                        format!(
+                            "malformed octal integer literal `{s}`: invalid digit `{bad}` in leading-zero octal literal"
+                        ),
+                    );
+                }
+            }
             self.tok(start, Tok::Int(s))
         }
     }
@@ -570,23 +604,37 @@ impl<'a> Lexer<'a> {
     fn lex_char(&mut self) -> Token {
         let start = self.pos();
         self.bump(); // opening quote
+        if self.at(0) == Some('\'') {
+            self.bump();
+            self.escape_diag(start, false, "empty char literal");
+            return self.tok(start, Tok::CharLit('\0'));
+        }
         let ch = match self.at(0) {
             Some('\\') => {
                 let esc_start = self.pos();
                 self.bump();
                 let e = self.escape_char(false);
                 if e.is_none() {
-                    // diagnostic already recorded; keep going with something
+                    // diagnostic already recorded; recover to closing quote on this line
+                    while let Some(c) = self.at(0) {
+                        if c == '\n' {
+                            break;
+                        }
+                        self.bump();
+                        if c == '\'' {
+                            break;
+                        }
+                    }
                     return self.tok(start, Tok::CharLit('\0'));
                 }
                 let _ = esc_start;
                 e.unwrap()
             }
-            Some(c) => {
+            Some(c) if c != '\n' => {
                 self.bump();
                 c
             }
-            None => {
+            _ => {
                 self.diag(PARSE_ERR_CODE, start, "unterminated char literal");
                 return self.tok(start, Tok::CharLit('\0'));
             }
@@ -595,6 +643,15 @@ impl<'a> Lexer<'a> {
             self.bump();
         } else {
             self.diag(PARSE_ERR_CODE, start, "unterminated char literal");
+            while let Some(c) = self.at(0) {
+                if c == '\n' {
+                    break;
+                }
+                self.bump();
+                if c == '\'' {
+                    break;
+                }
+            }
         }
         self.tok(start, Tok::CharLit(ch))
     }
@@ -760,7 +817,6 @@ impl<'a> Lexer<'a> {
             '\\' => '\\',
             '"' => '"',
             '\'' => '\'',
-            '0' => '\0',
             'a' => '\u{7}',
             'b' => '\u{8}',
             'f' => '\u{c}',
@@ -813,14 +869,25 @@ impl<'a> Lexer<'a> {
                         return None;
                     }
                     let mut v: u32 = 0;
+                    let mut digits: usize = 0;
                     loop {
                         match self.at(0) {
                             Some(h) if h.is_ascii_hexdigit() => {
-                                v = v * 16 + h.to_digit(16).unwrap_or(0);
+                                let d = h.to_digit(16).unwrap_or(0);
+                                v = v.saturating_mul(16).saturating_add(d);
+                                digits += 1;
                                 self.bump();
                             }
                             Some('}') => {
                                 self.bump();
+                                if digits == 0 {
+                                    self.escape_diag(
+                                        start,
+                                        str_mode,
+                                        "malformed \\u{…} escape: expected hex digits then `}`",
+                                    );
+                                    return None;
+                                }
                                 break;
                             }
                             _ => {
@@ -854,19 +921,26 @@ impl<'a> Lexer<'a> {
                 }
                 self.scalar_or_diag(v, start, str_mode, "\\U")?
             }
-            '1'..='7' => {
-                // octal \NNN — at most three digits, so v <= 0o777 and
-                // from_u32 cannot fail here.
+            '0'..='7' => {
+                // octal \NNN — at most three digits (c plus up to two more),
+                // representing a byte value 0..=0o377 (0..=255).
                 let mut v: u32 = c.to_digit(8)?;
-                loop {
-                    let d = self.at(0).and_then(|c| c.to_digit(8));
-                    match d {
-                        Some(d) => {
-                            v = v * 8 + d;
-                            self.bump();
-                        }
-                        None => break,
-                    }
+                for _ in 0..2 {
+                    let Some(d) = self.at(0).and_then(|ch| ch.to_digit(8)) else {
+                        break;
+                    };
+                    v = v * 8 + d;
+                    self.bump();
+                }
+                if v > 0xFF {
+                    self.escape_diag(
+                        start,
+                        str_mode,
+                        format!(
+                            "invalid octal escape: \\{v:o} ({v}) exceeds maximum byte value 255 (\\377)"
+                        ),
+                    );
+                    return None;
                 }
                 char::from_u32(v)?
             }
