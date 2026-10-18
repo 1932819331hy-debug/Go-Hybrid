@@ -293,6 +293,8 @@ pub(crate) fn special_member(pkg: &str, name: &str) -> Option<MemberSpecial> {
         ("time", "hours") => Some(MemberSpecial::Duration("Hour")),
         // hex.encode → Go's EncodeToString (example 10; M5 allowlist growth).
         ("hex", "encode") => Some(MemberSpecial::Renamed("EncodeToString")),
+        // errors.wrap(err, "ctx") → fmt.Errorf("%s: %w", "ctx", err) (E2 wrap-on-demand)
+        ("errors", "wrap") => Some(MemberSpecial::ErrorsWrap),
         _ => None,
     }
 }
@@ -306,6 +308,8 @@ pub(crate) enum MemberSpecial {
     Duration(&'static str),
     /// A member Go spells differently: `hex.encode(b)` → `hex.EncodeToString(b)`.
     Renamed(&'static str),
+    /// `errors.wrap(err, msg)` → `fmt.Errorf("%s: %w", msg, err)` (E2 / Spike 5)
+    ErrorsWrap,
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +674,9 @@ impl Emitter {
             // consumer's package path in package mode). The CODE keeps the
             // root spelling — Go's package name for those imports.
             for root in &self.imports {
+                if root == "errors" && !self.body.contains("errors.") {
+                    continue;
+                }
                 let path = if let Some(p) = self.explicit_imports.get(root) {
                     p.clone()
                 } else if shapes::RUST_CRATES

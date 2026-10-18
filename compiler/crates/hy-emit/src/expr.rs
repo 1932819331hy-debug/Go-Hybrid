@@ -924,7 +924,9 @@ impl Emitter {
             return Err(EmitError::unbound_crate(pkg));
         }
 
-        self.use_package(pkg);
+        if pkg != "errors" || name != "wrap" {
+            self.use_package(pkg);
+        }
 
         // --- conversion targets (Batch E): `http.handler(fn(w, r) { … })`
         //     → `http.HandlerFunc(func(w http.ResponseWriter, r *http.
@@ -999,6 +1001,24 @@ impl Emitter {
                     }
                     let n = self.emit_call_arg(&args[0])?;
                     Ok(format!("time.Duration({}) * time.{}", n, unit))
+                }
+                MemberSpecial::ErrorsWrap => {
+                    self.use_package("fmt");
+                    if args.len() != 2 {
+                        return Err(EmitError::unsupported(
+                            "errors.wrap takes exactly two arguments (err, msg)",
+                        ));
+                    }
+                    let (err_arg, msg_arg) = if args[0].name.as_deref() == Some("msg")
+                        || args[1].name.as_deref() == Some("err")
+                    {
+                        (&args[1], &args[0])
+                    } else {
+                        (&args[0], &args[1])
+                    };
+                    let err = self.emit_call_arg(err_arg)?;
+                    let msg = self.emit_call_arg(msg_arg)?;
+                    Ok(format!("fmt.Errorf(\"%s: %w\", {}, {})", msg, err))
                 }
             };
         }

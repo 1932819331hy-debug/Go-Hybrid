@@ -2529,3 +2529,101 @@ fn parenthesized_slot_loan_lowers_to_copy_and_storeback() {
         go
     );
 }
+
+#[test]
+fn errors_wrap_lowers_to_fmt_errorf_and_preserves_errors_is() {
+    let src = r#"
+package main
+
+import "errors"
+import "fmt"
+
+fn main() {
+    not_found := errors.new("not found")
+    err := errors.wrap(not_found, "opening config")
+    fmt.println(err)
+    fmt.println(errors.is(err, not_found))
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("err := fmt.Errorf(\"%s: %w\", \"opening config\", not_found)"),
+        "expected errors.wrap to lower to fmt.Errorf with msg and err, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("\"errors\""),
+        "must import errors when errors.New or errors.Is is used, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("\"fmt\""),
+        "must import fmt for fmt.Errorf and fmt.Println, got:\n{}",
+        go
+    );
+}
+
+#[test]
+fn errors_wrap_alone_omits_unused_errors_import() {
+    let src = r#"
+package main
+
+import "errors"
+
+fn wrap_it(err error) error {
+    return errors.wrap(err, "context")
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("return fmt.Errorf(\"%s: %w\", \"context\", err)"),
+        "expected errors.wrap to lower to fmt.Errorf, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("\"fmt\""),
+        "must auto-import fmt for fmt.Errorf, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("\"errors\""),
+        "must prune unused errors import when only errors.wrap is used, got:\n{}",
+        go
+    );
+}
+
+#[test]
+fn errors_wrap_named_arguments_and_arg_count_validation() {
+    let src = r#"
+package main
+
+import "errors"
+
+fn wrap_named(err error) error {
+    return errors.wrap(msg="ctx", err=err)
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("return fmt.Errorf(\"%s: %w\", \"ctx\", err)"),
+        "expected named args to order correctly in fmt.Errorf, got:\n{}",
+        go
+    );
+
+    let err_src = r#"
+package main
+
+import "errors"
+
+fn f(err error) error {
+    return errors.wrap(err)
+}
+"#;
+    let err = emit_err(err_src);
+    assert!(
+        err.contains("errors.wrap takes exactly two arguments"),
+        "expected argument count error, got: {}",
+        err
+    );
+}
+
