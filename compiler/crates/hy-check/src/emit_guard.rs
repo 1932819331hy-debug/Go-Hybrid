@@ -320,8 +320,10 @@ impl<'a> Checker<'a> {
                 self.check_place_emit_guard(st, base);
                 self.check_expr_emit_guard(st, index);
                 if let Some(base_ty) = self.place_target_ty(st, base) {
-                    if let TypeExpr::Map { key, .. } = self.resolve_type_alias(&base_ty) {
-                        self.check_const_overflow_type("map index", &key, index, Some(st));
+                    let resolved = self.resolve_type_alias(&base_ty);
+                    if let TypeExpr::Map { key, .. } = resolved {
+                        let key_ty = self.resolve_type_alias(&key);
+                        self.check_const_overflow_init("map index", &key_ty, index, Some(st));
                     }
                 }
             }
@@ -354,8 +356,10 @@ impl<'a> Checker<'a> {
                 self.check_expr_emit_guard(st, base);
                 self.check_expr_emit_guard(st, index);
                 if let Some(base_ty) = self.ty_of_expr(st, base) {
-                    if let TypeExpr::Map { key, .. } = self.resolve_type_alias(&base_ty) {
-                        self.check_const_overflow_type("map index", &key, index, Some(st));
+                    let resolved = self.resolve_type_alias(&base_ty);
+                    if let TypeExpr::Map { key, .. } = resolved {
+                        let key_ty = self.resolve_type_alias(&key);
+                        self.check_const_overflow_init("map index", &key_ty, index, Some(st));
                     }
                 }
             }
@@ -515,7 +519,7 @@ impl<'a> Checker<'a> {
     fn check_call_const_overflow(&mut self, st: &FnState, callee: &Expr, args: &[CallArg]) {
         let unwrapped = crate::model::unwrap_parens(callee);
 
-        // 1. Built-in: append(slice, items...)
+        // 1. Built-in: append(slice, items...) and delete(map, key)
         if let Expr::Ident { name, .. } = unwrapped {
             if name == "append" {
                 if let Some(first_arg) = args.first() {
@@ -529,22 +533,27 @@ impl<'a> Checker<'a> {
                     if let Some(elem_ty) = elem_ty {
                         for a in &args[1..] {
                             if !a.spread {
-                                self.check_const_overflow_init("argument of append", &elem_ty, &a.value, None);
+                                self.check_const_overflow_init("argument of append", &elem_ty, &a.value, Some(st));
                             }
                         }
                     }
                 }
                 return;
             }
-            if name == "delete" && args.len() == 2 {
-                if let Some(map_ty) = self.ty_of_expr(st, &args[0].value) {
-                    if let TypeExpr::Map { key, .. } = self.resolve_type_alias(&map_ty) {
-                        self.check_const_overflow_type(
-                            "argument of delete",
-                            &key,
-                            &args[1].value,
-                            Some(st),
-                        );
+            if name == "delete" {
+                if let Some(first_arg) = args.first() {
+                    if let Some(key_arg) = args.get(1) {
+                        let key_ty = self
+                            .ty_of_expr(st, &first_arg.value)
+                            .map(|t| self.resolve_type_alias(&t))
+                            .and_then(|t| match t {
+                                TypeExpr::Map { key, .. } => Some(*key),
+                                _ => None,
+                            });
+                        if let Some(key_ty) = key_ty {
+                            let resolved_key = self.resolve_type_alias(&key_ty);
+                            self.check_const_overflow_init("argument to delete", &resolved_key, &key_arg.value, Some(st));
+                        }
                     }
                 }
                 return;
@@ -633,36 +642,6 @@ impl<'a> Checker<'a> {
                         None,
                     );
                 }
-            }
-        }
-    }
-
-    fn check_binary_const_overflow(&mut self, st: &FnState, op: BinOp, lhs: &Expr, rhs: &Expr) {
-        let (is_cmp, is_arith) = match op {
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => (true, false),
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
-            | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => (false, true),
-            _ => (false, false),
-        };
-        if !is_cmp && !is_arith {
-            return;
-        }
-        let context = if is_cmp {
-            "binary comparison"
-        } else {
-            "binary arithmetic"
-        };
-        let lhs_ty = self.ty_of_expr(st, lhs);
-        let rhs_ty = self.ty_of_expr(st, rhs);
-
-        if let Some(l_ty) = &lhs_ty {
-            if rhs_ty.is_none() && self.is_const_operand(rhs, st) {
-                self.check_const_overflow_type(context, l_ty, rhs, Some(st));
-            }
-        }
-        if let Some(r_ty) = &rhs_ty {
-            if lhs_ty.is_none() && self.is_const_operand(lhs, st) {
-                self.check_const_overflow_type(context, r_ty, lhs, Some(st));
             }
         }
     }
@@ -1815,6 +1794,27 @@ impl<'a> Checker<'a> {
     fn stmt_ends_before(stmt: &Stmt, pos: hy_diag::Pos) -> bool {
         let s = Self::stmt_span(stmt);
         (s.end.line, s.end.col) <= (pos.line, pos.col)
+    }
+
+    fn check_binary_const_overflow(&mut self, st: &FnState, op: BinOp, lhs: &Expr, rhs: &Expr) {
+        if matches!(op, BinOp::Shl | BinOp::Shr) {
+            return;
+        }
+
+        let desc = match op {
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => "comparison",
+            _ => "binary expression",
+        };
+
+        if let Some(lhs_ty) = self.ty_of_expr(st, lhs) {
+            let resolved = self.resolve_type_alias(&lhs_ty);
+            self.check_const_overflow_init(desc, &resolved, rhs, Some(st));
+        }
+
+        if let Some(rhs_ty) = self.ty_of_expr(st, rhs) {
+            let resolved = self.resolve_type_alias(&rhs_ty);
+            self.check_const_overflow_init(desc, &resolved, lhs, Some(st));
+        }
     }
 }
 
