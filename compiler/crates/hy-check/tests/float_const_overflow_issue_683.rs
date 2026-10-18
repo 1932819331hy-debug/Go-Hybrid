@@ -369,3 +369,78 @@ fn go_accepted_controls_pass_cleanly() {
         assert_eq!(r.verdict, Verdict::Accept);
     }
 }
+
+// ---------------------------------------------------------------------------
+// f32/f64 alias spellings (carried from rickymulya's parallel take #689):
+// the emitter maps both to float32/float64, so past-range constants under
+// the alias spellings are the same go-build failures.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn f32_alias_spelling_overflow_rejected() {
+    let src = "
+fn main() {
+    var f f32 = 1e40
+    fmt.println(f)
+}
+";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "var f f32 = 1e40 must reject HYB-E6002, got {:?}",
+        error_codes(&r)
+    );
+}
+
+#[test]
+fn f64_alias_spelling_overflow_rejected() {
+    let src = "
+fn main() {
+    var x f64 = 1e400
+    fmt.println(x)
+}
+";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "var x f64 = 1e400 must reject HYB-E6002, got {:?}",
+        error_codes(&r)
+    );
+}
+
+#[test]
+fn f64_alias_spelling_assign_overflow_rejected() {
+    let src = "
+fn main() {
+    var y f64 = 1.0
+    y = 1e400
+    fmt.println(y)
+}
+";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "y = 1e400 under f64 must reject HYB-E6002, got {:?}",
+        error_codes(&r)
+    );
+}
+
+#[test]
+fn f32_alias_in_range_control_accepts() {
+    let src = "
+fn main() {
+    var f f32 = 3.4028235e38
+    fmt.println(f)
+}
+";
+    let r = check(src);
+    assert!(
+        error_codes(&r).is_empty(),
+        "in-range f32-alias control must accept, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}

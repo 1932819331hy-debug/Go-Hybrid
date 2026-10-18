@@ -37,9 +37,9 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
-        if ty_name == "float32" || ty_name == "float64" {
+        if let Some(is_f32) = is_float_type(ty_name) {
             if let Some(f) = self.const_float_fold(value, st) {
-                let overflows = if ty_name == "float32" {
+                let overflows = if is_f32 {
                     (f as f32).is_infinite()
                 } else {
                     f.is_infinite()
@@ -184,9 +184,9 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
-        if ty_name == "float32" || ty_name == "float64" {
+        if let Some(is_f32) = is_float_type(ty_name) {
             if let Some(f) = self.const_float_fold(value, None) {
-                let overflows = if ty_name == "float32" {
+                let overflows = if is_f32 {
                     (f as f32).is_infinite()
                 } else {
                     f.is_infinite()
@@ -1035,6 +1035,19 @@ fn is_64bit_int_target(name: &str) -> bool {
 
 fn is_f32_target(name: &str) -> bool {
     matches!(name, "f32" | "float32")
+}
+
+/// The built-in float TYPES as spelled in an ascription: `Some(true)` =
+/// float32, `Some(false)` = float64. `f32`/`f64` are accepted alias
+/// spellings (the emitter maps both to float32/float64 — issue #683's
+/// float legs must reject past-range constants under either spelling).
+/// Carried from rickymulya's parallel take #689 (credit).
+fn is_float_type(ty_name: &str) -> Option<bool> {
+    match ty_name {
+        "float32" | "f32" => Some(true),
+        "float64" | "f64" => Some(false),
+        _ => None,
+    }
 }
 
 fn span_hint(span: Span) -> String {
