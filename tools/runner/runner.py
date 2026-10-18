@@ -160,7 +160,9 @@ def main():
     sha_ok = True
     unverifiable_pin = False
     want = job.get("sha")
-    if os.path.isdir(os.path.join(repo_dir, ".git")):
+    # Linked worktrees and submodules use a .git file, not a directory.
+    # Even a broken metadata link must enter the fail-closed SHA check.
+    if os.path.lexists(os.path.join(repo_dir, ".git")):
         code, _, out = run_cmd(["git", "rev-parse", "HEAD"], 10, cwd=repo_dir)
         at = out.strip()
         if code != 0:
