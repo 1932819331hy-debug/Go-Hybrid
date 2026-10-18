@@ -76,22 +76,15 @@ jobs:
           set -euo pipefail
           go test -race -count=1 ./...
           go vet ./...
-      - name: Emit gofmt-clean source for independent formatting audit
+      - name: Enforce gofmt for W-012 experiment and cache tests
         working-directory: spikes/w012-analyzer
         run: |
-          gofmt -w cmd/editbench/main.go cmd/editbench/main_test.go cmd/editbench/reused.go compilation_cache_test.go
-          echo W012_FMT_MAIN_BEGIN
-          cat cmd/editbench/main.go
-          echo W012_FMT_MAIN_END
-          echo W012_FMT_MAIN_TEST_BEGIN
-          cat cmd/editbench/main_test.go
-          echo W012_FMT_MAIN_TEST_END
-          echo W012_FMT_REUSED_BEGIN
-          cat cmd/editbench/reused.go
-          echo W012_FMT_REUSED_END
-          echo W012_FMT_CACHE_TEST_BEGIN
-          cat compilation_cache_test.go
-          echo W012_FMT_CACHE_TEST_END
+          set -euo pipefail
+          unformatted="$(gofmt -l cmd/editbench/main.go cmd/editbench/main_test.go cmd/editbench/reused.go compilation_cache_test.go)"
+          if [ -n "$unformatted" ]; then
+            printf 'Unformatted Go files:\n%s\n' "$unformatted"
+            exit 1
+          fi
       - name: Reproduce 25-file 100-edit request-path comparison
         working-directory: spikes/w012-analyzer
         run: |
