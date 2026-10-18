@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 77 programs** — ACCEPT 21 · ACCEPT-MANAGED 2 ·
-REJECT 54 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 83 programs** — ACCEPT 22 · ACCEPT-MANAGED 2 ·
+REJECT 59 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -20,7 +20,7 @@ the new fixtures.
 
 The prose below is the original pre-registration statement, kept as written
 on its date: the corpora sizes it names (18, 20) are what the corpus held
-then, not today's 77. The dated tripwire baseline is preserved as historical
+then, not today's 83. The dated tripwire baseline is preserved as historical
 for the same reason.
 
 18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
@@ -60,5 +60,23 @@ landed on main via the #475/#430 buildable work; the fixture pins the
 surface with author credit (tests extracted to
 `hy-check/tests/import_shadowing_guards.rs`).
 
-With this registration the corpus is **78 programs: ACCEPT 21 ·
-ACCEPT-MANAGED 2 · REJECT 55**.
+With this registration the corpus is **83 programs: ACCEPT 22 ·
+ACCEPT-MANAGED 2 · REJECT 59**.
+
+`undefined-member-call-reject.hy`, `defer-arity-reject.hy`,
+`append-element-type-reject.hy`, `member-defer-and-append-controls-accept.hy`
+— the #682 U2–U5 buildable wave (issue #682 group C). Four `hyb check`-accepted
+programs whose emitted Go failed `go build`: a call to a member that does not
+exist (on a scalar and on a struct), a deferred call with the wrong arity, and
+`append` with an element of the wrong type. Each was reproduced as a real
+`go build` failure before the check was written, and each rejection is paired
+against a legal neighbour inside the single ACCEPT control — the ordinary
+method/field cases, `stack.pop()` (a `hy-emit` intrinsic lowered to
+`hy_pop(&stack)`, not a Go method), `*atomic.int64` members (a foreign generic
+whose members the kind model cannot see, so the rule must fail open), `defer`
+on a builtin and on a method, and `append` with a variadic spread, multiple
+values, and an untyped int constant into a `[]float64`. Two of those controls
+caught real over-rejections during development: the intrinsic `pop` broke the
+spike-6 positive suite, and an early draft of the member rule rejected the
+corpus's own `17-atomic-channel-immutable.hy`. Regression pins live in
+`hy-check/tests/member_defer_and_append_guards.rs`.

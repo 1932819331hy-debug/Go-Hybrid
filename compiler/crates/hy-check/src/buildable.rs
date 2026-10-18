@@ -101,6 +101,92 @@ impl OpKind {
     }
 }
 
+/// Does a value of kind `got` fail to satisfy a declared type of kind `want`,
+/// in a way Go rejects at build time (#682 U5)?
+///
+/// Deliberately conservative, because this is an accept-side check: every
+/// "unknown" stays permissive, and the one legal implicit numeric conversion is
+/// allowed. `false` means "not provably a build failure", not "provably fine".
+///
+/// NOTE: open PRs #620 and #693 introduce a textually identical helper. All
+/// three are the same predicate and should collapse into one copy when they
+/// land — the duplication is a consequence of the three branches being open at
+/// once, not a design choice.
+fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
+    use OpKind::*;
+    match (want, got) {
+        // Fail-open: an unresolved side carries no claim.
+        (Unknown, _) | (_, Unknown) => false,
+        // No value is involved; a count check owns that case.
+        (Void, _) | (_, Void) => false,
+        // An untyped int constant is assignable to a float target
+        // (`var f float64 = 1` builds). The kind model cannot tell an untyped
+        // constant from an `int` variable, so this direction must stay allowed
+        // or the check would reject buildable programs.
+        (Float, Int) => false,
+        // A struct whose name did not resolve is not evidence of a mismatch.
+        (Struct(None), _) | (_, Struct(None)) => false,
+        (a, b) if a == b => false,
+        // Same container shape: recurse into the element kinds.
+        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
+            kinds_conflict(a, b)
+        }
+        (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
+        (Pointer(a), Pointer(b)) => kinds_conflict(a, b),
+        // Fn kinds only carry results here, so a result match is not proof of a
+        // signature match; stay permissive.
+        (Fn(_), Fn(_)) => false,
+        // Everything else is a shape or scalar-family mismatch Go refuses.
+        _ => true,
+    }
+}
+
+/// Is every part of this kind resolved?
+///
+/// A "has no field or method" claim is only sound when the checker actually
+/// knows the type. `*atomic.int64` resolves to `Pointer(Unknown)` because
+/// `sync/atomic`'s generic type is foreign to the kind model, and `hits.add(1)`
+/// on it is perfectly good Go — so the field/method check must stay silent
+/// whenever an `Unknown` appears anywhere in the shape.
+fn is_fully_resolved(k: &OpKind) -> bool {
+    // Patterns are written fully qualified on purpose. With `use OpKind::*`, an
+    // arm naming a variant that does NOT exist silently becomes an irrefutable
+    // binding pattern and matches EVERY kind — which is exactly what happened
+    // here: `Interface` belongs to open PR #693, and on this branch the arm
+    // `Interface => false` swallowed every input, so `Int` and `Struct(Some(_))`
+    // both reported "unresolved" and the check never fired. Fully-qualified
+    // paths turn a missing variant into a compile error instead.
+    match k {
+        OpKind::Unknown => false,
+        OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
+        OpKind::Void => false,
+        // A struct whose NAME did not resolve cannot have its members looked up.
+        OpKind::Struct(None) => false,
+        OpKind::Struct(Some(_)) => true,
+        OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e) | OpKind::Pointer(e) => {
+            is_fully_resolved(e)
+        }
+        OpKind::Map(k, v) => is_fully_resolved(k) && is_fully_resolved(v),
+        // A fn kind only carries results here, so it is not evidence about
+        // members either way.
+        OpKind::Fn(_) => false,
+    }
+}
+
+/// Method names that `hy-emit` LOWERS as Hybrid intrinsics instead of emitting
+/// a Go method call, so the type they appear on does not need to declare them.
+///
+/// `stack.pop()` on a `[]int` is example 08's stack shape: `expr.rs` emits
+/// `hy_pop(&stack)`, a prelude helper. Go has no method on a slice, so a
+/// "no field or method" check that ignored this list would reject buildable
+/// programs.
+///
+/// KEEP IN SYNC with the Field-name special cases in
+/// `hy-emit/src/expr.rs`. `pop` is currently the only one; the others there are
+/// package-qualified calls (`fmt.print`, `httptest.get`), which are `Ident`
+/// callees and never reach this check.
+const LOWERED_METHOD_INTRINSICS: &[&str] = &["pop"];
+
 /// One function-local binding that Go requires to be read: `:=`/`let`
 /// (checked since #185), `var`/`const` (PR #475), and the elidable
 /// `for`/`select` bindings (PR #536 — only diagnosed when written).
@@ -597,7 +683,12 @@ impl<'a> Collector<'a> {
                     self.pop_scope();
                 }
             }
-            Stmt::Defer { call, .. } => self.expr(call),
+            Stmt::Defer { call, span } => {
+                self.expr(call);
+                // #682 U4: the deferred call's arity is checked like any other
+                // call's. `builtins.rs` owns the "must be a call" half.
+                self.check_defer_arity(call, *span);
+            }
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::Block { block, .. } => self.block_scoped(block),
             Stmt::Select { arms, .. } => {
@@ -1198,6 +1289,85 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// #682 U5 — `append`'s appended values must be assignable to the slice's
+    /// element type. Go refuses `append([]int{1}, "str")` with
+    /// `cannot use "str" (untyped string constant) as int value in argument to
+    /// append`.
+    ///
+    /// Fail-open: an `Unknown` first argument or an `Unknown` element kind
+    /// carries no claim, so only a proven mismatch is reported.
+    fn check_append_elements(&mut self, args: &[CallArg]) {
+        let Some(first) = args.first() else { return };
+        let elem = match self.kind_of_expr(&first.value) {
+            OpKind::Slice(e) => *e,
+            _ => return,
+        };
+        for extra in &args[1..] {
+            // `append(a, b...)` — a variadic spread passes the whole slice, so
+            // the argument's kind is the SLICE type, not an element. Go accepts
+            // it (for a matching element type), so it must not be compared
+            // against the element kind.
+            if extra.spread {
+                continue;
+            }
+            let got = self.kind_of_expr(&extra.value);
+            if kinds_conflict(&elem, &got) {
+                self.emit_e1002(
+                    extra.value.span(),
+                    format!(
+                        "cannot append a value of type `{}` to a `{}` — Go refuses `cannot use ... as {} value in argument to append` (HYB-E1002)",
+                        got.label(),
+                        self.kind_of_expr(&first.value).label(),
+                        elem.label()
+                    ),
+                    "the appended values must be assignable to the slice's element type",
+                );
+            }
+        }
+    }
+
+    /// #682 U4 — `defer` requires a call, and that call's arguments must
+    /// satisfy the callee's arity. Go refuses `defer g()` for a 1-param `g`
+    /// with `not enough arguments in call to g`.
+    ///
+    /// `builtins.rs::check_stmt_defer_call` owns the "must be a call" half
+    /// (HYB-E2001); this owns the arity half, and only for a bare identifier
+    /// that resolves to a declared `fn`, so an unresolved or shadowed name
+    /// stays fail-open.
+    fn check_defer_arity(&mut self, call: &Expr, span: Span) {
+        let mut e = unwrap_parens(call);
+        if let Expr::Try { operand, .. } = e {
+            e = unwrap_parens(operand);
+        }
+        let Expr::Call { callee, args, .. } = e else {
+            return;
+        };
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        let head = Checker::base_named_type_str(name);
+        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+            return;
+        };
+        if !f.type_params.is_empty() || f.params.len() == args.len() {
+            return;
+        }
+        let want = f.params.len();
+        let got = args.len();
+        self.emit_e1002(
+            span,
+            format!(
+                "`defer {}()` passes {got} argument{} but `{}` takes {want} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
+                name,
+                if got == 1 { "" } else { "s" },
+                name,
+                if got < want { "not enough" } else { "too many" },
+                name
+            ),
+            "the deferred call is checked like any other call: one argument per declared parameter",
+        );
+    }
+
     /// Family A (#425): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
         let k = self.kind_of_expr(cond);
@@ -1596,14 +1766,17 @@ impl<'a> Collector<'a> {
                     }
                 } else {
                     self.check_builtin_operand_kinds(name, args, span);
+                    if name == "append" {
+                        self.check_append_elements(args);
+                    }
                 }
             }
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
+                let has_method = self
+                    .struct_name(&bk)
+                    .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn, name.clone())));
                 if let Some(fk) = self.struct_field_kind(&bk, name) {
-                    let has_method = self
-                        .struct_name(&bk)
-                        .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn, name.clone())));
                     if !has_method && !matches!(fk, OpKind::Unknown | OpKind::Fn(_)) {
                         self.emit_e1002(
                             span,
@@ -1614,6 +1787,34 @@ impl<'a> Collector<'a> {
                                 fk.label()
                             ),
                             "only function-typed struct fields or declared methods can be called",
+                        );
+                    }
+                } else if !has_method {
+                    // #682 U2/U3: neither a declared method nor a field exists
+                    // on the base. Go refuses the call with `<base>.<name>
+                    // undefined (type <T> has no field or method <name>)`.
+                    //
+                    // Fail-open on anything unresolved: an `Unknown` base means
+                    // the checker could not classify it, a `Struct(None)` has no
+                    // name to look the method up under, and a partially
+                    // unresolved shape (notably `Pointer(Unknown)` for a foreign
+                    // generic like `*atomic.int64`) means the members are
+                    // invisible to the kind model rather than absent. A foreign
+                    // generic is the common case; `LOWERED_METHOD_INTRINSICS`
+                    // covers the other one, a name `hy-emit` lowers to a
+                    // prelude call rather than a Go method.
+                    if is_fully_resolved(&bk) && !LOWERED_METHOD_INTRINSICS.contains(&name.as_str()) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                                base.render(),
+                                name,
+                                bk.label(),
+                                base.render(),
+                                name
+                            ),
+                            "declare the method on that type, or call something that exists",
                         );
                     }
                 }

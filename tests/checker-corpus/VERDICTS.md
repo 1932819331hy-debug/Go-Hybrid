@@ -800,3 +800,43 @@ reproduction line above is the merged tree.
 - Verdict: REJECT FC, exact diagnostic HYB-E3005. Pins GUARANTEES.md row 11 at a task-spawn check site; scalar-atomic acceptance remains covered by corpus 17.
 - This registers existing fail-closed behavior; no checker rule or existing verdict changes.
 - Verified on the refreshed tree: 79/79 verdict agreement, tripwire not fired; ACCEPT 21 · ACCEPT-MANAGED 2 · REJECT 56.
+
+## Additive corpus registration — #682 group C: U2–U5 buildable shapes
+
+- Programs: `undefined-member-call-reject.hy`, `defer-arity-reject.hy`,
+  `append-element-type-reject.hy`, `member-defer-and-append-controls-accept.hy`.
+- Source: issue #682, "accepted-but-unbuildable type/shape bypasses in the
+  buildable operand pass". Four programs `hyb check` accepted with zero
+  diagnostics whose emitted Go failed `go build`. Each was reproduced as a
+  real compiler error before any check was written.
+- Verdicts:
+  - `undefined-member-call-reject` — REJECT BUILDABLE (HYB-E1002).
+    `x.nope()` on an `int` is `x.nope undefined (type int has no field or
+    method nope)`. The field branch of the call-operand pass previously
+    reported only a member that EXISTS but is not callable, and stayed silent
+    when nothing was found at all.
+  - `defer-arity-reject` — REJECT BUILDABLE (HYB-E1002). `defer g()` for a
+    one-parameter `g` is `not enough arguments in call to g`. HYB-E2001 keeps
+    the "defer requires a call" half; this rule owns arity, and fires only for
+    a bare identifier resolving to a declared `fn`.
+  - `append-element-type-reject` — REJECT BUILDABLE (HYB-E1002).
+    `append([]int{1}, "str")` is `cannot use "str" ... as int value in
+    argument to append`.
+- Scope notes (why the ACCEPT control is the load-bearing half):
+  - The member rule fails open whenever the base type is not fully resolved.
+    `*atomic.int64` resolves to `Pointer(Unknown)` because `sync/atomic`'s
+    generic is foreign to the kind model — its members are INVISIBLE, not
+    absent. An early draft of this rule rejected this corpus's own
+    `17-atomic-channel-immutable.hy`; that fixture pins the correct behavior.
+  - `stack.pop()` on a `[]int` is a `hy-emit` intrinsic lowered to
+    `hy_pop(&stack)`, not a Go method call, so a naive "no such member" rule
+    rejects example 08's stack shape. The allowlist is
+    `buildable.rs::LOWERED_METHOD_INTRINSICS` and must be kept in sync with the
+    Field-name special cases in `hy-emit/src/expr.rs`.
+  - `append` skips a variadic spread (`append(a, b...)` passes the whole slice,
+    not an element), allows an untyped int constant into a `[]float64`, and
+    stays fail-open on an unknown element kind.
+- Regression pins: `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).
+- Verified on this tree: 83/83 verdict agreement, tripwire not fired; ACCEPT 22
+  · ACCEPT-MANAGED 2 · REJECT 59; differential reject-side 56/56, accept-side
+  21/23 (the 2 are the known cgo-bridge programs).
