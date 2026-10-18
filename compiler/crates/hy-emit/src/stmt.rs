@@ -1753,6 +1753,14 @@ impl Emitter {
                     self.shadow_local_name(var);
                     var.clone()
                 };
+                // Both range forms evaluate their bounds exactly once, in the
+                // enclosing scope and before the loop variable is declared
+                // (#730). Hoist in source order so mutation/shadowing and
+                // side-effecting upper bounds cannot change the trip count.
+                let lo_once = self.next_temp("hyLo");
+                let hi_once = self.next_temp("hyHi");
+                self.push(&format!("{} := {}", lo_once, lo_t));
+                self.push(&format!("{} := {}", hi_once, hi_t));
                 if *inclusive {
                     // Issue #322: `for v := lo; v <= hi; v++` wraps past the
                     // type maximum (int8 127..=127 never stops). Emit a
@@ -1763,18 +1771,14 @@ impl Emitter {
                     //       cont = v != hyHi
                     //       body
                     //   }
-                    let lo_once = self.next_temp("hyLo");
-                    let hi_once = self.next_temp("hyHi");
                     let cont = self.next_temp("hyCont");
-                    self.push(&format!("{} := {}", lo_once, lo_t));
-                    self.push(&format!("{} := {}", hi_once, hi_t));
                     inclusive_stop = Some((cont.clone(), v.clone(), hi_once.clone()));
                     format!(
                         "for {}, {} := {}, {} <= {}; {}; {}++ {{",
                         v, cont, lo_once, lo_once, hi_once, cont, v
                     )
                 } else {
-                    format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_t, v)
+                    format!("for {} := {}; {} < {}; {}++ {{", v, lo_once, v, hi_once, v)
                 }
             }
             ForKind::Iterate { vars, expr } => {
