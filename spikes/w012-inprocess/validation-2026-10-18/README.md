@@ -1,4 +1,13 @@
-# W012 current-head validation — 2026-10-18
+# W012 validation snapshots — 2026-10-18
+
+> **Newer hosted evidence supersedes the fixture count below:** [GitHub Actions run
+> 39143438366](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39143438366)
+> checked PR head `fef92eecf31ee1c3fe383a2953e17ea1840b9ff0` merged against its
+> current base: **79/79 native/WASM corpus parity**, plus Go race tests and Go vet.
+> [Compiler CI](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39143438385)
+> also passed. This older 60-fixture benchmark snapshot remains here unchanged for
+> reproducibility; it does not measure the subsequent 30-second timeout boundary,
+> `CheckContext`, or the later corpus additions.
 
 ## Scope and provenance
 
@@ -76,7 +85,7 @@ The benchmark also accepts `-root`, `-wasm`, `-native`, and `-fixture` for expli
 
 `.github/workflows/w012-validation.yml` adds a separate, path-filtered job for pull requests and main pushes affecting the compiler, W012 analyzer, corpus, parity script, environment pins, or the workflow itself. It builds native and wasm artifacts, runs full-envelope Node parity, Go race/regression tests, and Go vet. The existing generic CI workflow is unchanged. Actions are commit-pinned; permissions are only `contents: read`; checkout does not persist credentials. There are no secrets, schedules, or performance benchmarks.
 
-Workflow YAML structure, trigger/permission constraints, action references, and shell syntax were checked locally. Its build/test commands were executed locally as documented above. Hosted execution remains pending publication; local checks are not a claim that GitHub Actions has run.
+Workflow YAML structure, trigger/permission constraints, action references, and shell syntax were checked locally. Its build/test commands were executed locally as documented above. At the time of the original benchmark this workflow had not yet run in GitHub Actions. It has since passed in the hosted run linked above. The hosted run is correctness/race validation, not a repeat of the latency benchmark.
 
 ## Implication for M1 review
 
