@@ -971,21 +971,12 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::SliceLit { elem, items, .. } => {
-                if let Some(ety) = elem {
-                    let eshape = self.shape_of_type(ety);
-                    let ety_text = ety.render();
-                    for it in items {
-                        if Checker::is_nil_literal(it) && !Checker::is_nilable_shape(&eshape) {
-                            self.emit_nil_type_error_text(
-                                &eshape,
-                                ety_text.clone(),
-                                it.span(),
-                                &format!("the element slot `{}`", ety_text),
-                            );
-                            continue;
-                        }
-                        self.check_composite_nils(st, it);
-                    }
+                let elem_ty = value
+                    .as_array_lit()
+                    .map(|(_, inner_elem, _)| inner_elem)
+                    .or(elem.as_deref());
+                if let Some(ety) = elem_ty {
+                    self.check_composite_nils_items(st, ety, items);
                 } else {
                     for it in items {
                         self.check_composite_nils(st, it);
@@ -993,6 +984,37 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn check_composite_nils_items(&mut self, st: &FnState, ety: &TypeExpr, items: &[Expr]) {
+        let eshape = self.shape_of_type(ety);
+        let ety_text = ety.render();
+        for it in items {
+            if Checker::is_nil_literal(it) && !Checker::is_nilable_shape(&eshape) {
+                self.emit_nil_type_error_text(
+                    &eshape,
+                    ety_text.clone(),
+                    it.span(),
+                    &format!("the element slot `{}`", ety_text),
+                );
+                continue;
+            }
+            if let Expr::SliceLit {
+                elem: None,
+                items: sub_items,
+                ..
+            } = unwrap_parens(it)
+            {
+                let resolved = self.resolve_type_alias(ety);
+                if let TypeExpr::Slice { elem: sub_ety, .. }
+                | TypeExpr::Array { elem: sub_ety, .. } = &resolved
+                {
+                    self.check_composite_nils_items(st, sub_ety, sub_items);
+                    continue;
+                }
+            }
+            self.check_composite_nils(st, it);
         }
     }
 
@@ -1755,13 +1777,28 @@ impl<'a> Checker<'a> {
             }
             Expr::StructLit { ty, .. } => ty.clone(),
             Expr::SliceLit {
-                elem: Some(e),
+                elem: Some(el),
+                items,
                 span,
-                ..
-            } => Some(TypeExpr::Slice {
-                elem: e.clone(),
-                span: *span,
-            }),
+            } => {
+                if let Some((len_opt, inner_elem, arr_ty)) = expr.as_array_lit() {
+                    if len_opt.is_some() {
+                        return Some(arr_ty.clone());
+                    }
+                    return Some(TypeExpr::Array {
+                        len: Some(Box::new(Expr::Lit {
+                            kind: hy_syntax::LitKind::Int(items.len().to_string()),
+                            span: *span,
+                        })),
+                        elem: Box::new(inner_elem.clone()),
+                        span: *span,
+                    });
+                }
+                Some(TypeExpr::Slice {
+                    elem: el.clone(),
+                    span: *span,
+                })
+            }
             Expr::MapLit {
                 key, value, span, ..
             } => Some(TypeExpr::Map {

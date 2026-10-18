@@ -278,13 +278,18 @@ impl<'a> Checker<'a> {
                 Box::new(self.shape_of_type(key)),
                 Box::new(self.shape_of_type(value)),
             ),
-            Expr::SliceLit { elem, items, .. } => TypeShape::Slice(Box::new(match elem {
-                Some(t) => self.shape_of_type(t),
-                None => items
-                    .first()
-                    .map(|i| self.shape_of_expr(st, i))
-                    .unwrap_or(TypeShape::Unknown),
-            })),
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some((_, inner_elem, _)) = expr.as_array_lit() {
+                    return TypeShape::Array(Box::new(self.shape_of_type(inner_elem)));
+                }
+                TypeShape::Slice(Box::new(match elem {
+                    Some(t) => self.shape_of_type(t),
+                    None => items
+                        .first()
+                        .map(|i| self.shape_of_expr(st, i))
+                        .unwrap_or(TypeShape::Unknown),
+                }))
+            }
             // closures are unsendable values in Tier 0 (the A5 perimeter);
             // classify_value rejects FnLit literals before shape lookup —
             // this arm covers fn-typed bindings and fn-typed fields
@@ -458,7 +463,7 @@ impl<'a> Checker<'a> {
             // element type decides whether a later `copy(dst, src)` shares
             // references (#178). A primitive element (`[]int`) shares
             // nothing; a reference element (`[]map[...]`) does.
-            Expr::SliceLit { elem: Some(t), .. } => {
+            Expr::SliceLit { elem: Some(t), .. } if first.value.as_array_lit().is_none() => {
                 TypeShape::Slice(Box::new(self.shape_of_type(t)))
             }
             // `make(map[K]V{})` — shape key AND value: an erasure to
@@ -618,12 +623,27 @@ impl<'a> Checker<'a> {
             }),
             Expr::SliceLit {
                 elem: Some(e),
+                items,
                 span,
-                ..
-            } => Some(TypeExpr::Slice {
-                elem: e.clone(),
-                span: *span,
-            }),
+            } => {
+                if let Some((len_opt, inner_elem, arr_ty)) = expr.as_array_lit() {
+                    if len_opt.is_some() {
+                        return Some(arr_ty.clone());
+                    }
+                    return Some(TypeExpr::Array {
+                        len: Some(Box::new(Expr::Lit {
+                            kind: hy_syntax::LitKind::Int(items.len().to_string()),
+                            span: *span,
+                        })),
+                        elem: Box::new(inner_elem.clone()),
+                        span: *span,
+                    });
+                }
+                Some(TypeExpr::Slice {
+                    elem: e.clone(),
+                    span: *span,
+                })
+            }
             Expr::FnLit {
                 params,
                 results,

@@ -762,6 +762,9 @@ impl<'a> Collector<'a> {
                 for i in items {
                     self.expr(i);
                 }
+                if let Some((_, inner_elem, _)) = e.as_array_lit() {
+                    self.check_array_lit_items(inner_elem, items);
+                }
             }
             Expr::MapLit {
                 key,
@@ -1072,6 +1075,9 @@ impl<'a> Collector<'a> {
                 .map(|t| self.kind_of_ty(t, 0))
                 .unwrap_or(OpKind::Struct(None)),
             Expr::SliceLit { elem, items, .. } => {
+                if let Some((_, inner_elem, _)) = e.as_array_lit() {
+                    return OpKind::Array(Box::new(self.kind_of_ty(inner_elem, 0)));
+                }
                 let ek = elem
                     .as_ref()
                     .map(|t| self.kind_of_ty(t, 0))
@@ -1098,7 +1104,8 @@ impl<'a> Collector<'a> {
     }
 
     fn call_result_kinds(&self, callee: &Expr, args: &[CallArg]) -> Option<Vec<OpKind>> {
-        match unwrap_parens(callee) {
+        let bare = unwrap_parens(callee);
+        match bare {
             Expr::FnLit { results, .. } => Some(
                 results
                     .iter()
@@ -1109,7 +1116,9 @@ impl<'a> Collector<'a> {
                 elem: Some(t),
                 items,
                 ..
-            } if items.is_empty() => Some(vec![OpKind::Slice(Box::new(self.kind_of_ty(t, 0)))]),
+            } if items.is_empty() && bare.as_array_lit().is_none() => {
+                Some(vec![OpKind::Slice(Box::new(self.kind_of_ty(t, 0)))])
+            }
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
                     if let OpKind::Fn(res) = k {
@@ -1172,9 +1181,12 @@ impl<'a> Collector<'a> {
         let Some(first) = args.first() else {
             return OpKind::Unknown;
         };
-        match unwrap_parens(&first.value) {
+        let bare = unwrap_parens(&first.value);
+        match bare {
             Expr::StructLit { ty: Some(t), .. } => self.kind_of_ty(t, 0),
-            Expr::SliceLit { elem: Some(t), .. } => OpKind::Slice(Box::new(self.kind_of_ty(t, 0))),
+            Expr::SliceLit { elem: Some(t), .. } if bare.as_array_lit().is_none() => {
+                OpKind::Slice(Box::new(self.kind_of_ty(t, 0)))
+            }
             Expr::MapLit { key, value, .. } => OpKind::Map(
                 Box::new(self.kind_of_ty(key, 0)),
                 Box::new(self.kind_of_ty(value, 0)),
@@ -1569,6 +1581,67 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_array_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
+        let resolved_ty = self.ck.resolve_type_alias(elem_ty);
+        let expected = self.kind_of_ty(&resolved_ty, 0);
+        if expected == OpKind::Unknown {
+            return;
+        }
+        for item in items {
+            let bare = unwrap_parens(item);
+            if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                continue;
+            }
+            if let Expr::SliceLit {
+                elem: None,
+                items: sub_items,
+                ..
+            } = bare
+            {
+                if let TypeExpr::Array { elem: sub_ty, .. }
+                | TypeExpr::Slice { elem: sub_ty, .. } = &resolved_ty
+                {
+                    self.check_array_lit_items(sub_ty, sub_items);
+                    continue;
+                }
+            }
+            if let Expr::StructLit {
+                ty: None, fields, ..
+            } = bare
+            {
+                if matches!(expected, OpKind::Struct(_))
+                    || (fields.is_empty()
+                        && matches!(
+                            expected,
+                            OpKind::Array(_) | OpKind::Slice(_) | OpKind::Map(_, _)
+                        ))
+                {
+                    continue;
+                }
+            }
+            let ik = self.kind_of_expr(item);
+            if ik == OpKind::Unknown || ik == expected {
+                continue;
+            }
+            if expected == OpKind::Float
+                && ik == OpKind::Int
+                && crate::const_overflow::const_int_value(item).is_some()
+            {
+                continue;
+            }
+            self.emit_e1002(
+                item.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` value in array literal (HYB-E1002)",
+                    item.render(),
+                    ik.label(),
+                    elem_ty.render()
+                ),
+                "every element of an array composite literal `[N]T{...}` / `[...]T{...}` must be assignable to the element type `T`",
+            );
+        }
+    }
+
     /// Family D1 & Family E (#425): non-function call check + binding-shaped builtin arg checks.
     fn check_call_operands(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
         let bare = unwrap_parens(callee);
@@ -1579,7 +1652,7 @@ impl<'a> Collector<'a> {
                 elem: Some(_),
                 items,
                 ..
-            } if items.is_empty() => {}
+            } if items.is_empty() && bare.as_array_lit().is_none() => {}
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
                     if !matches!(k, OpKind::Unknown | OpKind::Fn(_)) {

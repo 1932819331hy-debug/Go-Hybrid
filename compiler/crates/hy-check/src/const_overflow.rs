@@ -513,7 +513,7 @@ impl<'a> Checker<'a> {
             ..
         } = callee
         {
-            if items.is_empty() {
+            if items.is_empty() && callee.as_array_lit().is_none() {
                 self.check_slice_conversion(t, arg, span);
                 return;
             }

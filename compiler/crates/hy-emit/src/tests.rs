@@ -2529,3 +2529,93 @@ fn parenthesized_slot_loan_lowers_to_copy_and_storeback() {
         go
     );
 }
+
+#[test]
+fn array_composite_literals_emit_fixed_and_ellipsis_go_arrays() {
+    let src = r#"
+const n = 2
+
+struct pair {
+    a int
+    b int
+}
+
+struct holder {
+    tags [3]string
+}
+
+fn take(xs [3]string) [3]string {
+    return xs
+}
+
+fn main() {
+    a := [3]int{1, 2, 3}
+    b := [...]int{1, 2, 3}
+    c := [3]int{}
+    d := [3]int{1}
+    e := [n]int{1, 2}
+    f := [n + 1]int{1, 2, 3}
+    g := [2][2]int{{1, 2}, {3, 4}}
+    h := [2]pair{{a: 1, b: 2}, {a: 3, b: 4}}
+    s := take([3]string{"a", "b", "c"})
+    hd := holder{tags: [3]string{"x", "y", "z"}}
+    m := map[string][2]int{"k": [2]int{7, 8}}
+    for i, v in [3]int{10, 20, 30} {
+        fmt.println(i, v)
+    }
+    fmt.println(a[0], b[1], c[2], d[0], e[1], f[2], g[1][0], h[0].b, s[0], hd.tags[1], m["k"][0])
+}
+"#;
+    let go = emit(src);
+    assert!(go.contains("a := [3]int{1, 2, 3}"), ":\n{go}");
+    assert!(go.contains("b := [...]int{1, 2, 3}"), ":\n{go}");
+    assert!(go.contains("c := [3]int{}"), ":\n{go}");
+    assert!(go.contains("d := [3]int{1}"), ":\n{go}");
+    assert!(go.contains("e := [n]int{1, 2}"), ":\n{go}");
+    assert!(go.contains("f := [n + 1]int{1, 2, 3}"), ":\n{go}");
+    assert!(
+        go.contains("g := [2][2]int{[2]int{1, 2}, [2]int{3, 4}}"),
+        ":\n{go}"
+    );
+    assert!(
+        go.contains("h := [2]pair{pair{a: 1, b: 2}, pair{a: 3, b: 4}}"),
+        ":\n{go}"
+    );
+    assert!(
+        go.contains("s := take([3]string{\"a\", \"b\", \"c\"})"),
+        ":\n{go}"
+    );
+    assert!(
+        go.contains("for i, v := range [3]int{10, 20, 30} {"),
+        ":\n{go}"
+    );
+    if std::process::Command::new("go")
+        .arg("version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        let tmp = std::env::temp_dir().join(format!("hyb_emit_arr_643_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        std::fs::write(tmp.join("go.mod"), "module arrlit643\n\ngo 1.21\n").expect("write go.mod");
+        std::fs::write(tmp.join("main.go"), &go).expect("write main.go");
+        let out = std::process::Command::new("go")
+            .arg("run")
+            .arg(".")
+            .current_dir(&tmp)
+            .output()
+            .expect("invoke go run");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            out.status.success(),
+            "go run failed on emitted Go:\n{}\nstderr:\n{}",
+            go,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("1 2 0 1 2 3 3 2 a y 7"),
+            "unexpected runtime stdout:\n{stdout}"
+        );
+    }
+}

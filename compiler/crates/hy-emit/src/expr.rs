@@ -73,16 +73,17 @@ impl Emitter {
                 }
                 Expr::SliceLit {
                     elem: None, items, ..
-                } => {
-                    if let TypeExpr::Slice { elem, .. } = exp {
-                        let head = format!("[]{}", self.type_text(elem));
+                } => match exp {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        let head = self.type_text(exp);
                         let mut parts = Vec::new();
                         for i in items {
                             parts.push(self.emit_expr_exp(i, 0, Some(elem))?);
                         }
                         return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                     }
-                }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -211,6 +212,14 @@ impl Emitter {
             }
 
             Expr::SliceLit { elem, items, .. } => {
+                if let Some((_, inner_elem, arr_ty)) = e.as_array_lit() {
+                    let head = self.type_text(arr_ty);
+                    let mut parts = Vec::new();
+                    for i in items {
+                        parts.push(self.emit_expr_exp(i, 0, Some(inner_elem))?);
+                    }
+                    return Ok(format!("{}{{{}}}", head, parts.join(", ")));
+                }
                 let head = match elem {
                     Some(t) => format!("[]{}", self.type_text(t)),
                     None => self.infer_slice_head(items)?,
@@ -714,7 +723,7 @@ impl Emitter {
             ..
         } = callee
         {
-            if items.is_empty() {
+            if items.is_empty() && callee.as_array_lit().is_none() {
                 let mut parts = Vec::new();
                 for a in args {
                     parts.push(self.emit_call_arg(a)?);
@@ -782,7 +791,7 @@ impl Emitter {
                 elem: Some(t),
                 items,
                 ..
-            } if items.is_empty() => {
+            } if items.is_empty() && first.value.as_array_lit().is_none() => {
                 format!("[]{}", self.type_text(t))
             }
             Expr::MapLit {

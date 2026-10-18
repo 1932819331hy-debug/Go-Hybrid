@@ -42,6 +42,9 @@ impl<'a> Checker<'a> {
             Stmt::Local(l) => {
                 if let Some(t) = &l.ty {
                     self.check_type_expr_with_state(Some(st), t);
+                    for v in &l.values {
+                        self.check_local_array_lit_len_match(t, v);
+                    }
                 }
                 for v in &l.values {
                     self.check_expr_emit_guard(st, v);
@@ -375,11 +378,33 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::SliceLit { elem, items, .. } => {
-                if let Some(elem_ty) = elem {
+                if let Some((len_opt, inner_elem, arr_ty)) = expr.as_array_lit() {
+                    if let Some(len_expr) = len_opt {
+                        self.check_array_len(Some(st), len_expr);
+                    }
+                    self.check_type_expr_with_state(Some(st), inner_elem);
+                    self.check_array_lit_emit_guard(Some(st), arr_ty, items, expr.span());
+                } else if let Some(elem_ty) = elem {
                     self.check_type_expr_with_state(Some(st), elem_ty);
                     let elem_ty = *elem_ty.clone();
+                    let resolved_elem = self.resolve_type_alias(&elem_ty);
                     for i in items {
                         self.check_const_overflow_init("slice literal element", &elem_ty, i, None);
+                        if let Expr::SliceLit {
+                            elem: None,
+                            items: sub_items,
+                            span: sub_span,
+                        } = unwrap_parens(i)
+                        {
+                            if matches!(resolved_elem, TypeExpr::Array { .. }) {
+                                self.check_array_lit_emit_guard(
+                                    Some(st),
+                                    &resolved_elem,
+                                    sub_items,
+                                    *sub_span,
+                                );
+                            }
+                        }
                     }
                 }
                 for i in items {
@@ -811,9 +836,26 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn check_type_expr_with_state(&mut self, st: Option<&FnState>, ty: &TypeExpr) {
         match ty {
-            TypeExpr::Array { len, elem, .. } => {
+            TypeExpr::Array { len, elem, span } => {
                 if let Some(len) = len {
                     self.check_array_len(st, len);
+                } else {
+                    let msg = format!(
+                        "invalid use of `[...]{}` array type outside a composite literal — Go rejects this (`invalid use of [...] array (outside a composite literal)`), so the emitted module would not build (HYB-E6004)",
+                        elem.render()
+                    );
+                    self.diags.push(
+                        Diagnostic::error("HYB-E6004", self.path.clone(), *span, msg).with_notes(
+                            vec![
+                                "why: Go allows `[...]T` only as the outer type of an array composite literal (`[...]T{...}`) where the compiler counts the elements".to_string(),
+                                format!(
+                                    "fix: spell a constant array length (`[N]{}`) or use a slice (`[]{}`)",
+                                    elem.render(),
+                                    elem.render()
+                                ),
+                            ],
+                        ),
+                    );
                 }
                 self.check_type_expr_with_state(st, elem);
             }
@@ -836,6 +878,136 @@ impl<'a> Checker<'a> {
                 }
             }
             TypeExpr::Named { .. } => {}
+        }
+    }
+
+    pub(crate) fn eval_array_len_const(&self, len: &Expr) -> Option<usize> {
+        let v = const_int_value(len)
+            .or_else(|| self.const_int_value_at(len, len.span().start, 0))?;
+        if v >= 0 {
+            usize::try_from(v).ok()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn check_local_array_lit_len_match(&mut self, decl_ty: &TypeExpr, value: &Expr) {
+        let resolved_decl = self.resolve_type_alias(decl_ty);
+        let TypeExpr::Array {
+            len: Some(decl_len_expr),
+            elem: decl_elem,
+            ..
+        } = &resolved_decl
+        else {
+            return;
+        };
+        let Some(expected_len) = self.eval_array_len_const(decl_len_expr) else {
+            return;
+        };
+        let bare = unwrap_parens(value);
+        let Some((lit_len_opt, _, arr_ty)) = bare.as_array_lit() else {
+            return;
+        };
+        let actual_len = match lit_len_opt {
+            Some(l) => self.eval_array_len_const(l),
+            None => match bare {
+                Expr::SliceLit { items, .. } => Some(items.len()),
+                _ => None,
+            },
+        };
+        let Some(actual_len) = actual_len else {
+            return;
+        };
+        if actual_len != expected_len {
+            let msg = format!(
+                "cannot use `{}` (length {}) as `[{}]{}` value in variable declaration (HYB-E6004)",
+                arr_ty.render(),
+                actual_len,
+                expected_len,
+                decl_elem.render()
+            );
+            self.diags.push(
+                Diagnostic::error("HYB-E6004", self.path.clone(), value.span(), msg).with_notes(
+                    vec![
+                        "why: in Go, the length `[N]` is part of an array's type, so `[M]T` cannot be assigned to `[N]T` when `M != N`".to_string(),
+                        format!(
+                            "fix: match the declared length `[{}]{}` or omit the explicit type ascription",
+                            actual_len,
+                            decl_elem.render()
+                        ),
+                    ],
+                ),
+            );
+        }
+    }
+
+    fn check_array_lit_emit_guard(
+        &mut self,
+        st: Option<&FnState>,
+        arr_ty: &TypeExpr,
+        items: &[Expr],
+        lit_span: Span,
+    ) {
+        let resolved_arr = self.resolve_type_alias(arr_ty);
+        let TypeExpr::Array {
+            len,
+            elem: inner_elem,
+            ..
+        } = &resolved_arr
+        else {
+            return;
+        };
+        if let Some(len_expr) = len {
+            if let Some(max_len) = self.eval_array_len_const(len_expr) {
+                if items.len() > max_len {
+                    let msg = format!(
+                        "array literal `{}` has {} element(s), exceeding array length {} (`index {} is out of bounds (>= {})`) (HYB-E6004)",
+                        arr_ty.render(),
+                        items.len(),
+                        max_len,
+                        max_len,
+                        max_len
+                    );
+                    self.diags.push(
+                        Diagnostic::error("HYB-E6004", self.path.clone(), lit_span, msg)
+                            .with_notes(vec![
+                                "why: Go rejects an array composite literal with more elements than its declared length `[N]T`, so the emitted module would not build".to_string(),
+                                format!(
+                                    "fix: increase the array length to at least `{}`, use `[...]{}` to infer the length, or remove the extra element(s)",
+                                    items.len(),
+                                    inner_elem.render()
+                                ),
+                            ]),
+                    );
+                }
+            }
+        }
+        let resolved_inner = self.resolve_type_alias(inner_elem);
+        for i in items {
+            self.check_const_overflow_init("array literal element", inner_elem, i, st);
+            if let Expr::SliceLit {
+                elem: None,
+                items: sub_items,
+                span: sub_span,
+            } = unwrap_parens(i)
+            {
+                match &resolved_inner {
+                    TypeExpr::Array { .. } => {
+                        self.check_array_lit_emit_guard(st, &resolved_inner, sub_items, *sub_span);
+                    }
+                    TypeExpr::Slice { elem: sub_elem, .. } => {
+                        for sub_i in sub_items {
+                            self.check_const_overflow_init(
+                                "slice literal element",
+                                sub_elem,
+                                sub_i,
+                                st,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
