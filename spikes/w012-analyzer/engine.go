@@ -200,7 +200,11 @@ func (e *WasmEngine) checkSource(ctx context.Context, src string, reportManaged 
 		}
 	}
 
-	mod, err := e.runtime.InstantiateModule(ctx, e.compiled, wazero.NewModuleConfig())
+	// The WASM name section defaults every instance to the same module name.
+	// Wazero forbids duplicate names in one Runtime, so concurrent disposable
+	// guests must be anonymous. WithName("") is the documented multi-instance
+	// configuration and preserves actual parallelism instead of serializing on a lock.
+	mod, err := e.runtime.InstantiateModule(ctx, e.compiled, wazero.NewModuleConfig().WithName(""))
 	if err != nil {
 		return &AnalysisResult{
 			Verdict: VerdictAnalysisFailure,
