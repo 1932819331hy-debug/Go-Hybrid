@@ -842,13 +842,14 @@ impl<'a> Checker<'a> {
             }
 
             // Update aliases
+            let pre_aliases = alias_stack.last().unwrap().clone();
             match stmt {
                 Stmt::Local(l) => {
-                    for (name, val) in l.names.iter().zip(l.values.iter()) {
+                    for (name, val) in l.names.iter().zip(if l.values.len() == 1 { vec![&l.values[0]; l.names.len()] } else { l.values.iter().collect() }) {
                         locals_stack.last_mut().unwrap().insert(name.clone());
                         let mut roots = Vec::new();
                         collect_ref_roots(val, &mut roots);
-                        if roots.iter().any(|r| alias_stack.last().unwrap().contains(r)) {
+                        if roots.iter().any(|r| pre_aliases.contains(r)) {
                             alias_stack.last_mut().unwrap().insert(name.clone());
                         } else {
                             alias_stack.last_mut().unwrap().remove(name);
@@ -860,7 +861,7 @@ impl<'a> Checker<'a> {
                         if let PlaceKind::Ident(name) = &t.kind {
                             let mut roots = Vec::new();
                             collect_ref_roots(val, &mut roots);
-                            if roots.iter().any(|r| alias_stack.last().unwrap().contains(r)) {
+                            if roots.iter().any(|r| pre_aliases.contains(r)) {
                                 alias_stack.last_mut().unwrap().insert(name.clone());
                             } else {
                                 alias_stack.last_mut().unwrap().remove(name);
@@ -1150,13 +1151,15 @@ impl<'a> Checker<'a> {
             let current_aliases = alias_stack.last_mut().unwrap();
             let current_locals = locals_stack.last_mut().unwrap();
 
+            let pre_aliases = current_aliases.clone();
+            let pre_shadows = current_shadows.clone();
             match stmt {
                 Stmt::Local(l) => {
-                    for (name, val) in l.names.iter().zip(l.values.iter()) {
+                    for (name, val) in l.names.iter().zip(if l.values.len() == 1 { vec![&l.values[0]; l.names.len()] } else { l.values.iter().collect() }) {
                         current_locals.insert(name.clone());
                         let mut roots = Vec::new();
                         collect_ref_roots(val, &mut roots);
-                        let resolved = roots.iter().find_map(|p| resolve(p, current_aliases, current_shadows));
+                        let resolved = roots.iter().find_map(|p| resolve(p, &pre_aliases, &pre_shadows));
                         if let Some(r) = resolved {
                             current_shadows.remove(name.as_str());
                             current_aliases.insert(name.clone(), r);
@@ -1173,7 +1176,7 @@ impl<'a> Checker<'a> {
                         if let PlaceKind::Ident(name) = &t.kind {
                             let mut roots = Vec::new();
                             collect_ref_roots(val, &mut roots);
-                            let resolved = roots.iter().find_map(|p| resolve(p, current_aliases, current_shadows));
+                            let resolved = roots.iter().find_map(|p| resolve(p, &pre_aliases, &pre_shadows));
                             if let Some(r) = resolved {
                                 current_shadows.remove(name.as_str());
                                 current_aliases.insert(name.clone(), r);
@@ -1502,7 +1505,10 @@ impl<'a> Checker<'a> {
                     }
                 })
                 .collect();
+            let pre_st = st.clone();
+            let mut overwritten = Vec::new();
             for info in resolved {
+                overwritten.push(info.name.clone());
                 let is_view = matches!(info.shape, TypeShape::BorrowHandle(_));
                 let carries = self.shape_may_share(&info.shape);
                 self.define_binding(st, &info.name, info.shape.clone(), info.ty, immutable, managed);
@@ -1517,7 +1523,7 @@ impl<'a> Checker<'a> {
                         st.share_edge(&info.name, &peer);
                     }
                 }
-                self.record_multi_value_share_and_alias(st, &info.name, &info.shape, &l.values[0]);
+                self.record_storage_from_snapshot(st, &pre_st, &info.name, &l.values[0], &overwritten, true, true);
                 if let Some(origin) = info.shadowed_origin {
                     if let Some(b) = st.env_lookup_mut(&info.name) {
                         if b.non_owned_origin.is_none() {
@@ -1539,7 +1545,10 @@ impl<'a> Checker<'a> {
             // Every name is bound now: join results the callee returns twice.
             self.link_multi_value_return_aliases(st, &l.values[0], &l.names);
         } else {
+            let pre_st = st.clone();
+            let mut overwritten = Vec::new();
             for (name, value) in l.names.iter().zip(l.values.iter()) {
+                overwritten.push(name.clone());
                 // Issue #148: constant initializer outside a fixed-width
                 // declared type → HYB-E6002 (Go would refuse to build).
                 if let Some(t) = &l.ty {
@@ -1571,14 +1580,14 @@ impl<'a> Checker<'a> {
                 // N1 for composite literals: `job{m: nil}` carries its own
                 // type context (the struct def / map value / slice elem) —
                 // the nested nil needs no ascription to reject (HYB-E4001).
-                self.check_composite_nils(st, value);
+                self.check_composite_nils(&pre_st, value);
                 // Issue #146: typed receive `n int = <-ch` against `chan job`
                 // used to accept and then fail `go build`. Compare the
                 // ascription against the channel element when both resolve.
                 if let Some(t) = &l.ty {
                     let want = self.shape_of_type(t);
                     self.check_recv_elem_against_target(
-                        st,
+                        &pre_st,
                         value,
                         &want,
                         value.span(),
@@ -1593,19 +1602,20 @@ impl<'a> Checker<'a> {
                 // = doc.array()` must stay a BorrowHandle for the loan
                 // windows); a lying ascription is caught downstream by the
                 // emitted Go build (the emitter carries the declared type).
-                let inferred = self.shape_of_expr(st, value);
+                let inferred = self.shape_of_expr(&pre_st, value);
                 let (shape, ty) = match (&l.ty, inferred) {
                     (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
                     (_, inferred) => (
                         inferred,
-                        l.ty.clone().or_else(|| self.ty_of_expr(st, value)),
+                        l.ty.clone().or_else(|| self.ty_of_expr(&pre_st, value)),
                     ),
                 };
-                let shadowed_const = self.shape_may_share(&shape)
-                    && self.value_reads_storage_of(st, value, name)
+                let is_fresh_copy = self.call_returns_fresh_copy(&pre_st, value);
+                let shadowed_const = !is_fresh_copy && self.shape_may_share(&shape)
+                    && self.value_reads_storage_of(&pre_st, value, name)
                     && self
                         .const_write_root(
-                            st,
+                            &pre_st,
                             &Place {
                                 kind: PlaceKind::Ident(name.clone()),
                                 span: value.span(),
@@ -1620,7 +1630,7 @@ impl<'a> Checker<'a> {
                 );
                 // `x := move y` — y is moved; x takes ownership (no alias);
                 // non-ident moves (`x := move s.data`) trigger HYB-E3004 (O5.4).
-                let moved_non_owned = self.moved_non_owned_origin_in_expr(st, value);
+                let moved_non_owned = self.moved_non_owned_origin_in_expr(&pre_st, value);
                 if move_operand_ident(value).is_some()
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
@@ -1641,9 +1651,9 @@ impl<'a> Checker<'a> {
                 // range var, O5.1) is lost and `move m` passed HYB-E3004
                 // while the caller still holds the same map. Read the origin
                 // the outer binding would cite NOW, before it is shadowed.
-                let reads_self = self.value_reads_storage_of(st, value, name);
+                let reads_self = !is_fresh_copy && self.value_reads_storage_of(&pre_st, value, name);
                 let shadowed_origin = if self.shape_may_share(&shape) && reads_self {
-                    self.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                    self.non_owned_origin_of(&pre_st, name).map(|(o, via_share)| {
                         if via_share && !o.starts_with("a may-share peer of ") {
                             format!("a may-share peer of {}", o)
                         } else {
@@ -1653,11 +1663,12 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let outer_exists =
-                    st.env.contains_key(name) || st.scopes.iter().any(|s| s.contains_key(name));
+                let outer_exists = pre_st.env.contains_key(name)
+                    || pre_st.scopes.iter().any(|s| s.contains_key(name));
                 let prior_alias = if reads_self {
-                    st.aliases.get(name).cloned().or_else(|| {
-                        if self.shape_may_share(&shape) && outer_exists && !st.scopes.is_empty() {
+                    pre_st.aliases.get(name).cloned().or_else(|| {
+                        if self.shape_may_share(&shape) && outer_exists && !pre_st.scopes.is_empty()
+                        {
                             Some(name.clone())
                         } else {
                             None
@@ -1667,7 +1678,8 @@ impl<'a> Checker<'a> {
                     None
                 };
                 let prior_children: Vec<String> = if reads_self {
-                    st.aliases
+                    pre_st
+                        .aliases
                         .iter()
                         .filter_map(|(k, v)| if v == name && k != name { Some(k.clone()) } else { None })
                         .collect()
@@ -1675,7 +1687,8 @@ impl<'a> Checker<'a> {
                     Vec::new()
                 };
                 let prior_shares: Vec<String> = if reads_self {
-                    st.may_share
+                    pre_st
+                        .may_share
                         .get(name)
                         .map(|s| s.iter().cloned().collect())
                         .unwrap_or_default()
@@ -1683,17 +1696,17 @@ impl<'a> Checker<'a> {
                     Vec::new()
                 };
                 let prior_shadow_links = if reads_self {
-                    st.shadow_links.get(name).cloned().unwrap_or_default()
+                    pre_st.shadow_links.get(name).cloned().unwrap_or_default()
                 } else {
                     HashSet::new()
                 };
                 let is_view = matches!(shape, TypeShape::BorrowHandle(_));
-                let outer_depth = if st
+                let outer_depth = if pre_st
                     .scopes
                     .last()
                     .is_some_and(|top| !top.contains_key(name))
                 {
-                    st.lookup_depth(name)
+                    pre_st.lookup_depth(name)
                 } else {
                     None
                 };
@@ -1744,12 +1757,12 @@ impl<'a> Checker<'a> {
                 // that embeds a live reference binding leaves `name` sharing
                 // mutable GC storage with its source — so a later `move` of
                 // either must freeze the other (O5.2).
-                self.record_may_share(st, name, value);
+                self.record_storage_from_snapshot(st, &pre_st, name, value, &overwritten, true, false);
                 self.record_move_const_and_a3_loans(st, name, value, idx);
                 // alias recording: `m2 := agg` (single-parent link, the
                 // friendlier "frozen alias" diagnostic) — and call results
                 // that hand back argument storage (#38).
-                self.record_alias(st, name, value);
+
 
                 // #111 form 4: record the base paths a closure value's body
                 // mutates, so a call inside a live slot-loan window counts
@@ -1806,8 +1819,17 @@ impl<'a> Checker<'a> {
                 .iter()
                 .any(|it| self.value_reads_storage_of(st, it, name)),
             Expr::Call { callee, args, .. } => {
+                if self.call_returns_fresh_copy(st, value) {
+                    return false;
+                }
                 let result = self.shape_of_expr(st, unwrap_parens(value));
-                if !(self.shape_may_share(&result) || matches!(result, TypeShape::Unknown)) {
+                // A later result can share storage even when result 0 is primitive.
+                let shares_storage = self.shape_may_share(&result)
+                    || matches!(result, TypeShape::Unknown)
+                    || self.call_result_tys(st, callee).is_some_and(|results| {
+                        results.iter().any(|ty| self.shape_may_share(&self.shape_of_type(ty)))
+                    });
+                if !shares_storage {
                     return false;
                 }
                 let via_arg = args.iter().any(|a| {
@@ -2142,6 +2164,87 @@ impl<'a> Checker<'a> {
     /// #73: a shallow copy or generic identity that returns argument
     /// storage through `f(...)` (no interprocedural summary, same argument
     /// as #38's alias recording).
+    /// Evaluate storage sources before any parallel LHS changes its binding.
+    /// Sources already overwritten by an earlier LHS refer to their surviving
+    /// peers (or the saved outer scope), never to the replacement value.
+    pub(crate) fn record_storage_from_snapshot(
+        &self,
+        st: &mut FnState,
+        pre_st: &FnState,
+        name: &str,
+        value: &Expr,
+        overwritten: &[String],
+        local: bool,
+        multi: bool,
+    ) {
+        if name == "_" || self.call_returns_fresh_copy(pre_st, value) {
+            return;
+        }
+        // Preserve the ordinary alias path (including non-owned origins)
+        // unless an earlier LHS actually replaced storage read by this RHS.
+        let reads_overwritten = move_operand_ident(value).is_none()
+            && overwritten.iter().any(|prev| {
+                prev != name && prev != "_" && self.value_reads_storage_of(pre_st, value, prev)
+            });
+        if !reads_overwritten {
+            if multi {
+                let shape = self.lookup_binding(st, name)
+                    .map(|b| b.shape.clone()).unwrap_or(TypeShape::Unknown);
+                self.record_multi_value_share_and_alias(st, name, &shape, value);
+            } else {
+                self.record_may_share(st, name, value);
+                self.record_alias(st, name, value);
+            }
+            return;
+        }
+        let mut rhs = pre_st.clone();
+        rhs.aliases.remove(name);
+        rhs.share_clear(name);
+        if let Some(binding) = rhs.env_lookup_mut(name) {
+            binding.non_owned_origin = None;
+        }
+        if multi {
+            let shape = self.lookup_binding(st, name).map(|b| b.shape.clone()).unwrap_or(TypeShape::Unknown);
+            self.record_multi_value_share_and_alias(&mut rhs, name, &shape, value);
+        } else {
+            self.record_may_share(&mut rhs, name, value);
+            self.record_alias(&mut rhs, name, value);
+        }
+        if let Some(origin) = self.lookup_binding(&rhs, name).and_then(|b| b.non_owned_origin.clone()) {
+            if let Some(binding) = st.env_lookup_mut(name) {
+                if binding.non_owned_origin.is_none() {
+                    binding.non_owned_origin = Some(origin);
+                }
+            }
+        }
+        let alias = rhs.aliases.get(name).cloned();
+        let mut sources = rhs.may_share.get(name).cloned().unwrap_or_default();
+        if let Some(source) = &alias {
+            sources.insert(source.clone());
+        }
+        for source in sources {
+            let mut peers = self.storage_peers(pre_st, &source);
+            peers.insert(0, source.clone());
+            for peer in peers {
+                if overwritten.contains(&peer) {
+                    if local && pre_st.scopes.last().is_some_and(|top| !top.contains_key(&peer)) {
+                        if let Some(depth) = pre_st.lookup_depth(&peer) {
+                            st.shadow_links.entry(name.to_string()).or_default().insert((peer.clone(), depth));
+                        }
+                    }
+                } else if peer != name {
+                    st.share_edge(name, &peer);
+                    if alias.as_ref() == Some(&source) && !st.aliases.contains_key(name) {
+                        st.aliases.insert(name.to_string(), peer.clone());
+                    }
+                }
+                if let Some(links) = pre_st.shadow_links.get(&peer) {
+                    st.shadow_links.entry(name.to_string()).or_default().extend(links.iter().cloned());
+                }
+            }
+        }
+    }
+
     pub(crate) fn record_may_share(&self, st: &mut FnState, name: &str, value: &Expr) {
         if name == "_" {
             return;
@@ -2197,6 +2300,9 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => {
+                if self.call_returns_fresh_copy(st, value) {
+                    return;
+                }
                 let inner = unwrap_parens(value);
                 let result = self.shape_of_expr(st, inner);
                 let is_literal = matches!(
@@ -2859,6 +2965,9 @@ impl<'a> Checker<'a> {
         aliases: &std::collections::HashMap<String, HashSet<usize>>,
     ) -> HashSet<usize> {
         let inner = crate::model::unwrap_parens(expr);
+        if self.call_returns_fresh_copy(cst, inner) {
+            return HashSet::new();
+        }
         let shape = self.shape_of_expr(cst, inner);
         if !self.shape_may_share(&shape) && !matches!(shape, TypeShape::Unknown) {
             return HashSet::new();
@@ -2940,8 +3049,9 @@ impl<'a> Checker<'a> {
                                 }
                                 (_, inf) => (inf, self.ty_of_expr(cst, v).or_else(|| l.ty.clone())),
                             };
-                            let origins = if self.shape_may_share(&shape)
-                                || matches!(shape, TypeShape::Unknown)
+                            let origins = if !self.call_returns_fresh_copy(cst, v)
+                                && (self.shape_may_share(&shape)
+                                    || matches!(shape, TypeShape::Unknown))
                             {
                                 Self::raw_expr_slot_origins(v, aliases)
                             } else {
@@ -3410,7 +3520,15 @@ impl<'a> Checker<'a> {
             // single-parent link) and `move`-wrapped operands, which transfer
             // ownership into the callee, are skipped by the collector.
             other => {
-                let other_shape = self.shape_of_expr(st, unwrap_parens(other));
+                if self.call_returns_fresh_copy(st, value) {
+                    return;
+                }
+                let mut other_shape = self.shape_of_expr(st, unwrap_parens(other));
+                if matches!(other_shape, TypeShape::Unknown) {
+                    if let Some(b) = self.lookup_binding(st, name) {
+                        other_shape = b.shape.clone();
+                    }
+                }
                 if other_shape.is_reference_alias()
                     || matches!(other_shape, TypeShape::OwnHandle(_))
                 {
@@ -5148,10 +5266,13 @@ impl<'a> Checker<'a> {
         idx: usize,
     ) {
         if values.len() == targets.len() {
+            let pre_st = st.clone();
+            let mut overwritten = Vec::new();
             // Evaluate all RHS shapes, types, and alias sources before
             // mutating target bindings so parallel swaps/rebinds read the
             // pre-assignment environment.
             struct AssignRhsInfo {
+                is_fresh_copy: bool,
                 shape: TypeShape,
                 ty: Option<hy_syntax::TypeExpr>,
                 non_owned: Option<String>,
@@ -5214,6 +5335,7 @@ impl<'a> Checker<'a> {
                             _ => (false, None, None, Vec::new(), HashSet::new()),
                         };
                     AssignRhsInfo {
+                        is_fresh_copy: self.call_returns_fresh_copy(st, v),
                         shape,
                         ty,
                         non_owned,
@@ -5239,6 +5361,7 @@ impl<'a> Checker<'a> {
                     if name == "_" {
                         continue;
                     }
+                    overwritten.push(name.clone());
                     if !info.reads_self {
                         self.preserve_peers_before_sever(st, name, false);
                     }
@@ -5279,11 +5402,11 @@ impl<'a> Checker<'a> {
                             st.share_edge(name, &peer);
                         }
                     }
-                    self.record_may_share(st, name, v);
+                    if !info.is_fresh_copy { self.record_storage_from_snapshot(st, &pre_st, name, v, &overwritten, false, false); }
                     self.record_move_const_and_a3_loans(st, name, v, idx);
                     // rebind may create a fresh alias — ident copies AND
                     // call results that hand back argument storage (#38)
-                    self.record_alias(st, name, v);
+
                     if let Some(origin) = info.shadowed_origin {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
@@ -5918,6 +6041,8 @@ impl<'a> Checker<'a> {
     /// (E3006 surface) — the same-stmt share-move form of a const write.
     fn process_closure_const_local(&self, st: &mut FnState, l: &LocalDecl) {
         let immutable = l.kind == LocalKind::Const;
+        let pre_st = st.clone();
+        let mut overwritten = Vec::new();
         if l.values.len() == 1 && l.names.len() > 1 {
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
             let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
@@ -5948,28 +6073,33 @@ impl<'a> Checker<'a> {
                 })
                 .collect();
             for (name, shape, ty, is_imm) in resolved {
+                overwritten.push(name.clone());
                 self.define_binding(st, &name, shape.clone(), ty, is_imm, false);
                 if move_operand_ident(&l.values[0]).is_none() {
-                    self.record_multi_value_share_and_alias(st, &name, &shape, &l.values[0]);
+                    self.record_storage_from_snapshot(st, &pre_st, &name, &l.values[0], &overwritten, true, true);
                 }
             }
             self.link_multi_value_return_aliases(st, &l.values[0], &l.names);
             return;
         }
+        let pre_st = st.clone();
+        let mut overwritten = Vec::new();
         for (name, value) in l.names.iter().zip(l.values.iter()) {
-            let inferred = self.shape_of_expr(st, value);
+            overwritten.push(name.clone());
+            let inferred = self.shape_of_expr(&pre_st, value);
             let (shape, ty) = match (&l.ty, inferred) {
                 (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
                 (_, inferred) => (
                     inferred,
-                    l.ty.clone().or_else(|| self.ty_of_expr(st, value)),
+                    l.ty.clone().or_else(|| self.ty_of_expr(&pre_st, value)),
                 ),
             };
-            let shadowed_const = self.shape_may_share(&shape)
-                && self.value_reads_storage_of(st, value, name)
+            let is_fresh_copy = self.call_returns_fresh_copy(&pre_st, value);
+                let shadowed_const = !is_fresh_copy && self.shape_may_share(&shape)
+                && self.value_reads_storage_of(&pre_st, value, name)
                 && self
                     .const_write_root(
-                        st,
+                        &pre_st,
                         &Place {
                             kind: PlaceKind::Ident(name.clone()),
                             span: value.span(),
@@ -5977,9 +6107,8 @@ impl<'a> Checker<'a> {
                     )
                     .is_some();
             self.define_binding(st, name, shape, ty, immutable || shadowed_const, false);
-            if move_operand_ident(value).is_none() {
-                self.record_may_share(st, name, value);
-                self.record_alias(st, name, value);
+            if move_operand_ident(value).is_none() && !is_fresh_copy {
+                self.record_storage_from_snapshot(st, &pre_st, name, value, &overwritten, true, false);
             }
             self.record_closure_mutations(st, name, value);
             self.record_move_const_and_a3_loans(st, name, value, 0);
