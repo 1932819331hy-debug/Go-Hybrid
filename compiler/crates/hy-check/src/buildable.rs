@@ -765,10 +765,22 @@ impl<'a> Collector<'a> {
                 }
                 self.check_return(values, *span);
             }
-            Stmt::Task { callee, args, .. } => {
+            Stmt::Task { callee, args, span } => {
                 self.expr(callee);
                 for a in args {
                     self.expr(&a.value);
+                }
+                match unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => {
+                        self.check_user_fn_arity(name, args, *span);
+                        self.check_user_fn_arg_types(name, args);
+                    }
+                    Expr::Field { base, name, .. } => {
+                        let bk = self.kind_of_expr(base);
+                        self.check_method_arity(&bk, name, args, *span);
+                        self.check_method_arg_types(&bk, name, args);
+                    }
+                    _ => {}
                 }
             }
             Stmt::Managed { body, .. } => self.block_scoped(body),
@@ -1988,6 +2000,85 @@ impl<'a> Collector<'a> {
         );
     }
 
+    fn check_user_fn_arg_types(&mut self, name: &str, args: &[CallArg]) {
+        let head = Checker::base_named_type_str(name);
+        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+            return;
+        };
+        if !f.type_params.is_empty() {
+            return;
+        }
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        if f.params.len() != args.len() {
+            return;
+        }
+        for (p, a) in f.params.iter().zip(args.iter()) {
+            let want = self.kind_of_ty(&p.ty, 0);
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = &want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            if kinds_conflict(&want, &got) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label(),
+                        name
+                    ),
+                    "argument types must match declared parameter types",
+                );
+            }
+        }
+    }
+
+    fn check_method_arg_types(&mut self, bk: &OpKind, name: &str, args: &[CallArg]) {
+        let Some(sn) = self.struct_base_name(bk).or_else(|| self.struct_name(bk)) else {
+            return;
+        };
+        let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
+            return;
+        };
+        if !m.type_params.is_empty() {
+            return;
+        }
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        if m.params.len() != args.len() {
+            return;
+        }
+        for (p, a) in m.params.iter().zip(args.iter()) {
+            let want = self.kind_of_ty(&p.ty, 0);
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = &want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            if kinds_conflict(&want, &got) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label(),
+                        sn,
+                        name
+                    ),
+                    "argument types must match declared parameter types",
+                );
+            }
+        }
+    }
+
     /// #577 C10 — a `return` must supply the enclosing function's result
     /// list: the same number of values, each assignable to its result type.
     /// Go refuses the emitted statement otherwise (Row 13).
@@ -2864,6 +2955,7 @@ impl<'a> Collector<'a> {
                         self.check_append_elements(args);
                     }
                     self.check_user_fn_arity(name, args, span);
+                    self.check_user_fn_arg_types(name, args);
                 }
             }
             Expr::Field { base, name, .. } => {
@@ -2979,6 +3071,7 @@ impl<'a> Collector<'a> {
                 }
                 if has_method {
                     self.check_method_arity(&bk, name, args, span);
+                    self.check_method_arg_types(&bk, name, args);
                 }
             }
             _ => {
