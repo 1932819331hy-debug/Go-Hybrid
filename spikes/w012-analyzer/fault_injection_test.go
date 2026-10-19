@@ -59,6 +59,33 @@ func (m *MockWasmABI) ReadMemory(offset, length uint32) ([]byte, bool) {
 	return m.Memory[offset : offset+length], true
 }
 
+// Releasing a guest allocation may fail after the guest actually freed it.
+// Repeating the call from deferred cleanup risks a double-free or guest trap.
+func TestSourceReleaseFailureIsNotRetried(t *testing.T) {
+	freeCalls := 0
+	mock := &MockWasmABI{
+		Memory: make([]byte, 128),
+		AllocFn: func(context.Context, uint64) (uint32, error) {
+			return 8, nil
+		},
+		CheckFn: func(context.Context, uint64, uint64) (uint64, error) {
+			return 0, nil
+		},
+		FreeFn: func(context.Context, uint64, uint64) error {
+			freeCalls++
+			return errors.New("guest free trapped after deallocation")
+		},
+	}
+
+	res := CheckSourceWithABI(context.Background(), mock, "package sample")
+	if res.Verdict != VerdictAnalysisFailure || res.Failure == nil {
+		t.Fatalf("source release failure must fail closed: %+v", res)
+	}
+	if freeCalls != 1 {
+		t.Fatalf("source release must be attempted exactly once, got %d calls", freeCalls)
+	}
+}
+
 func TestFailureDomainSeparation(t *testing.T) {
 	ctx := context.Background()
 	wasmBytes, err := os.ReadFile(defaultWasmPath)

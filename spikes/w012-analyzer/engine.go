@@ -199,9 +199,11 @@ func CheckSourceWithABI(ctx context.Context, abi WasmABI, src string) *AnalysisR
 			Failure: fmt.Errorf("infrastructure error: guest memory alloc failed: %w", err),
 		}
 	}
-	sourceFreed := false
+	// This flag means that cleanup is still due, not that a previous free
+	// returned success. A trapped free may already have deallocated memory.
+	sourceFreePending := true
 	defer func() {
-		if !sourceFreed {
+		if sourceFreePending {
 			_ = abi.Free(ctx, uint64(srcPtr), srcLen)
 		}
 	}()
@@ -221,13 +223,15 @@ func CheckSourceWithABI(ctx context.Context, abi WasmABI, src string) *AnalysisR
 		}
 	}
 
+	// Mark the release as attempted BEFORE invoking guest code. On a trap,
+	// retrying from the defer could double-free a partially released buffer.
+	sourceFreePending = false
 	if err := abi.Free(ctx, uint64(srcPtr), srcLen); err != nil {
 		return &AnalysisResult{
 			Verdict: VerdictAnalysisFailure,
 			Failure: fmt.Errorf("infrastructure error: failed freeing guest source buffer: %w", err),
 		}
 	}
-	sourceFreed = true
 
 	if err := ctx.Err(); err != nil {
 		return &AnalysisResult{
