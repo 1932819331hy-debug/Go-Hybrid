@@ -1736,7 +1736,7 @@ impl<'a> Collector<'a> {
                     return None;
                 }
                 match name.as_str() {
-                    "len" | "cap" => return Some(vec![OpKind::Int]),
+                    "len" | "cap" | "copy" => return Some(vec![OpKind::Int]),
                     "append" => {
                         let first = args
                             .first()
@@ -1746,7 +1746,8 @@ impl<'a> Collector<'a> {
                     }
                     "make" => return Some(vec![self.make_kind(args)]),
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
-                    "delete" | "close" => return Some(Vec::new()),
+                    "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
+                    "recover" => return Some(vec![OpKind::Interface]),
                     _ => {}
                 }
                 let conv = self.kind_of_named(name, 0);
@@ -3579,6 +3580,88 @@ impl<'a> Collector<'a> {
                             sk.label()
                         ),
                         "the first argument to `append(xs, ...)` must be a slice (`[]T`)",
+                    );
+                }
+            }
+            "copy" => {
+                if args.len() != 2 {
+                    return; // arity handled by builtins.rs
+                }
+                let dst_arg = &args[0].value;
+                let src_arg = &args[1].value;
+                let dk = self.kind_of_expr(dst_arg);
+                let sk = self.kind_of_expr(src_arg);
+
+                if !matches!(dk, OpKind::Unknown | OpKind::Slice(_)) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "first argument to `copy` must be a slice, found `{}` (type `{}`) (HYB-E2005)",
+                            dst_arg.render(),
+                            dk.label()
+                        ),
+                        "the first argument to `copy(dst, src)` must be a slice (`[]T`)",
+                    );
+                    return;
+                }
+
+                if !matches!(sk, OpKind::Unknown | OpKind::Slice(_) | OpKind::Str) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "second argument to `copy` must be a slice or string, found `{}` (type `{}`) (HYB-E2005)",
+                            src_arg.render(),
+                            sk.label()
+                        ),
+                        "the second argument to `copy(dst, src)` must be a slice (`[]T`) or string",
+                    );
+                    return;
+                }
+
+                match (&dk, &sk) {
+                    (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
+                        if kinds_conflict(dst_elem, src_elem) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "arguments to `copy` have different element types: `{}` and `{}` (HYB-E1002)",
+                                    dst_elem.label(),
+                                    src_elem.label()
+                                ),
+                                "arguments to `copy` must have identical element types",
+                            );
+                        }
+                    }
+                    (OpKind::Slice(dst_elem), OpKind::Str) => {
+                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot copy string into slice with element type `{}` (HYB-E1002)",
+                                    dst_elem.label()
+                                ),
+                                "copying from a string requires a byte slice destination (`[]byte`)",
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "clear" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                let ak = self.kind_of_expr(op);
+                if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Map(_, _)) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot clear non-slice/map `{}` (type `{}`) (HYB-E2005)",
+                            op.render(),
+                            ak.label()
+                        ),
+                        "`clear` requires a slice or map operand",
                     );
                 }
             }
