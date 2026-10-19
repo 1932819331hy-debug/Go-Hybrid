@@ -1223,7 +1223,7 @@ impl Emitter {
                 for a in &args[..args.len() - 1] {
                     call_args.push(self.emit_call_arg(a)?);
                 }
-                call_args.push(format!("{:?}", fmt_str));
+                call_args.push(go_quote(&fmt_str));
                 call_args.extend(interp_args);
                 return Ok(format!(
                     "{}.{}({})",
