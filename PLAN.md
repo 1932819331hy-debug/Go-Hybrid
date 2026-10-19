@@ -1,12 +1,6 @@
 # Hybrid Language: Development Plan
 
-## Contributor validation — interpolated printf formats (2026-10-19)
-
-- On `aa4a9d9`, valid NUL/BEL interpolation passes `hyb check` but `fmt.printf` and `fmt.fprintf` emit Rust-only escapes and fail Go compilation. Pre-registered reproduction is in `research/printf-string-encoding.json`; this is a buildability improvement, not a data-race claim.
-- Three real CLI/build/run tests: baseline two failures plus one passing control; the one-line `go_quote` correction passes all three, asserting exact control bytes and preserving ordinary interpolation, percent signs, braces, quotes, backslashes, Unicode, writer arguments and explicit printf parameters.
-- Windows amd64, Rust 1.99.0 / Go 1.26.9: full compiler workspace 1532 passed / 0 failed; checker corpus 113/113; census and registration guards pass. Normalize a Windows checkout to indexed LF before running the existing T3 spec extractor, which searches for an LF-only fence. Upstream CI and bounty eligibility remain pending.
-- Windows differential: 35/37 accepted programs build/run and 76/76 rejection checks agree. The two failures are bridge programs 12/13, both explicitly reporting missing `gcc` for cgo. The standard Linux CI is being used to verify those native bridge cases; they are not claimed as passing locally.
-
+- Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
 
