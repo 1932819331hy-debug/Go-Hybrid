@@ -1045,7 +1045,10 @@ impl<'a> Collector<'a> {
                 self.expr(operand);
                 self.check_unary_operand(*op, operand, *span);
             }
-            Expr::AddrOf { operand, .. } => self.expr(operand),
+            Expr::AddrOf { operand, span, .. } => {
+                self.expr(operand);
+                self.check_addr_of_operand(operand, *span);
+            }
             Expr::Move { operand, .. } => self.expr(operand),
             Expr::Try { operand, .. } => self.expr(operand),
             Expr::Receive { chan, .. } => self.expr(chan),
@@ -2495,7 +2498,95 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            UnOp::Addr => {}
+            UnOp::Addr => {
+                self.check_addr_of_operand(operand, span);
+            }
+        }
+    }
+
+    /// Go spec §Address operators: operand must be addressable or a composite literal.
+    fn check_addr_of_operand(&mut self, operand: &Expr, span: Span) {
+        if !self.is_addressable_expr(operand) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot take the address of `{}` (HYB-E1002)",
+                    operand.render()
+                ),
+                "the operand of `&` must be addressable (a variable, pointer indirection, field, slice/array element, or composite literal)",
+            );
+        }
+    }
+
+    fn is_imported_pkg_root(&self, name: &str) -> bool {
+        for d in &self.ck.file.decls {
+            if let Decl::Import { path, .. } = d {
+                let root = path.rsplit('/').next().unwrap_or(path.as_str());
+                if root == name {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn is_addressable_expr(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. } => true,
+            Expr::Ident { name, .. } => {
+                if name == "_" {
+                    return false;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(entry) = layer.get(name) {
+                        return match entry {
+                            Some(id) => self.defines[*id].kind != LocalKind::Const,
+                            None => true,
+                        };
+                    }
+                }
+                if self.file_consts.contains_key(name) {
+                    return false;
+                }
+                if self.ck.fns.contains_key(name) || self.ck.file.fns().any(|f| &f.name == name) {
+                    return false;
+                }
+                if self.is_imported_pkg_root(name) {
+                    return false;
+                }
+                true
+            }
+            Expr::Index { base, .. } => {
+                let bk = self.kind_of_expr(base);
+                match bk {
+                    OpKind::Str => false,
+                    OpKind::Map(_, _) => true,
+                    OpKind::Slice(_) => true,
+                    OpKind::Array(_) => self.is_addressable_expr(base),
+                    OpKind::Pointer(inner) if matches!(*inner, OpKind::Array(_) | OpKind::Slice(_)) => true,
+                    OpKind::Unknown => true,
+                    _ => false,
+                }
+            }
+            Expr::Field { base, .. } => {
+                let bk = self.kind_of_expr(base);
+                match bk {
+                    OpKind::Pointer(_) | OpKind::Unknown => true,
+                    _ => self.is_addressable_expr(base),
+                }
+            }
+            Expr::Slice { .. } => false,
+            Expr::Lit { .. }
+            | Expr::Interp { .. }
+            | Expr::Binary { .. }
+            | Expr::Unary { .. }
+            | Expr::AddrOf { .. }
+            | Expr::Call { .. }
+            | Expr::Try { .. }
+            | Expr::Receive { .. }
+            | Expr::Move { .. }
+            | Expr::FnLit { .. } => false,
+            Expr::Paren { inner, .. } => self.is_addressable_expr(inner),
         }
     }
 
