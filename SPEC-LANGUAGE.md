@@ -124,6 +124,16 @@ emitted Go tree mirrors the Hybrid tree).
 (`HYB-E0001`); foreign Go/Rust names are *normalized* at binding time (M4), so
 uppercase never appears in Hybrid source.
 
+Declaration bindings must not use the Go numeric type spellings `int8`,
+`int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`, `float32`,
+or `float64` (`HYB-E1002`, `BUILDABLE`). Hybrid numeric types and conversions
+lower to those names, so a user binding could capture a conversion or type
+reference in the generated Go. The restriction covers package declarations,
+type parameters, receivers, parameters, named results, locals, closures, and
+loop, match, and select bindings. Field and method names remain legal because
+selectors do not shadow Go's numeric type namespace. Rename a colliding
+binding and retain conversions such as `f64(n)` or `i64(n)` (issue #728).
+
 ```hy
 // fragment:
 worker_id  := 3        // ok

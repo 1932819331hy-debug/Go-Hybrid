@@ -977,3 +977,17 @@ verdict agreement, tripwire not fired**.
 
 With this registration the corpus is **113 programs: ACCEPT 35 ·
 ACCEPT-MANAGED 2 · REJECT 76** — main's 105 plus these four.
+
+## Additive registration — issue #728 numeric conversion hygiene (2026-10-19)
+
+`go-numeric-conversion-shadow-reject.hy` pins SPEC-LANGUAGE LX2's declaration
+restriction as `REJECT BUILDABLE` / `HYB-E1002`. A package function named
+`float64` must not capture `f64(n)`, whose source semantics require a floating
+conversion. The baseline accepts the program and emits a call to the user
+function, changing the result from `3.5` to `3500`. Rejection is the scoped
+repair chosen by this candidate. Field and method names remain legal, with
+positive checker tests in `go_primitive_shadowing.rs`; the same tests pin all
+ten lowered numeric spellings. Existing fixture verdicts remain unchanged.
+
+This registration brings the corpus to **114 programs: ACCEPT 35 ·
+ACCEPT-MANAGED 2 · REJECT 77**.
