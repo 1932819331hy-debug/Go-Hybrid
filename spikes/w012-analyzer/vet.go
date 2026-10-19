@@ -15,9 +15,16 @@ import (
 // wrapper therefore forces a fresh vet action (-a) and supplies an immutable
 // .hy snapshot that the analyzer validates while reading each source.
 func RunVet(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	// The wrapper owns both the analyzer binary and Go vet's forced rebuild.
+	// Go accepts -flag and --flag (also -flag=value). A caller-supplied
+	// override later in the argv would defeat the .hy snapshot/cache contract.
 	for _, arg := range args {
-		if arg == "-vettool" || strings.HasPrefix(arg, "-vettool=") {
+		name, _, _ := strings.Cut(arg, "=")
+		switch name {
+		case "-vettool", "--vettool":
 			return errorsVet("do not pass -vettool to hybvet vet; the wrapper owns the analyzer binary")
+		case "-a", "--a":
+			return errorsVet("do not override -a in hybvet vet; the wrapper requires an uncached vet action")
 		}
 	}
 
