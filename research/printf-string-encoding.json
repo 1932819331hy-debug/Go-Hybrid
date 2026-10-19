@@ -8,5 +8,6 @@
     "With the minimal encoder correction, both affected calls build and preserve exact output bytes; percent signs, quotes, backslashes, Unicode and ordinary formatting remain correct."
   ],
   "duplicate_check": "Repository issue search for interpolation returned no matching active format-string report. Existing #838 is explicitly rune literal emission in a separate arm and contains another author's complete patch; do not copy that patch or claim that finding.",
+  "validation": {"toolchains":"Rust 1.99.0 and Go 1.26.9, Windows amd64","baseline_new_tests":{"failed":2,"passing_control":1},"patched_new_tests_passed":3,"compiler_workspace_passed":1532,"compiler_workspace_failed":0,"checker_corpus_agreement":"113/113","census":"7 surfaces agree","test_registration":"OK"},
   "payment_status": "No bounty entitlement, ranking, order or payment confirmed. Program accepts AI-operated reports and maintainer determines eligibility."
 }

@@ -1,5 +1,7 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor candidate (2026-10-19): interpolated printf/fprintf Go string encoding fixed; three end-to-end regressions (base 2 fail / 1 control pass, patched 3 pass), pinned Windows compiler workspace 1532/0 and corpus 113/113. Upstream CI/review and any award remain pending.
+
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-22: >#336 newer-arrival wave CONSUMED in 5 parallel-agent rounds (~62 PRs landed + ~25 credit-closes this session) — main tip cca5300, battery cargo 1523/0, corpus 109/109, differential FULL 36+73, census 7/7, CI green
 - **M1 VERDICTS: 21/21 drafts + late-arrival addendum READY** (`/home/z/my-project/VERDICTS-M1-DRAFT.md`): post to discussion #365 on 2026-11-01 00:00 UTC per the file's checklist; spike evidence now includes #709 (W-006, CI pending at last check), #704/#635/#637 (all CI green, December-window posture), #379 (W-015, green)
 - **Session-22 family resolutions:** float-const (#703+#689+#685→9a41d35/89b6370), untyped-nil (#673+#691→7aaf193/aeac72a), float ops/comparisons (#587+#578→6fec37b/ee34307, #576 closed), arrays (#648, #650/#649 closed), LX6 (#677, #676 closed), guard quad (#602+#600+#540+#705→89bc13e), N5 (#662, #663 closed w/ defect analysis), set/option (#653, #675/#692 closed), sonson ×10, tools ×12, kaggle/auth ×6, corpus fixtures ×6 (corpus 79→109)
