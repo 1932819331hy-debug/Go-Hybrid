@@ -345,7 +345,7 @@ fn example03_golden_shape() {
         go
     );
     assert!(
-        go.contains(" := n_workers\n") && go.contains("for i := hyLo") && go.contains("i < hyHi"),
+        go.contains(" = n_workers\n") && go.contains("for i := hyLo") && go.contains("i < hyHi"),
         "range-for:\n{}",
         go
     );
@@ -751,7 +751,7 @@ fn nested_labeled_loops_break_their_own_loop() {
 fn exclusive_range_stays_exclusive() {
     let go = emit("fn main() {\n    for i in 0..n {\n    }\n}\n");
     assert!(go.contains(" := 0\n"), "lower bound is evaluated once:\n{}", go);
-    assert!(go.contains(" := n\n"), "upper bound is evaluated once:\n{}", go);
+    assert!(go.contains(" = n\n"), "upper bound is evaluated once:\n{}", go);
     assert!(
         go.contains("for i := hyLo") && go.contains("i < hyHi"),
         "exclusive comparison must use the captured upper bound:\n{}",
@@ -774,7 +774,7 @@ fn exclusive_range_bound_reads_outer_shadowed_binding() {
     let go = emit(
         "fn main() {\n    n := 3\n    for n in 0..n {\n        fmt.println(n)\n    }\n}\n",
     );
-    let bound = go.find(" := n\n").expect("captured outer n before loop");
+    let bound = go.find(" = n\n").expect("captured outer n before loop");
     let loop_start = go.find("for n := hyLo").expect("range variable declared");
     assert!(bound < loop_start, "bound must see outer n, not inner n:\n{}", go);
     assert!(go.contains("n < hyHi"), "must compare against captured n:\n{}", go);
@@ -786,7 +786,7 @@ fn exclusive_range_upper_side_effect_runs_once() {
         "fn bound() int { return 2 }\nfn main() {\n    for i in 0..bound() {\n        fmt.println(i)\n    }\n}\n",
     );
     assert_eq!(
-        go.matches(":= bound()").count(), 1,
+        go.matches("= bound()").count(), 1,
         "upper bound function called only in the captured initializer:\n{}",
         go
     );
@@ -798,7 +798,7 @@ fn exclusive_range_mutated_upper_uses_initial_value() {
     let go = emit(
         "fn main() {\n    limit := 2\n    for i in 0..limit {\n        limit = 5\n    }\n}\n",
     );
-    assert!(go.contains(" := limit\n"), "capture original limit:\n{}", go);
+    assert!(go.contains(" = limit\n"), "capture original limit:\n{}", go);
     assert!(go.contains("i < hyHi"), "loop compares with fixed bound:\n{}", go);
     assert!(!go.contains("i < limit"), "no mutable bound in condition:\n{}", go);
 }

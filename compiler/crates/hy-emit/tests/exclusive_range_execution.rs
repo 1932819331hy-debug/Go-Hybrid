@@ -48,6 +48,10 @@ fn main() {
     for v in lower..(126 + 1) {
         fmt.println("const expr {v}")
     }
+    const namedUpper = 127
+    for v in lower..namedUpper {
+        fmt.println("named const {v}")
+    }
     for v in lower..=127 {
         fmt.println("inclusive const {v}")
     }
@@ -107,6 +111,7 @@ fn main() {
             "typed 126\n",
             "const literal 126\n",
             "const expr 126\n",
+            "named const 126\n",
             "inclusive const 126\n",
             "inclusive const 127\n",
         ),
