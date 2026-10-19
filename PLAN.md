@@ -6,6 +6,18 @@
 - Managed gate now refuses an omitted source list before baseline I/O; empty explicit scans remain valid.
 - Reproduced four false-success CLI cases on `8fb9238`; added regressions and ran all 21 Python tool tests successfully. Rust/compiler suites were not run (Rust is unavailable locally); upstream CI is required before merge.
 ## Status
+- Fork-only #728 validation (2026-10-19): numeric Go-name declaration hygiene
+  candidate at 61e106c passed fork quick/compiler CI (run 39177249108), corpus
+  113/113 and differential 37/37 + 76/76. Resume adds the LX2 scope amendment,
+  all-name/selector controls and the additive BUILDABLE corpus pin; updated
+  checks pass locally on pinned Rust 1.99.0 / Go 1.26.9: workspace 1541/0,
+  corpus 114/114, differential 37/37 + 77/77, targeted tests 7/7, census unit
+  tests 14/14 and all 7 census surfaces. Baseline aa4a9d9 accepts the new
+  fixture and prints 3500; the candidate rejects BUILDABLE/HYB-E1002. An
+  external 120-case binder matrix and 3 positive controls also pass. Fork CI
+  must validate the updated head; current results belong in fork PR #7.
+  Upstream #774 proposes emitter mangling for this issue; retain the fork
+  draft while that alternative is reviewed. No bounty claim.
 - Contributor check (2026-10-15, EricSpencer00): on base `44a08b9`, a successful no-op job declaring a missing `results/measurement.json` returned exit 0 and `summary.ok=true`. The runner now checks declared result files before its final verdict, maps the documented `results/` prefix to the selected output directory, and exempts its own generated summary. Offline runner/SHA tests cover missing files, real outputs, directories, malformed declarations and summary-only jobs; upstream CI remains required.
 - Current phase: **MVP COMPLETE — G3 REVIEWED + PASSED 2026-10-13** (review delegated by the human; every claim re-verified via standard suites + repo harnesses in a fresh sandbox; 4 findings found + repaired — see Decision Log; Post-MVP queue opened below)
 - State: MVP done; post-MVP queue open (rows in priority order)

@@ -1,7 +1,6 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 113 programs — ACCEPT 35 · ACCEPT-MANAGED 2 · REJECT 76 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 113 programs — ACCEPT 35 · ACCEPT-MANAGED 2 · REJECT 76 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 114 programs — ACCEPT 35 · ACCEPT-MANAGED 2 · REJECT 77 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -188,3 +187,9 @@ multiple values, and an untyped int constant into a `[]float64`. Regression
 pins live in `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).
 With this registration the corpus is **113 programs: ACCEPT 35 ·
 ACCEPT-MANAGED 2 · REJECT 76**.
+
+`go-numeric-conversion-shadow-reject.hy` — issue #728, SPEC-LANGUAGE LX2:
+reject a function named `float64` that would capture the lowering of `f64(n)`.
+Field and method controls remain accepted in `go_primitive_shadowing.rs`.
+This additive registration brings the corpus to **114 programs: ACCEPT 35 ·
+ACCEPT-MANAGED 2 · REJECT 77**.

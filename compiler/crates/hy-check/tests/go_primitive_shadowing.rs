@@ -67,3 +67,26 @@ fn legal_spec_conversions_and_other_identifiers_remain_accepted() {
     );
     assert_eq!(result.verdict, Verdict::Accept, "{:?}", result.diagnostics);
 }
+
+#[test]
+fn rejects_every_lowered_numeric_type_name() {
+    for name in [
+        "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+        "float32", "float64",
+    ] {
+        has_hygiene_error(&format!(
+            "fn main() {{ {name} := 3\n fmt.println({name}) }}\n"
+        ));
+    }
+}
+
+#[test]
+fn numeric_names_as_fields_and_methods_remain_accepted() {
+    let result = check(
+        "struct sample { float64 int }\n\
+         fn (s sample) int64() int { return s.float64 }\n\
+         fn main() { v := sample{float64: 3}\n\
+         fmt.println(v.float64, v.int64(), f64(7) / 2) }\n",
+    );
+    assert_eq!(result.verdict, Verdict::Accept, "{:?}", result.diagnostics);
+}
