@@ -42,6 +42,15 @@ fn main() {
     for v in lower..upper {
         fmt.println("typed {v}")
     }
+    for v in lower..127 {
+        fmt.println("const literal {v}")
+    }
+    for v in lower..(126 + 1) {
+        fmt.println("const expr {v}")
+    }
+    for v in lower..=127 {
+        fmt.println("inclusive const {v}")
+    }
     for v in upper..upper {
         fmt.println("unreachable {v}")
     }
@@ -96,6 +105,10 @@ fn main() {
             "call 1\n",
             "bound() ran 1 times\n",
             "typed 126\n",
+            "const literal 126\n",
+            "const expr 126\n",
+            "inclusive const 126\n",
+            "inclusive const 127\n",
         ),
         "the accepted Hybrid program must preserve evaluate-once range semantics"
     );

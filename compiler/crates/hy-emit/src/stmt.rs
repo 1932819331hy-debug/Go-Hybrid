@@ -7,6 +7,36 @@ use super::{to_go_name, BindingKind, EmitError, Emitter};
 use super::expr::ATOM;
 use super::shapes::lookup_conversion;
 
+// Hoisted Go integer constants must retain their untyped status. Using `:=`
+// defaults them to int, which cannot be compared to narrow typed range bounds.
+fn is_untyped_integer_const_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lit { kind: LitKind::Int(_), .. } => true,
+        Expr::Paren { inner, .. } => is_untyped_integer_const_expr(inner),
+        Expr::Unary { op: UnOp::Neg, operand, .. } => {
+            is_untyped_integer_const_expr(operand)
+        }
+        Expr::Binary { op, lhs, rhs, .. }
+            if matches!(
+                *op,
+                BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::BitOr
+                    | BinOp::BitXor
+                    | BinOp::BitAnd
+                    | BinOp::Shl
+                    | BinOp::Shr
+            ) =>
+        {
+            is_untyped_integer_const_expr(lhs) && is_untyped_integer_const_expr(rhs)
+        }
+        _ => false,
+    }
+}
+
 impl Emitter {
     pub fn emit_stmt(&mut self, s: &Stmt) -> Result<(), EmitError> {
         match s {
@@ -1760,7 +1790,14 @@ impl Emitter {
                 let lo_once = self.next_temp("hyLo");
                 let hi_once = self.next_temp("hyHi");
                 self.push(&format!("{} := {}", lo_once, lo_t));
-                self.push(&format!("{} := {}", hi_once, hi_t));
+                if is_untyped_integer_const_expr(hi) {
+                    // A Go `:=` defaults an untyped integer constant to int,
+                    // breaking valid comparisons with narrow typed bounds.
+                    // A local const retains its untyped constant semantics.
+                    self.push(&format!("const {} = {}", hi_once, hi_t));
+                } else {
+                    self.push(&format!("{} := {}", hi_once, hi_t));
+                }
                 if *inclusive {
                     // Issue #322: `for v := lo; v <= hi; v++` wraps past the
                     // type maximum (int8 127..=127 never stops). Emit a
