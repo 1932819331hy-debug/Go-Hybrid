@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 113 programs — ACCEPT 35 · ACCEPT-MANAGED 2 · REJECT 76 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 113 programs — ACCEPT 35 · ACCEPT-MANAGED 2 · REJECT 76 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 115 programs — ACCEPT 36 · ACCEPT-MANAGED 2 · REJECT 77 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 115 programs — ACCEPT 36 · ACCEPT-MANAGED 2 · REJECT 77 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -188,3 +188,42 @@ multiple values, and an untyped int constant into a `[]float64`. Regression
 pins live in `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).
 With this registration the corpus is **113 programs: ACCEPT 35 ·
 ACCEPT-MANAGED 2 · REJECT 76**.
+
+## Bounty-track registration — 2026-10-19: map-slot borrow as a call argument (LOAN-ESCAPE, Row 13)
+
+O3 spells the map slot loan as `n := &m[k]`: the borrow is the whole value of a
+binding, and that is the shape the emitter lowers to a copy-out / store-back.
+In an argument or operand position there is no binding to store back to, so the
+`&m[k]` was emitted as written and `go build` refused the program:
+
+```
+invalid operation: cannot take address of e.services["a"] (map index expression)
+```
+
+The checker accepted it, so the program was an accept with no lowering — the
+differential loop cannot reach a running binary from it. The rule now walks the
+whole expression in every position and reports HYB-E3104 unless the borrow is
+the root of a binding initializer or a re-binding assignment; parentheses are
+position-transparent (`n := (&m[k])` is a loan exactly like `n := &m[k]`).
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| map-slot-borrow-callarg-reject | REJECT | LOAN-ESCAPE | `HYB-E3104` | `touch(&e.services["a"])`: a map-slot borrow in argument position has no lowering, and the emitted Go does not build. The shape test is on the MAP (an index expression over a map is not addressable in Go) — slice and array elements (`&xs[0]`, `&a[0]`) are addressable and keep their lowering, so the rule cannot widen into those |
+| map-slot-borrow-paths-accept | ACCEPT | — | 0 diagnostics | the legal spellings in one program: `n := &e.services["a"]`, `m := (&e.services["b"])`, their store-backs, and the corrected call-argument pattern `tmp := e.services["a"]; touch(&tmp)`. Built and run (prints `3 4 7`) so the new rule cannot refuse a buildable program |
+
+The rule lives in `hy-check/src/addr_loan.rs` (`walk_addr_of_loan_projections`
+plus `map_slot_borrow_span` / `emit_map_slot_borrow_diag`), pinned by
+`hy-check/tests/slot_loan_callarg_positions.rs` (7 tests: the map-field and
+local-map argument forms, the argument borrow that overlaps a live loan, the
+base-store control, both legal binding positions, the parenthesised binding,
+the corrected copy pattern, and the array-element control). The reject was
+reproduced as a real `go build` failure first, and the accept fixture was
+checked, built and RUN before it was committed.
+
+Reproduction (branch tree, pinned rustc 1.99.0 / go1.26.9):
+`python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
+**115/115 verdict agreement, tripwire not fired**; `tools/differential_loop.py`
+reports **38/38 accept-side (build+run) + 77/77 reject-side**.
+
+With this registration the corpus is **115 programs: ACCEPT 36 ·
+ACCEPT-MANAGED 2 · REJECT 77** — main's 113 plus these two.
