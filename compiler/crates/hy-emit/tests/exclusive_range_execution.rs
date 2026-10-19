@@ -58,6 +58,28 @@ fn main() {
     for v in upper..upper {
         fmt.println("unreachable {v}")
     }
+
+    start := 0
+    update_start := fn() (int, error) {
+        start = 1
+        return 3, nil
+    }
+    for i in start..update_start()? {
+        fmt.println("try exclusive {i}")
+    }
+    start = 0
+    for i in start..=update_start()? {
+        fmt.println("try inclusive {i}")
+    }
+
+    starts := []int{0}
+    update_element := fn() (int, error) {
+        starts[0] = 1
+        return 3, nil
+    }
+    for i in starts[0]..update_element()? {
+        fmt.println("try indexed {i}")
+    }
 }
 "#;
 
@@ -114,6 +136,16 @@ fn main() {
             "named const 126\n",
             "inclusive const 126\n",
             "inclusive const 127\n",
+            "try exclusive 0\n",
+            "try exclusive 1\n",
+            "try exclusive 2\n",
+            "try inclusive 0\n",
+            "try inclusive 1\n",
+            "try inclusive 2\n",
+            "try inclusive 3\n",
+            "try indexed 0\n",
+            "try indexed 1\n",
+            "try indexed 2\n",
         ),
         "the accepted Hybrid program must preserve evaluate-once range semantics"
     );
