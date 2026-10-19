@@ -8,3 +8,4 @@
 - Wildcard holds (do NOT merge before window): #635 #637 #704 #709 #616 #446 #577 #572 #569 #566 #556 #545 #516 #505 #488 #480 #474 #464 #452 #405 #384 #381 #370 #379 #507 #412 #336; drafts #531/#465 stay with authors
 - CI quota healthy (4980/5000 after ~190 approvals this session); race tempo ~15 min/landing at peak — worktree-merge-push protocol held (two ort auto-merge traps caught: silent hunk deletion ×2, unpaired conflict marker ×2)
 - Next queue: wave tail + #711–#724 recon, then M1 posting (11-01), then $500 Wildcard Track ops
+- AUTOMATION (session-23): `tools/triage_bot.py` + daily Triage Board (issue #940) + label-only stale guard — review PR #941; queue = 191 open (70 land-candidates / 49 dups / 20 conflicts / 27 wildcard holds); session start = `scan` + `approve` per AUTOMATION.md
