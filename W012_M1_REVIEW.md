@@ -4,6 +4,16 @@
 
 **Status: W-012 is scheduled for the 2026-11-01 M1 review. It is not yet M1-awarded or merged.** This is an executable feasibility and falsification record for embedding the existing Rust checker, not a production toolchain replacement or completed IDE integration.
 
+### Completed upstream integration validation
+
+Integrated commit `61d5bd9b0655a7f6e638f010cab6093358aa6f51` merges the EOF fix `fd4f084` with upstream `f6e4d929`. Only `PLAN.md` and `STATUS.md` required manual conflict resolution; upstream progress and the scoped W-012 notes were both retained.
+
+The [new W012 validation](https://github.com/1932819331hy-debug/Go-Hybrid/actions/runs/39210700789) and [compiler CI](https://github.com/1932819331hy-debug/Go-Hybrid/actions/runs/39210708370) are **PASS**. Both checker artifacts were rebuilt from this integrated checkout: **61/61** expected corpus verdicts, **61/61** complete normalized native/WASM envelopes, `go test -race -count=1 ./...`, `go vet ./...`, compiler differential agreement, and the separate Go-only consumer all passed. The Go-only job confirms that it did not invoke `cargo` or `rustc`.
+
+The executed checkout `75b89aa59aed286c141dd8c87e2238c31f5d24e6` and published integration commit have the same complete tree, `880e3aee3dfc92dd10893e0d92f09439224707a4`. This final evidence update changes only the report and progress documents; the tested compiler, analyzer, regression tests, and workflows remain unchanged. The earlier 60-fixture branch and 113-fixture hosted merge below retain their own source labels.
+
+**Upstream status limit (2026-10-19 06:38 UTC):** PR #556 still reported `mergeable_state=dirty` and had no new-head upstream workflow run, even though its current base is a direct parent of the integration commit and GitHub's commit comparison reports `behind_by=0`. This unresolved GitHub status is not claimed as upstream approval or mergeability. Updating the upstream PR description also returned HTTP 403; the [fork validation record](https://github.com/1932819331hy-debug/Go-Hybrid/pull/9) and this report provide the current evidence.
+
 ### Latest correctness fix: preserve real EOF diagnostics
 
 The Hybrid lexer reports EOF on the empty final line after a newline. Go's ordinary token line table omits that line, so an unterminated block ending in LF or CRLF previously returned an analyzer infrastructure error instead of its real `HYB-E0002` diagnostic. Empty source likewise had no usable EOF position.

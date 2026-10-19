@@ -8,4 +8,4 @@
 - **W-022 intake acked** (carelessdept, #545 — preregistered, falsifier fired-as-predicted, clean governance); #505/#516 remain window-input-only (governance holds)
 - CI quota healthy post-fix; local main == origin/main; registration guard 27 files/24 patterns
 - Next queue (19-e recon, needs full verification): #504 (top) · #481/#554/#551/#549 · #430 over #431 · buildable cluster #475/#535/#536 · corpus pins #557/#503 · sendability #443/#534 · #502 dedupe; #524 rework-then-land; W-015 spike #379 rebase before 11-01
-- W-012 integration: upstream f6e4d929 + fd4f084d EOF fix and raw evidence; merged-tree native/WASM rebuild, parity and CI pending. Historical 60/60 belongs to 6dafd497 plus the EOF fix; see W012_M1_REVIEW.md. November 1 M1 decision remains pending.
+- W-012 integration 61d5bd9: rebuilt native/WASM verdict and full-envelope parity 61/61, Go race/vet/consumer and fork compiler CI PASS. Upstream GitHub still reports dirty despite current-base ancestry; M1 remains pending for November 1. Historical 60/60 and raw timings retain their source labels; see W012_M1_REVIEW.md.
