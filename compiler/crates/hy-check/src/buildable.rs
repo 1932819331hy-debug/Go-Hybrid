@@ -261,6 +261,10 @@ struct Collector<'a> {
     /// (`return v` in a `(value, error)` fn emits `return v, nil`, the E3
     /// sugar; corpus 13).
     fn_results_error_tail: bool,
+    /// Lexical nesting depth within loops (`for` / `loop`).
+    loop_depth: usize,
+    /// Lexical nesting depth within `select` statements.
+    select_depth: usize,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
@@ -282,6 +286,8 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results: Vec::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
+            loop_depth: 0,
+            select_depth: 0,
             defines: Vec::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
@@ -510,7 +516,11 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
+        let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
+        let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
+        self.loop_depth = outer_loop;
+        self.select_depth = outer_select;
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
@@ -717,6 +727,7 @@ impl<'a> Collector<'a> {
                 kind, body, span, ..
             } => {
                 self.push_scope();
+                self.loop_depth += 1;
                 match kind {
                     ForKind::While { cond } => {
                         self.expr(cond);
@@ -744,6 +755,7 @@ impl<'a> Collector<'a> {
                     ForKind::Infinite => {}
                 }
                 self.block_scoped(body);
+                self.loop_depth -= 1;
                 self.pop_scope();
             }
             Stmt::Return { values, span } => {
@@ -786,9 +798,41 @@ impl<'a> Collector<'a> {
                 // call's. `builtins.rs` owns the "must be a call" half.
                 self.check_defer_arity(call, *span);
             }
-            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Break { span, label } => {
+                if label.is_none() && self.loop_depth == 0 && self.select_depth == 0 {
+                    self.diags.push(
+                        Diagnostic::error(
+                            "HYB-E1002",
+                            self.path.clone(),
+                            *span,
+                            "break is not in a loop or select statement (HYB-E1002)",
+                        )
+                        .with_notes(vec![
+                            "plain `break` can only be used inside a `for` loop or `select` statement".to_string(),
+                            "move this statement inside a loop or select, or remove it".to_string(),
+                        ]),
+                    );
+                }
+            }
+            Stmt::Continue { span, label } => {
+                if label.is_none() && self.loop_depth == 0 {
+                    self.diags.push(
+                        Diagnostic::error(
+                            "HYB-E1002",
+                            self.path.clone(),
+                            *span,
+                            "continue is not in a loop (HYB-E1002)",
+                        )
+                        .with_notes(vec![
+                            "`continue` can only be used inside a `for` loop".to_string(),
+                            "move this statement inside a loop, or remove it".to_string(),
+                        ]),
+                    );
+                }
+            }
             Stmt::Block { block, .. } => self.block_scoped(block),
             Stmt::Select { arms, .. } => {
+                self.select_depth += 1;
                 for arm in arms {
                     self.push_scope();
                     match &arm.kind {
@@ -813,6 +857,7 @@ impl<'a> Collector<'a> {
                     self.block_scoped(&arm.body);
                     self.pop_scope();
                 }
+                self.select_depth -= 1;
             }
         }
     }
@@ -1061,7 +1106,11 @@ impl<'a> Collector<'a> {
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
+                let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
+                let outer_select = std::mem::replace(&mut self.select_depth, 0);
                 self.block_stmts(body);
+                self.loop_depth = outer_loop;
+                self.select_depth = outer_select;
                 self.fn_results = outer;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
