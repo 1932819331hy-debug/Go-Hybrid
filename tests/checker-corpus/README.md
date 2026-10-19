@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 113 programs — ACCEPT 35 · ACCEPT-MANAGED 2 · REJECT 76 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 113 programs — ACCEPT 35 · ACCEPT-MANAGED 2 · REJECT 76 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 115 programs** — ACCEPT 36 · ACCEPT-MANAGED 2 · REJECT 77 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 115 programs** — ACCEPT 36 · ACCEPT-MANAGED 2 · REJECT 77 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -186,5 +186,21 @@ generic whose members the kind model cannot see, so the rule must fail open),
 `defer` on a builtin and on a method, and `append` with a variadic spread,
 multiple values, and an untyped int constant into a `[]float64`. Regression
 pins live in `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).
-With this registration the corpus is **113 programs: ACCEPT 35 ·
+With this registration the corpus is **115 programs: ACCEPT 36 ·
 ACCEPT-MANAGED 2 · REJECT 76**.
+
+`type-name-in-value-position-reject.hy`,
+`type-name-in-value-position-controls-accept.hy` — issue #778: a **type name
+used where a value is required**. `x := holder` for a `struct holder` passes
+`hyb check` and the emitter prints the identifier verbatim, so `go build` fails
+with `holder (type) is not an expression`. Four value positions, plus a built-in
+type and a type alias. Nothing runs, so this is claim-precision (Row 13), not a
+soundness hole.
+
+The rule has to be narrow, and the accept control carries that weight: a type
+name is legal as a conversion CALLEE (`holder(1)`, `int(3.0)`) and as the FIRST
+argument of `new`/`make` (`new(bag)`), and a local binding shadows it. `new(bag)`
+is the control that matters most — an early version of the check walked that
+argument as a value and broke `n5-zero-map-first-write.hy`. The corpus caught it
+on the first run, which is exactly why the fixture pins it. Regression pins live
+in `hy-check/tests/type_name_in_value_position.rs` (13 tests).
