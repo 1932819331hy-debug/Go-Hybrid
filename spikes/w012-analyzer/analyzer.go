@@ -321,8 +321,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 		var fileToken *token.File
 		if pass.Fset != nil {
-			fileToken = pass.Fset.AddFile(filename, -1, len(content))
-			fileToken.SetLinesForContent([]byte(content))
+			fileToken = newHybridTokenFile(pass.Fset, filename, content)
 		}
 
 		// The structured engine preserves nonfatal warnings. go/analysis has
@@ -349,6 +348,16 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	}
 
 	return nil, nil
+}
+
+// Go's line table omits an empty final line, but the Hybrid lexer can report
+// EOF at 1:1 in an empty file or after a trailing newline. Reserve one byte
+// only in the token table so these positions retain their actual line and
+// column. The checker and hybridTokenPos still use the unmodified content.
+func newHybridTokenFile(fset *token.FileSet, filename, content string) *token.File {
+	file := fset.AddFile(filename, -1, len(content)+1)
+	file.SetLinesForContent(append([]byte(content), 0))
+	return file
 }
 
 // hybridTokenPos translates Rust lexer Unicode-scalar columns into Go's
