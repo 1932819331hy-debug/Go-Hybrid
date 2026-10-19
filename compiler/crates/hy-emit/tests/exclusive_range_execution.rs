@@ -48,8 +48,8 @@ fn main() {
     for v in lower..(126 + 1) {
         fmt.println("const expr {v}")
     }
-    const namedUpper = 127
-    for v in lower..namedUpper {
+    const named_upper = 127
+    for v in lower..named_upper {
         fmt.println("named const {v}")
     }
     for v in lower..=127 {
