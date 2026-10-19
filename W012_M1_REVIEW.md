@@ -4,9 +4,20 @@
 
 **Status: W-012 is scheduled for the 2026-11-01 M1 review. It is not yet M1-awarded or merged.** This is an executable feasibility and falsification record for embedding the existing Rust checker, not a production toolchain replacement or completed IDE integration.
 
-### Actual-main integration candidate — hosted validation pending
+### Completed integration with actual main
 
-The candidate merges branch head `0d1dbf711f7fb7c3147ca320c9435e86a8a6b0b1` with the actual upstream `main` ref, `aa4a9d91b5edecd2bff37eba23fdd7befe60bd56`. Only `STATUS.md` conflicted; its upstream status was retained with a scoped W-012 note. The EOF fix, raw measurement archive, WASM project, and upstream changes are preserved. This checkout contains **113 corpus fixtures**, but its native/WASM rebuild and hosted validation have **not yet run**. Earlier green checks do not establish correctness of this candidate.
+Integration commit `4149882c3f8cc5c636d559ec93cbb2f416098c65` merges branch head `0d1dbf711f7fb7c3147ca320c9435e86a8a6b0b1` with actual upstream `main`, `aa4a9d91b5edecd2bff37eba23fdd7befe60bd56`. Only `STATUS.md` conflicted; its upstream status was retained with a scoped W-012 note. The EOF fix, raw measurement archive, WASM project, and all upstream changes are preserved.
+
+Both repositories completed fresh validation of this integration:
+
+| CI repository | W012 validation | Compiler CI | Expected verdicts / complete native-WASM envelopes |
+| --- | --- | --- | --- |
+| Upstream | [39213961382 — PASS](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39213961382) | [39213961322 — PASS](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39213961322) | **113/113 / 113/113** |
+| Contributor fork | [39213960125 — PASS](https://github.com/1932819331hy-debug/Go-Hybrid/actions/runs/39213960125) | [39213960076 — PASS](https://github.com/1932819331hy-debug/Go-Hybrid/actions/runs/39213960076) | **113/113 / 113/113** |
+
+The actual upstream checkout was merge `1e8596ab3d3b5e561176f1d2e5b10242dbfeb512`; the fork checkout was merge `824347060429dc587758ec1540a1a32c1438e05f`. Both complete trees are **`9a27169f0bd8de82069b2a948730369b7f3182fd`**, identical to published head `4149882`. Each W012 workflow independently rebuilt native `hyb` and WASM from its own checkout before comparing the entire normalized diagnostic envelopes. Each also passed the complete `go test -race -count=1 ./...` suite, `go vet ./...`, gofmt enforcement, and its separate Go-only consumer, whose log confirms `cargo` and `rustc` were not invoked. Compiler tests, corpus verdicts, differential agreement, runtime hygiene, and examples passed in both compiler workflows. The EOF regressions are included in the full analyzer suite; its nonverbose logs report package results rather than individual test names.
+
+**Current upstream status (2026-10-19 07:13 UTC):** PR #556 reports `mergeable_state=clean`, `mergeable=true`, head `4149882`, and base `aa4a9d91`; the actual main ref remains `aa4a9d91`. The integration conflict and missing new-head upstream validation are resolved. The PR remains open and M1 remains pending for November 1. The earlier HTTP 403 limits editing the upstream PR description; it does not describe the result of these successful code-validation workflows. This completion update changes only `PLAN.md`, `STATUS.md`, and this report; the tested code, tests, workflows, and archived benchmark bytes remain unchanged.
 
 **Correction to the previous base claim (2026-10-19 06:54 UTC):** `f6e4d929` was the SHA reported by PR #556's `base` metadata, not the live `main` branch. Git transport and both upstream ref and branch APIs independently identify `main` as `aa4a9d91`. Comparing `0d1dbf7` with that actual ref reports 35 commits ahead and **251 behind**, with `f6e4d929` as their merge base. The earlier `behind_by=0` comparison was valid only against `f6e4d929`; it did not establish integration with live main. The PR still reported `dirty`, and its merge ref still pointed to historical `b49e0606`. The upstream repository can read the current head object, and the PR's 46 changed-file records match the comparison against its merge base, so neither an inaccessible head nor a different patch explains the discrepancy.
 
@@ -14,9 +25,7 @@ The candidate merges branch head `0d1dbf711f7fb7c3147ca320c9435e86a8a6b0b1` with
 
 Intermediate commit `61d5bd9b0655a7f6e638f010cab6093358aa6f51` joined the EOF fix `fd4f084` with `f6e4d929`. Its [W012 validation](https://github.com/1932819331hy-debug/Go-Hybrid/actions/runs/39210700789) and [compiler CI](https://github.com/1932819331hy-debug/Go-Hybrid/actions/runs/39210708370) passed. Both checker artifacts were rebuilt from that checkout: **61/61** expected corpus verdicts and complete normalized native/WASM envelopes, `go test -race -count=1 ./...`, `go vet ./...`, compiler differential agreement, and the separate Go-only consumer all passed. Executed merge `75b89aa59aed286c141dd8c87e2238c31f5d24e6` and `61d5bd9` share tree `880e3aee3dfc92dd10893e0d92f09439224707a4`.
 
-The later documentation head `0d1dbf7` also passed [W012 validation](https://github.com/1932819331hy-debug/Go-Hybrid/actions/runs/39211484374) and [compiler CI](https://github.com/1932819331hy-debug/Go-Hybrid/actions/runs/39211484338), with the same **61/61** correctness gates and a Go-only consumer that did not invoke `cargo` or `rustc`. Executed merge `0e39fd07cf1047f3dce5110f6c974dda9ab3808e` and published `0d1dbf7` share tree `7e44239def4ef5fe829c83359638da226a961cd9`. These results and the local **60/60** and earlier hosted **113/113** results below each belong to their stated checkout. The identical 113-fixture count in the new candidate does not reuse the older merge's test result or artifacts.
-
-**Upstream status limit:** No workflow on upstream PR #556 verified head `0d1dbf7`; fork CI is separate evidence. Updating the upstream PR description returned HTTP 403. The [fork validation record](https://github.com/1932819331hy-debug/Go-Hybrid/pull/9) and this report preserve the executed checks, without claiming upstream approval, mergeability, or M1 acceptance.
+The later documentation head `0d1dbf7` also passed [W012 validation](https://github.com/1932819331hy-debug/Go-Hybrid/actions/runs/39211484374) and [compiler CI](https://github.com/1932819331hy-debug/Go-Hybrid/actions/runs/39211484338), with the same **61/61** correctness gates and a Go-only consumer that did not invoke `cargo` or `rustc`. Executed merge `0e39fd07cf1047f3dce5110f6c974dda9ab3808e` and published `0d1dbf7` share tree `7e44239def4ef5fe829c83359638da226a961cd9`. These results and the local **60/60** and earlier hosted **113/113** results below each belong to their stated checkout. The new integration's 113/113 result comes from its own fresh builds and runs above; it does not reuse the older merge's result or artifacts.
 
 ### Latest correctness fix: preserve real EOF diagnostics
 
@@ -36,7 +45,7 @@ The branch's 60-fixture checkout is different from the 113-fixture synthetic mer
 
 ### Performance evidence preserved for M1 review
 
-The [committed raw measurement archive](spikes/w012-inprocess/validation-2026-10-19/README.md) preserves byte-identical JSONs from run 39195170609, with checked ZIP/file SHA-256 values and separate source, merge and base identities. These older measurements were not rerun or relabeled as timing results for the EOF fix. Original attachments expire October 26, before the November 1 review; the repository archive preserves them, and subsequent request/cache attachments now retain data for 30 days.
+The [committed raw measurement archive](spikes/w012-inprocess/validation-2026-10-19/README.md) preserves byte-identical JSONs from run 39195170609, with checked ZIP/file SHA-256 values and separate source, merge and base identities. The timing values displayed here remain that historical snapshot; later CI measurements have not replaced or relabeled the archived data. Original attachments expire October 26, before the November 1 review; the repository archive preserves them, and subsequent request/cache attachments now retain data for 30 days.
 
 | Question | Observed evidence | Boundary |
 | --- | --- | --- |

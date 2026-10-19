@@ -8,4 +8,4 @@
 - Wildcard holds (do NOT merge before window): #635 #637 #704 #709 #616 #446 #577 #572 #569 #566 #556 #545 #516 #505 #488 #480 #474 #464 #452 #405 #384 #381 #370 #379 #507 #412 #336; drafts #531/#465 stay with authors
 - CI quota healthy (4980/5000 after ~190 approvals this session); race tempo ~15 min/landing at peak — worktree-merge-push protocol held (two ort auto-merge traps caught: silent hunk deletion ×2, unpaired conflict marker ×2)
 - Next queue: wave tail + #711–#724 recon, then M1 posting (11-01), then $500 Wildcard Track ops
-- W-012 candidate integrates actual main aa4a9d91 with 0d1dbf7; candidate native/WASM rebuild and hosted validation are pending. Historical 60/60, 61/61, and 113/113 results belong to their recorded checkouts; see W012_M1_REVIEW.md.
+- W-012 actual-main integration 4149882: upstream and fork freshly rebuilt native/WASM verdict/full-envelope parity 113/113, Go race/vet/consumer and compiler CI PASS. PR #556 is clean/mergeable at 2026-10-19 07:13 UTC; M1 remains pending for November 1. Historical counts and raw timings retain their source labels; see W012_M1_REVIEW.md.
