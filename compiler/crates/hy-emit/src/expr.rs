@@ -442,7 +442,7 @@ impl Emitter {
             LitKind::Bool(b) => b.to_string(),
             LitKind::Str(s) => go_quote(s),
             LitKind::RawStr(s) => format!("`{}`", s),
-            LitKind::Char(c) => format!("{:?}", c),
+            LitKind::Char(c) => format!("'\\U{:08x}'", *c as u32),
             LitKind::Nil => "nil".to_string(),
         }
     }
