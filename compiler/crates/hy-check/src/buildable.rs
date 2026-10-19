@@ -2366,6 +2366,16 @@ impl<'a> Collector<'a> {
             return;
         };
         let tk = self.kind_of_place(target);
+        if op != AssignOp::Assign && op != AssignOp::Inc && op != AssignOp::Dec {
+            if targets.len() != 1 || values.len() != 1 {
+                self.emit_e1002(
+                    span,
+                    "compound assignment operator does not support multiple targets or values (HYB-E1002)".to_string(),
+                    "compound assignment operators (`+=`, `-=`, etc.) require exactly one target and one value; write separate statements or use `=` for parallel assignment",
+                );
+                return;
+            }
+        }
         match op {
             // #682 U16: plain `=` requires the value to be assignable to the
             // target. Only the single-target/single-value form is checked
@@ -2425,7 +2435,7 @@ impl<'a> Collector<'a> {
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch {
+                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -2435,26 +2445,33 @@ impl<'a> Collector<'a> {
                             tk.label(),
                             vk.label()
                         ),
-                        "`+=` requires two numeric values or two strings",
+                        "`+=` requires two numeric values or two strings of matching types",
                     );
                 }
             }
             AssignOp::SubAssign | AssignOp::MulAssign | AssignOp::DivAssign => {
                 let Some(val) = values.first() else { return };
                 let vk = self.kind_of_expr(val);
+                let op_sym = match op {
+                    AssignOp::SubAssign => "-=",
+                    AssignOp::MulAssign => "*=",
+                    _ => "/=",
+                };
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                    || kinds_conflict(&tk, &vk)
                 {
                     self.emit_e1002(
                         span,
                         format!(
-                            "invalid compound assignment on `{}` (type `{}`) and `{}` (type `{}`) (HYB-E1002)",
+                            "invalid compound assignment `{} {} {}` on `{}` and `{}` (HYB-E1002)",
                             target.render(),
-                            tk.label(),
+                            op_sym,
                             val.render(),
+                            tk.label(),
                             vk.label()
                         ),
-                        "`-=`, `*=`, `/=` require numeric operands",
+                        "`-=`, `*=`, `/=` require numeric operands of matching types",
                     );
                 }
             }
