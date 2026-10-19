@@ -177,6 +177,19 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+/// Symmetrical conflict check for equality operators (`==`, `!=`).
+///
+/// Untyped numeric constants adapt between integer and floating types
+/// in Go comparisons (`1 == 1.0` builds), so numeric families do not
+/// conflict. Across different families (e.g. numeric vs string/bool,
+/// pointer vs scalar), Go never permits comparison.
+fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
+    if a.is_numeric() && b.is_numeric() {
+        return false;
+    }
+    kinds_conflict(a, b) && kinds_conflict(b, a)
+}
+
 /// Is every part of this kind resolved? (#682 U2/U3)
 ///
 /// A "has no field or method" claim is only sound when the checker actually
@@ -2229,8 +2242,28 @@ impl<'a> Collector<'a> {
         let lk = self.kind_of_expr(lhs);
         let rk = self.kind_of_expr(rhs);
         match op {
-            // `==` / `!=` are checked by `emit_guard.rs` (HYB-E2006).
-            BinOp::Eq | BinOp::Ne => {}
+            // `==` / `!=`: incomparable shapes (slice, map, func) are rejected
+            // by `emit_guard.rs` (HYB-E2006). Mismatched concrete operand types
+            // are rejected here under HYB-E1002 (rule `BUILDABLE`).
+            BinOp::Eq | BinOp::Ne => {
+                let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
+                if !Checker::is_nil_literal(lhs)
+                    && !Checker::is_nil_literal(rhs)
+                    && equality_kinds_conflict(&lk, &rk)
+                {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` requires comparable operands of matching type, found `{}` and `{}` (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str,
+                            lk.label(),
+                            rk.label()
+                        ),
+                        "equality operators (`==`, `!=`) require operands of matching type",
+                    );
+                }
+            }
             // B4: `&&` and `||` require `bool` operands.
             BinOp::And | BinOp::Or => {
                 let op_str = if matches!(op, BinOp::And) { "&&" } else { "||" };
