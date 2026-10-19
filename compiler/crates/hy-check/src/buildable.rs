@@ -948,6 +948,7 @@ impl<'a> Collector<'a> {
             // The struct-field lookup below cannot catch it, because an
             // interface is not a struct — so reject the base explicitly.
             Expr::Field { base, name, span } => {
+                self.check_pointer_method_receiver(base, name, *span);
                 if matches!(self.kind_of_expr(base), OpKind::Interface) {
                     self.emit_e1002(
                         *span,
@@ -2842,30 +2843,6 @@ impl<'a> Collector<'a> {
                 // A method has no field entry, so resolve it before the field
                 // lookup: `x.bump()` must reach the arity check even though
                 // `bump` is not a struct field (#577 C9).
-                let head = Checker::base_named_type_str(name);
-                if let OpKind::Struct(Some(sn)) = &bk {
-                    let base_sn = Checker::base_named_type_str(sn);
-                    if let Some(m) = self
-                        .ck
-                        .method_decls
-                        .get(&(base_sn.to_string(), head.to_string()))
-                    {
-                        let ptr_recv = m.receiver.as_ref().is_some_and(|r| r.is_pointer);
-                        if ptr_recv && !self.is_addressable_value_receiver(base) {
-                            self.emit_e1002(
-                                span,
-                                format!(
-                                    "cannot call pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
-                                    name,
-                                    base.render(),
-                                    sn,
-                                    base.render()
-                                ),
-                                "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
-                            );
-                        }
-                    }
-                }
                 // pr-678: normalize through `struct_base_name` so a generic
                 // instantiation (`cache[int]`, `*lru_cache[k, v]`) resolves to
                 // the base-name key `method_decls` is indexed by — the same
@@ -3002,6 +2979,36 @@ impl<'a> Collector<'a> {
                 _ => false,
             },
             _ => false,
+        }
+    }
+
+    /// Check method selection too: task callees and bound method values do
+    /// not pass through the ordinary call-arity checker (#656).
+    fn check_pointer_method_receiver(&mut self, base: &Expr, name: &str, span: Span) {
+        let bk = self.kind_of_expr(base);
+        let head = Checker::base_named_type_str(name);
+        if let OpKind::Struct(Some(sn)) = &bk {
+            let base_sn = Checker::base_named_type_str(sn);
+            if let Some(m) = self
+                .ck
+                .method_decls
+                .get(&(base_sn.to_string(), head.to_string()))
+            {
+                let ptr_recv = m.receiver.as_ref().is_some_and(|r| r.is_pointer);
+                if ptr_recv && !self.is_addressable_value_receiver(base) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "cannot select pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
+                            name,
+                            base.render(),
+                            sn,
+                            base.render()
+                        ),
+                        "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
+                    );
+                }
+            }
         }
     }
 
