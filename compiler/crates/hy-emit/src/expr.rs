@@ -11,8 +11,7 @@
 use hy_syntax::*;
 
 use super::{
-    go_quote, is_package_root, special_member, to_go_name, BindingKind, EmitError, Emitter,
-    MemberSpecial,
+    go_quote, special_member, to_go_name, BindingKind, EmitError, Emitter, MemberSpecial,
 };
 
 use super::shapes::{
@@ -64,26 +63,36 @@ impl Emitter {
         expected: Option<&TypeExpr>,
     ) -> Result<String, EmitError> {
         if let Some(exp) = expected {
-            match e {
+            // `Paren` is semantically transparent: `({replicas: 2})` in a
+            // map-value or slice-elem slot still has to inherit the expected
+            // type's head, or the elided literal falls through to the
+            // "spell the type" refusal. Peeling here is safe — the parens are
+            // redundant in a Go element position and are dropped from output.
+            let mut lit = e;
+            while let Expr::Paren { inner, .. } = lit {
+                lit = inner;
+            }
+            match lit {
                 Expr::StructLit {
                     ty: None, fields, ..
                 } => {
                     let head = self.type_text(exp);
-                    let body = self.field_inits(fields)?;
+                    let body = self.struct_lit_body(exp, fields)?;
                     return Ok(format!("{}{{{}}}", head, body)); // atomic head
                 }
                 Expr::SliceLit {
                     elem: None, items, ..
-                } => {
-                    if let TypeExpr::Slice { elem, .. } = exp {
-                        let head = format!("[]{}", self.type_text(elem));
+                } => match exp {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        let head = self.type_text(exp);
                         let mut parts = Vec::new();
                         for i in items {
                             parts.push(self.emit_expr_exp(i, 0, Some(elem))?);
                         }
                         return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                     }
-                }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -93,6 +102,18 @@ impl Emitter {
     fn top_prec(&self, e: &Expr) -> u8 {
         match e {
             Expr::Binary { op, .. } => bin_prec(*op),
+            Expr::Call { callee, args, .. } if args.len() == 1 => {
+                if let Expr::Field { base, name, .. } = callee.as_ref() {
+                    if let Expr::Ident { name: pkg, .. } = base.as_ref() {
+                        if self.is_unshadowed_pkg_root(pkg)
+                            && matches!(special_member(pkg, name), Some(MemberSpecial::Duration(_)))
+                        {
+                            return bin_prec(BinOp::Mul);
+                        }
+                    }
+                }
+                ATOM
+            }
             _ => ATOM,
         }
     }
@@ -104,6 +125,11 @@ impl Emitter {
                     return Err(EmitError::unsupported(
                         "`none` outside a return (MVP-0 lowers `return none` against the declared option result)",
                     ));
+                }
+                let (head, type_args) = split_type_args(name);
+                if let Some(ta) = type_args {
+                    let translated = self.translate_type_args_suffix(ta);
+                    return Ok(format!("{}{}", head, translated));
                 }
                 Ok(name.clone())
             }
@@ -121,7 +147,11 @@ impl Emitter {
 
             Expr::Unary { op, operand, .. } => {
                 let o = self.emit_expr(operand, ATOM)?;
-                Ok(format!("{}{}", op.render(), o))
+                if matches!(op, UnOp::Neg) && o.starts_with('-') {
+                    Ok(format!("-({})", o))
+                } else {
+                    Ok(format!("{}{}", op.render(), o))
+                }
             }
 
             Expr::AddrOf { operand, .. } => {
@@ -174,7 +204,7 @@ impl Emitter {
                 let b = self.emit_expr(base, ATOM)?;
                 // Package-qualified members register the import.
                 if let Expr::Ident { name: root, .. } = base.as_ref() {
-                    if is_package_root(root) {
+                    if self.is_unshadowed_pkg_root(root) {
                         self.use_package(root);
                     }
                 }
@@ -185,8 +215,13 @@ impl Emitter {
 
             Expr::StructLit { ty, fields, .. } => {
                 if let Some(t) = ty {
+                    if matches!(t, TypeExpr::Chan { .. }) {
+                        return Err(EmitError::unsupported(
+                            "channel type is not a value expression — construct a channel with `make(chan T)`",
+                        ));
+                    }
                     let head = self.type_text(t);
-                    let body = self.field_inits(fields)?;
+                    let body = self.struct_lit_body(t, fields)?;
                     Ok(format!("{}{{{}}}", head, body))
                 } else {
                     Err(EmitError::unsupported(
@@ -196,6 +231,14 @@ impl Emitter {
             }
 
             Expr::SliceLit { elem, items, .. } => {
+                if let Some((_, inner_elem, arr_ty)) = e.as_array_lit() {
+                    let head = self.type_text(arr_ty);
+                    let mut parts = Vec::new();
+                    for i in items {
+                        parts.push(self.emit_expr_exp(i, 0, Some(inner_elem))?);
+                    }
+                    return Ok(format!("{}{{{}}}", head, parts.join(", ")));
+                }
                 let head = match elem {
                     Some(t) => format!("[]{}", self.type_text(t)),
                     None => self.infer_slice_head(items)?,
@@ -288,8 +331,29 @@ impl Emitter {
                 // scoped: removed again when the literal ends. Conv-typed
                 // params bind through the DESCRIPTOR's shape key (the Go
                 // spelling in the signature is not the table's key).
-                let known: Vec<String> = self.bindings.keys().cloned().collect();
+                let saved_scope = self.save_scope();
+                for r in results {
+                    if let Some(n) = &r.name {
+                        if n != "_" {
+                            self.shadow_local_name(n);
+                            if matches!(r.ty, TypeExpr::Pointer { .. }) {
+                                self.pointer_vars.insert(n.clone());
+                            }
+                            if let Some(kind) = self.binding_kind_of_ty(&r.ty) {
+                                self.bindings.insert(n.clone(), kind);
+                            }
+                            self.register_var_ty(n, &r.ty);
+                        }
+                    }
+                }
                 for (i, p) in params.iter().enumerate() {
+                    if p.name != "_" {
+                        self.shadow_local_name(&p.name);
+                        if matches!(p.ty, TypeExpr::Pointer { .. }) {
+                            self.pointer_vars.insert(p.name.clone());
+                        }
+                    }
+                    self.register_var_ty(&p.name, &p.ty);
                     let desc_kind = conv
                         .and_then(|c| c.params.get(i))
                         .filter(|_| untyped_params.contains(&i))
@@ -319,6 +383,7 @@ impl Emitter {
                 // an outer loop's count cannot bless a closure-nested label.
                 let saved_for_depth = self.for_depth;
                 self.for_depth = 0;
+                let saved_loop_labels = std::mem::take(&mut self.loop_labels);
                 let mut out = String::from("func(");
                 out.push_str(&rendered_params);
                 out.push_str(") ");
@@ -341,14 +406,18 @@ impl Emitter {
                 // literal renders inline, its body keeps normal indents.
                 let main_body = std::mem::take(&mut self.body);
                 let saved_loans = std::mem::take(&mut self.loan_frames);
-                self.emit_block_body(&body.stmts)?;
+                let saved_inherit = self.branch_inherit.take();
+                let body_res = self.emit_block_body(&body.stmts);
+                self.branch_inherit = saved_inherit;
                 self.loan_frames = saved_loans;
+                self.loop_labels = saved_loop_labels;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
                 self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;
-                self.bindings.retain(|k, _| known.contains(k));
+                self.restore_scope(saved_scope);
+                body_res?;
                 out.push_str(&closure_body);
                 for _ in 0..self.indent {
                     out.push('\t');
@@ -418,6 +487,27 @@ impl Emitter {
             }
         }
         Ok((format_str, args))
+    }
+
+    /// A struct literal's keyed fields plus, for a user struct, the N5
+    /// allocation of every map-carrying field the literal leaves at its
+    /// zero value (`bag{}` → `bag{counts: map[string]int{}}`, issue #645).
+    fn struct_lit_body(
+        &mut self,
+        ty: &TypeExpr,
+        fields: &[FieldInit],
+    ) -> Result<String, EmitError> {
+        let body = self.field_inits(fields)?;
+        let extra = self.n5_missing_fields(ty, fields);
+        if extra.is_empty() {
+            return Ok(body);
+        }
+        let mut parts = Vec::new();
+        if !body.is_empty() {
+            parts.push(body);
+        }
+        parts.extend(extra);
+        Ok(parts.join(", "))
     }
 
     fn field_inits(&mut self, fields: &[FieldInit]) -> Result<String, EmitError> {
@@ -540,6 +630,34 @@ impl Emitter {
         self.member_name(base, name)
     }
 
+    fn unwrap_parens(mut e: &Expr) -> &Expr {
+        while let Expr::Paren { inner, .. } = e {
+            e = inner;
+        }
+        e
+    }
+
+    fn is_user_struct_expr(&self, e: &Expr) -> bool {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.var_struct.contains_key(name),
+            Expr::StructLit { .. } => true,
+            Expr::AddrOf { operand, .. } => self.is_user_struct_expr(operand),
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: vn, .. } = Self::unwrap_parens(base) {
+                    if let Some(sn) = self.var_struct.get(vn) {
+                        if let Some(fields) = self.struct_fields.get(sn) {
+                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                                return self.struct_fields.contains_key(fty.as_str());
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn emit_call(
         &mut self,
         callee: &Expr,
@@ -548,6 +666,13 @@ impl Emitter {
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
         if matches!(callee, Expr::Ident { name, .. } if name == "make") {
             return self.emit_make(args);
+        }
+        // --- new(T) whose zero value allocates maps (N5, issue #645) ---
+        let is_new = matches!(callee, Expr::Ident { name, .. } if name == "new");
+        if is_new && !self.local_vars.contains("new") && !self.fn_shapes.contains_key("new") {
+            if let Some(alloc) = self.n5_new(args) {
+                return Ok(alloc);
+            }
         }
 
         // --- package-qualified calls ---
@@ -559,10 +684,10 @@ impl Emitter {
                 // package root, so its call used to fall through this whole
                 // block, emit verbatim, and die in the toolchain with
                 // `undefined: flate2`.
-                if lookup_unbound_crate(pkg).is_some() {
+                if !self.local_vars.contains(pkg) && lookup_unbound_crate(pkg).is_some() {
                     return Err(EmitError::unbound_crate(pkg));
                 }
-                if is_package_root(pkg) {
+                if self.is_unshadowed_pkg_root(pkg) {
                     return self.emit_pkg_call(pkg, name, args);
                 }
             }
@@ -602,13 +727,17 @@ impl Emitter {
 
         // --- slice `.pop()` → prelude helper (example 08's stack shape) ---
         if let Expr::Field { base, name, .. } = callee {
-            if name == "pop" {
-                if let Expr::Ident { .. } = base.as_ref() {
-                    let b = self.emit_expr(base, ATOM)?;
+            if name == "pop" && args.is_empty() && !self.is_user_struct_expr(base) {
+                let peeled = Self::unwrap_parens(base);
+                if matches!(
+                    peeled,
+                    Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
+                ) {
+                    let b = self.emit_expr(peeled, ATOM)?;
                     return Ok(format!("hy_pop(&{})", b));
                 }
                 return Err(EmitError::unsupported(
-                    "`.pop()` on a non-local base (MVP-0 supports plain slice locals)",
+                    "`.pop()` on a non-addressable base (requires a slice variable, field, or element)",
                 ));
             }
         }
@@ -617,10 +746,13 @@ impl Emitter {
         //     `lru_cache_new[string, int](2)` (Go has no dotted idents) ---
         if let Expr::Field { base, name, .. } = callee {
             if let Expr::Ident { name: root, .. } = base.as_ref() {
-                if !is_package_root(root) && !self.bindings.contains_key(root) {
+                if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) {
                     let (head, type_args) = split_type_args(name);
                     let full = format!("{}.{}", root, head);
                     if self.assoc_fns.contains(&full) {
+                        let translated_ta = type_args
+                            .map(|ta| self.translate_type_args_suffix(ta))
+                            .unwrap_or_default();
                         let mut parts = Vec::new();
                         for a in args {
                             parts.push(self.emit_call_arg(a)?);
@@ -629,12 +761,23 @@ impl Emitter {
                             "{}_{}{}({})",
                             root,
                             head,
-                            type_args.unwrap_or_default(),
+                            translated_ta,
                             parts.join(", ")
                         ));
                     }
                 }
             }
+        }
+
+        let mut bare_callee = callee;
+        while let Expr::Paren { inner, .. } = bare_callee {
+            bare_callee = inner;
+        }
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "make") {
+            return self.emit_make(args);
+        }
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "new") && args.len() == 1 {
+            return self.emit_new(&args[0]);
         }
 
         // --- a SPEC primitive conversion: `u8(300)` -> `uint8(300)`.
@@ -662,6 +805,41 @@ impl Emitter {
                 let a = self.emit_call_arg(&args[0])?;
                 return Ok(format!("{}({})", go, a));
             }
+            if name == "len" && args.len() == 1 && self.is_set_expr(&args[0].value) {
+                let a = self.emit_call_arg(&args[0])?;
+                return Ok(format!("{}.len()", a));
+            }
+            if name == "delete" && args.len() == 2 && self.is_set_expr(&args[0].value) {
+                let s = self.emit_call_arg(&args[0])?;
+                let v = self.emit_call_arg(&args[1])?;
+                return Ok(format!("{}.remove({})", s, v));
+            }
+        }
+
+        // --- a slice type-as-value CALLED = a conversion: `[]byte("abc")`
+        //     parses as SliceLit{elem, items: []} + a postfix call (the
+        //     standing type-as-value encoding) and used to fall into the
+        //     generic path below as `[]byte{}("abc")` — go:
+        //     `invalid operation: cannot call []byte{}` — so even the
+        //     legal Go conversion `[]byte(s)` never built (issue #228
+        //     family C). Emit the conversion form directly. ---
+        if let Expr::SliceLit {
+            elem: Some(t),
+            items,
+            ..
+        } = callee
+        {
+            if items.is_empty() && callee.as_array_lit().is_none() {
+                let mut parts = Vec::new();
+                for a in args {
+                    parts.push(self.emit_call_arg(a)?);
+                }
+                return Ok(format!(
+                    "[]{}({})",
+                    self.type_text(t),
+                    parts.join(", ")
+                ));
+            }
         }
 
         // --- everything else: callee(args...) ---
@@ -671,7 +849,8 @@ impl Emitter {
         // pre-registered corpus).
         let mut ptr_params: Vec<bool> = Vec::new();
         if let Expr::Ident { name, .. } = callee {
-            if let Some((_, _, _, params)) = self.fn_shapes.get(name.as_str()) {
+            let (fn_head, _) = split_type_args(name);
+            if let Some((_, _, _, params)) = self.fn_shapes.get(fn_head) {
                 ptr_params = params.iter().map(|p| p.is_some()).collect();
             }
         }
@@ -709,7 +888,11 @@ impl Emitter {
         let Some(first) = args.first() else {
             return Err(EmitError::unsupported("`make` with no type argument"));
         };
-        let ty_text = match &first.value {
+        let mut first_val = &first.value;
+        while let Expr::Paren { inner, .. } = first_val {
+            first_val = inner;
+        }
+        let ty_text = match first_val {
             Expr::StructLit {
                 ty: Some(t),
                 fields,
@@ -719,7 +902,7 @@ impl Emitter {
                 elem: Some(t),
                 items,
                 ..
-            } if items.is_empty() => {
+            } if items.is_empty() && first.value.as_array_lit().is_none() => {
                 format!("[]{}", self.type_text(t))
             }
             Expr::MapLit {
@@ -730,6 +913,7 @@ impl Emitter {
             } if entries.is_empty() => {
                 format!("map[{}]{}", self.type_text(key), self.type_text(value))
             }
+            Expr::Ident { name, .. } => name.clone(),
             other => {
                 return Err(EmitError::unsupported(format!(
                     "`make` first argument must be a type; got value `{}`",
@@ -742,6 +926,36 @@ impl Emitter {
             parts.push(self.emit_call_arg(a)?);
         }
         Ok(format!("make({})", parts.join(", ")))
+    }
+
+    fn emit_new(&mut self, arg: &CallArg) -> Result<String, EmitError> {
+        let mut val = &arg.value;
+        while let Expr::Paren { inner, .. } = val {
+            val = inner;
+        }
+        let ty_text = match val {
+            Expr::StructLit {
+                ty: Some(t),
+                fields,
+                ..
+            } if fields.is_empty() => self.type_text(t),
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() => format!("[]{}", self.type_text(t)),
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } if entries.is_empty() => format!("map[{}]{}", self.type_text(key), self.type_text(value)),
+            Expr::Ident { name, .. } => super::shapes::go_primitive_name(name)
+                .unwrap_or(name.as_str())
+                .to_string(),
+            other => self.emit_expr(other, 0)?,
+        };
+        Ok(format!("new({})", ty_text))
     }
 
     /// The rust-crate call lowering (M6): `sha3.digest256(w)` →
@@ -861,7 +1075,9 @@ impl Emitter {
             return Err(EmitError::unbound_crate(pkg));
         }
 
-        self.use_package(pkg);
+        if pkg != "errors" || name != "wrap" {
+            self.use_package(pkg);
+        }
 
         // --- conversion targets (Batch E): `http.handler(fn(w, r) { … })`
         //     → `http.HandlerFunc(func(w http.ResponseWriter, r *http.
@@ -936,6 +1152,24 @@ impl Emitter {
                     }
                     let n = self.emit_call_arg(&args[0])?;
                     Ok(format!("time.Duration({}) * time.{}", n, unit))
+                }
+                MemberSpecial::ErrorsWrap => {
+                    self.use_package("fmt");
+                    if args.len() != 2 {
+                        return Err(EmitError::unsupported(
+                            "errors.wrap takes exactly two arguments (err, msg)",
+                        ));
+                    }
+                    let (err_arg, msg_arg) = if args[0].name.as_deref() == Some("msg")
+                        || args[1].name.as_deref() == Some("err")
+                    {
+                        (&args[1], &args[0])
+                    } else {
+                        (&args[0], &args[1])
+                    };
+                    let err = self.emit_call_arg(err_arg)?;
+                    let msg = self.emit_call_arg(msg_arg)?;
+                    Ok(format!("fmt.Errorf(\"%s: %w\", {}, {})", msg, err))
                 }
             };
         }

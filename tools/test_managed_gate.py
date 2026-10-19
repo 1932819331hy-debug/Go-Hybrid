@@ -23,6 +23,62 @@ def block(reason):
 
 
 class ManagedGateTests(unittest.TestCase):
+    def test_missing_source_arguments_fail_without_changing_baseline(self):
+        script = pathlib.Path(__file__).with_name('managed_gate.py')
+        for rebaseline in (False, True):
+            for existing in (False, True):
+                with self.subTest(rebaseline=rebaseline, existing=existing), \
+                        tempfile.TemporaryDirectory() as directory:
+                    baseline = pathlib.Path(directory) / 'baseline.json'
+                    original = b'{"version": 1, "blocks": {"reviewed.hy:1": {"reason": "reviewed", "category": "other"}}}\n'
+                    if existing:
+                        baseline.write_bytes(original)
+                    args = ['--rebaseline'] if rebaseline else []
+                    result = subprocess.run(
+                        [sys.executable, str(script), *args, 'unused-hyb', str(baseline)],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertNotIn('managed gate: PASS', result.stdout)
+                    self.assertIn('source', result.stderr)
+                    if existing:
+                        self.assertEqual(baseline.read_bytes(), original)
+                    else:
+                        self.assertFalse(baseline.exists())
+
+    def test_explicit_source_without_managed_blocks_can_clear_baseline(self):
+        # A real scan yielding zero blocks must stay legal: this represents
+        # removal of the last hatch, unlike omitting the scan inputs entirely.
+        for rebaseline in (False, True):
+            with self.subTest(rebaseline=rebaseline), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                source = root / 'plain.hy'
+                source.write_text('fn main() {}', encoding='utf-8')
+                baseline = root / 'baseline.json'
+                # The reviewed block belongs to the scanned program, so an
+                # explicit zero-block scan may clear it (pr-434 scope rule:
+                # unaudited programs' blocks would be preserved instead).
+                original = {'version': 1, 'blocks': {f'{source}:1': block('reviewed')}}
+                baseline.write_text(json.dumps(original), encoding='utf-8')
+                args = ['managed_gate.py']
+                if rebaseline:
+                    args.append('--rebaseline')
+                args.extend(['hyb', str(baseline), str(source)])
+                # Current audit() contract: the managed report carries the
+                # reported count and the block list must be consistent with it.
+                report = subprocess.CompletedProcess(
+                    [], 0,
+                    json.dumps({'summary': {'managed': {'managed_blocks': 0, 'blocks': []}}}),
+                    '')
+                with patch.object(sys, 'argv', args), \
+                        patch.object(gate.subprocess, 'run', return_value=report) as checker, \
+                        contextlib.redirect_stdout(io.StringIO()) as output:
+                    gate.main()
+                self.assertEqual(checker.call_count, 1)
+                expected = {'version': 1, 'blocks': {}} if rebaseline else original
+                self.assertEqual(json.loads(baseline.read_text()), expected)
+                self.assertIn('rebaseline:' if rebaseline else 'managed gate: PASS', output.getvalue())
+
     def audit(self, source, blocks, returncode=0):
         with tempfile.TemporaryDirectory() as directory:
             prog = pathlib.Path(directory) / 'test.hy'
@@ -190,6 +246,78 @@ class ManagedGateTests(unittest.TestCase):
                     else:
                         self.assertEqual(baseline.read_bytes(), original)
 
+    def assert_invalid_baseline(self, original, diagnostic):
+        # A bad inventory must fail before scanning or rewriting it in either
+        # mode, even when the supplied source and checker are otherwise valid.
+        with tempfile.TemporaryDirectory() as directory:
+            prog = pathlib.Path(directory) / 'test.hy'
+            prog.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            for rebaseline in (False, True):
+                with self.subTest(rebaseline=rebaseline):
+                    baseline.write_bytes(original)
+                    argv = ['managed_gate.py'] + (['--rebaseline'] if rebaseline else [])
+                    argv += ['hyb', str(baseline), str(prog)]
+                    output = io.StringIO()
+                    with patch.object(gate.sys, 'argv', argv), \
+                         patch.object(gate, 'audit') as audit, \
+                         contextlib.redirect_stdout(output):
+                        with self.assertRaises(SystemExit) as error:
+                            gate.main()
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertIn(diagnostic, output.getvalue())
+                    self.assertNotIn('managed gate: PASS', output.getvalue())
+                    audit.assert_not_called()
+                    self.assertEqual(baseline.read_bytes(), original)
+
+    def test_malformed_baseline_json_fails_closed(self):
+        for original in (b'', b'{not json}', b'{"version": 1, ', b'\xff'):
+            with self.subTest(original=original):
+                self.assert_invalid_baseline(original, 'malformed baseline JSON')
+
+    def test_non_object_baseline_fails_closed(self):
+        for value in ([], 'string', 123, None, True):
+            with self.subTest(value=value):
+                self.assert_invalid_baseline(
+                    json.dumps(value).encode(), 'baseline must be a JSON object')
+
+    def test_non_object_baseline_blocks_fails_closed(self):
+        for value in ([], 'invalid', 42, None, True):
+            with self.subTest(value=value):
+                self.assert_invalid_baseline(
+                    json.dumps({'version': 1, 'blocks': value}).encode(),
+                    'baseline blocks must be a JSON object')
+
+    def test_missing_baseline_and_legacy_object_allow_real_empty_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prog = pathlib.Path(directory) / 'test.hy'
+            prog.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            for original in (None, b'{"version": 1}'):
+                for rebaseline in (False, True):
+                    with self.subTest(original=original, rebaseline=rebaseline):
+                        baseline.unlink(missing_ok=True)
+                        if original is not None:
+                            baseline.write_bytes(original)
+                        argv = ['managed_gate.py'] + (['--rebaseline'] if rebaseline else [])
+                        argv += ['hyb', str(baseline), str(prog)]
+                        output = io.StringIO()
+                        with patch.object(gate.sys, 'argv', argv), \
+                             patch.object(gate, 'audit', return_value={}) as audit, \
+                             contextlib.redirect_stdout(output):
+                            gate.main()
+                        audit.assert_called_once_with('hyb', str(prog))
+                        if rebaseline:
+                            self.assertEqual(json.loads(baseline.read_bytes()),
+                                             {'version': 1, 'blocks': {}})
+                            self.assertTrue(baseline.read_bytes().endswith(b'\n'))
+                        elif original is None:
+                            self.assertFalse(baseline.exists())
+                        else:
+                            self.assertEqual(baseline.read_bytes(), original)
+                        self.assertIn('rebaseline:' if rebaseline else 'managed gate: PASS',
+                                      output.getvalue())
+
 
 class AtomicBaselineTests(unittest.TestCase):
     def setUp(self):
@@ -197,7 +325,10 @@ class AtomicBaselineTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.baseline = self.root / "baseline.json"
-        self.original = b'{"version": 1, "blocks": {"reviewed.hy:1": {"reason": "reviewed"}}}\n'
+        # The stale reviewed block belongs to the audited program (new.hy),
+        # so the rebaseline below is a full replacement under the pr-434
+        # scope rule (unaudited programs' blocks are preserved instead).
+        self.original = b'{"version": 1, "blocks": {"new.hy:0": {"reason": "reviewed"}}}\n'
         self.baseline.write_bytes(self.original)
         self.baseline.chmod(0o640)
         self.current = {"new.hy:1": {"reason": "new", "category": "other"}}
@@ -266,6 +397,88 @@ gate.main()
         self.assertNotIn("rebaseline:", result.stdout)
         self.assertEqual(list(self.root.iterdir()), [self.baseline])
 
+
+
+    def test_zero_programs_fails_closed_without_modifying_baseline(self):
+        # pr-434: zero program arguments (e.g. an unmatched shell glob) must
+        # not pass the gate or touch the baseline, in either mode. The guard
+        # landed with pr-113 reports on stderr; this pins the fail-closed
+        # contract end to end.
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            original = json.dumps({'version': 1, 'blocks': {
+                'unrelated.hy:10': block('reviewed')}}).encode()
+            for rebaseline in (False, True):
+                with self.subTest(rebaseline=rebaseline):
+                    baseline.write_bytes(original)
+                    argv = ['managed_gate.py'] + (['--rebaseline'] if rebaseline else [])
+                    argv += ['hyb', str(baseline)]
+                    output = io.StringIO()
+                    errors = io.StringIO()
+                    with patch.object(gate.sys, 'argv', argv), \
+                         contextlib.redirect_stdout(output), \
+                         contextlib.redirect_stderr(errors):
+                        with self.assertRaises(SystemExit) as error:
+                            gate.main()
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertIn('GATE ERROR', output.getvalue() + errors.getvalue())
+                    self.assertIn('at least one source file', errors.getvalue())
+                    self.assertNotIn('managed gate: PASS', output.getvalue())
+                    self.assertNotIn('rebaseline:', output.getvalue())
+                    self.assertEqual(baseline.read_bytes(), original)
+
+    def test_partial_program_audit_preserves_unrelated_baseline_blocks(self):
+        # pr-434: auditing a subset must not report unrelated baseline blocks
+        # as removed, and must not wipe them in --rebaseline.
+        with tempfile.TemporaryDirectory() as directory:
+            prog_a = pathlib.Path(directory) / 'a.hy'
+            prog_a.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            original = {
+                'version': 1,
+                'blocks': {
+                    f'{prog_a}:1': block('a_old'),
+                    'unrelated.hy:10': block('unrelated_stay'),
+                }
+            }
+            baseline.write_text(json.dumps(original))
+            report = {'summary': {'managed': {'managed_blocks': 0}}}
+            result = subprocess.CompletedProcess([], 0, json.dumps(report), '')
+            output = io.StringIO()
+            argv = ['managed_gate.py', 'hyb', str(baseline), str(prog_a)]
+            with patch.object(gate.sys, 'argv', argv), \
+                 patch.object(gate.subprocess, 'run', return_value=result), \
+                 contextlib.redirect_stdout(output):
+                gate.main()
+            out = output.getvalue()
+            self.assertIn(f'managed block removed (allowed): {prog_a}:1', out)
+            self.assertNotIn('unrelated.hy', out)
+            self.assertIn('managed gate: PASS', out)
+
+    def test_rebaseline_subset_preserves_unrelated_baseline_blocks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prog_a = pathlib.Path(directory) / 'a.hy'
+            prog_a.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            original = {
+                'version': 1,
+                'blocks': {
+                    f'{prog_a}:1': block('a_old'),
+                    'unrelated.hy:10': block('unrelated_stay'),
+                }
+            }
+            baseline.write_text(json.dumps(original))
+            report = {'summary': {'managed': {'managed_blocks': 0}}}
+            result = subprocess.CompletedProcess([], 0, json.dumps(report), '')
+            output = io.StringIO()
+            argv = ['managed_gate.py', '--rebaseline', 'hyb', str(baseline), str(prog_a)]
+            with patch.object(gate.sys, 'argv', argv), \
+                 patch.object(gate.subprocess, 'run', return_value=result), \
+                 contextlib.redirect_stdout(output):
+                gate.main()
+            saved = json.loads(baseline.read_text())['blocks']
+            self.assertNotIn(f'{prog_a}:1', saved)
+            self.assertEqual(saved.get('unrelated.hy:10'), block('unrelated_stay'))
 
 
 if __name__ == '__main__':
