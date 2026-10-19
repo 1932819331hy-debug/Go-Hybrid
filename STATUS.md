@@ -8,3 +8,5 @@
 - **Wildcard:** W-004 spike **PR #507** (phantom witnesses: 0 allocs = baseline; P4 falsifier fired — captures share storage; converges with #370) · W-019 (#462)/W-020 (#417) intake-acked in-window · W-021 born (#375, spike #488's 3 descriptors.md hazards = P0-adjacent) · W-018 triaged-accepted (2 artifacts) · 9 gated spike CI runs approved · M1 verdicts 2026-11-01 in #365 (21 rows, 10 artifacts)
 - CI quota healthy (zero zero-job failures); zero-job recurrence stays closed
 - Standing work: M1 verdict drafts for #365 (none written yet — the real next task); 24 unverified LAND-READY PRs; W-002/3/6/8/10/11/13/16 outreach; #379 W-015 spike needs rebase repair (walk.rs/parse_all.rs/VERDICTS.md)
+- W-012 contributor follow-up (2026-10-19): EOF diagnostic mapping fixed; same-checkout Go race/vet and native/WASM parity 60/60 pass; original 100-edit raw evidence archived for November 1. See W012_M1_REVIEW.md; M1 remains pending.
+

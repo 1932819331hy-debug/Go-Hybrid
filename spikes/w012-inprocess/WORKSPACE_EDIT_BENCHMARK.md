@@ -11,7 +11,7 @@ Purpose: independently measure the corrected public Go/Wazero request path again
 3. Evaluate the changed file with (A) native hyb check PATH --json (new subprocess and JSON decoder each request), and (B) public Engine.Check(source) (in-process Wazero with already-compiled module and disposable guest per request). Alternate request order on odd and even edits.
 4. Fail if the native exit code is inconsistent with a valid parsed envelope; if the registered expected verdict fails; or if modeled diagnostic codes, counts, severities, Tier-0 rules or source spans differ. Timing never overrides correctness.
 5. Record all 200 durations plus p50/p90/p95/p99/mean, separate cold WASM compilation/init, SHA-256 hashes and sizes of the native and WASM artifacts, and basic host metadata.
-6. CI saves the raw JSON as an upload-artifact attachment for the exact workflow run, with 7-day retention. Performance figures must remain associated with their exact tested commit and host.
+6. CI saves the raw JSON as an upload-artifact attachment for the exact workflow run, with 30-day retention for request samples and cross-process cache timings. Performance figures must remain associated with their exact tested commit and host.
 
 ## Reproduction
 
@@ -37,7 +37,8 @@ All runs built their own checker artifacts from the tested pull-request checkout
 | 7d0a942 / [39172638567](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39172638567) | 1.466 ms | 2.902 ms | not measured | Public WASM path slower |
 | 9c04ee6 / [39173168608](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39173168608) | 1.458 ms | 2.648 ms | 1.789 ms | Reuse reduces guest creation overhead, but remains slower than native |
 | 2e0a2b8 / [39174111506](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39174111506) | 1.485 ms | 2.613 ms | 1.792 ms | Earlier validated request-proxy sample favored native |
-| 6719fa6 / [39175130478](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39175130478) | 1.493 ms | 2.620 ms | 1.799 ms | Latest validated 25-file/100-edit sample: public path still slower |
+| 6719fa6 / [39175130478](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39175130478) | 1.493 ms | 2.620 ms | 1.799 ms | Earlier validated 25-file/100-edit sample: public path still slower |
+| Source 6dafd497, tested merge b49e060 / [39195170609](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39195170609) | 1.150 ms | 2.096 ms | 1.451 ms | Preserved pre-EOF-fix hosted snapshot; public path still slower |
 
 For the 9c04ee6 100-edit sample, the native subprocess finished faster in **all 100 paired trials** than both the public in-process path and the experimental reused guest. The experimental reused guest finished faster than the public in-process path in all 100 pairs. This is limited to one fixture, one Linux job and sequential execution, not a representative IDE workload.
 
@@ -46,3 +47,10 @@ For the 9c04ee6 100-edit sample, the native subprocess finished faster in **all 
 **Go consumer without a Rust compiler invocation:** In [run 39174111506](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39174111506), a separate workflow job downloaded the precompiled WASM from the Rust-capable build job, compiled the Go hybvet executable with no Rust installation step, and executed failing-then-passing .hy source tests while cargo and rustc command names were explicitly poisoned. This verifies an execution boundary without *invoking* the Rust toolchain. It is not proof that the hosted VM contains no Rust installation, nor that a ready-to-install distribution has been shipped.
 
 **Decision consequence:** Do not replace the production per-check disposable instance on these measurements. The proposed long-lived reused guest remains an isolated sequential research control; cancellation and concurrent ownership must be validated before any production pooling. For batch runs, native CLI is currently the faster measured path. A packaged Go host plus shipped WASM and a protected compilation cache is a plausible deployment benefit, but gopls integration, CI Docker footprint, broad-workload latency and RSS remain unproven.
+
+## Durable review evidence
+
+The [2026-10-19 archive](validation-2026-10-19/README.md) contains the byte-identical 100-edit JSON and both two-process compilation-cache JSONs from run 39195170609, with source/merge/base identities and verified artifact/file SHA-256 digests. The original attachments expire on October 26, before the November 1 M1 review. The committed archive remains available after that expiration. New workflow samples and cache timings retain artifacts for 30 days; this setting does not extend existing attachments.
+
+These preserved measurements precede the EOF diagnostic-position fix. They are not a rebenchmark or correctness evidence for a later source revision. The EOF fix changes token-table mapping, not the checker input or the public Engine.Check request boundary; its correctness is verified separately by the analyzer regressions.
+

@@ -122,7 +122,7 @@ jobs:
           name: w012-cross-process-cache-timings
           path: ${{ runner.temp }}/w012-cold-cache-*.json
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 30
       - name: Publish raw request latency samples
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -130,7 +130,7 @@ jobs:
           name: w012-request-latency-raw
           path: ${{ runner.temp }}/w012-edit-benchmark.json
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 30
 
   go-only-consumer:
     needs: analyzer-parity
@@ -180,3 +180,4 @@ jobs:
           cp ../../tests/checker-corpus/09-a3-map-slot-valid.hy ./testpkg/sibling.hy
           "$RUNNER_TEMP/hybvet" vet ./testpkg
           echo "Go+prebuilt WASM check PASS; cargo/rustc not invoked."
+

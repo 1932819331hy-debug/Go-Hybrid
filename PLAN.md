@@ -44,6 +44,12 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 | 5 errors | per pre-registered table | **PASS all**: E1 2.58 ns/0 allocs (two-word HyResult), E2 0 allocs, E3 1 alloc, E4 identity + documented chain loss, E5 abort contract verified | adopt HyResult + sentinel table + wrap-on-demand |
 | 6 ownership usability | 10 programs, annotation count | **PASS**: 0 annotations / 0 managed / 0 outside-model (strictest reading; hand-trace); A1–A8 ambiguities + corpus gap recorded | Tier-0 real for MVP corpus; Polonius-style engine + rustc CI oracle |
 
+## Contributor validation — W-012 EOF diagnostics (2026-10-19)
+
+- An unterminated block ending in LF/CRLF is a real HYB-E0002 at the logical EOF line, which Go's unpadded token table omitted. Preserve EOF with token-table-only padding; source bytes and coordinate bounds remain unchanged.
+- Exact branch source 6dafd497 plus the fix, pinned Go 1.26.9 / Rust 1.99.0 / Node 24.19.0: old analyzer fails four EOF cases and passes two controls; fixed cases, full Go race suite and vet pass; freshly built same-checkout native/WASM complete envelope and verdict parity are 60/60. Hosted synthetic merges have a separate corpus and are not interchangeable artifact sources.
+- Preserve the original run 39195170609 raw measurements with checked archive/file digests under spikes/w012-inprocess/validation-2026-10-19; extend future timing artifacts to 30 days. See W012_M1_REVIEW.md for evidence boundaries and the still-pending November 1 M1 review.
+
 ## Task List
 - [x] Installer checksum download must fail closed | Missing checksum fetch previously installed and executed an unverified archive; now aborts before extraction or replacement. Six offline installer tests added to quick CI; two regression tests fail on base `34525ee`, all six pass locally on Windows/Git Bash. Upstream CI/reward review pending (2026-10-15).
 - [x] Session 1 scaffold | done = files exist, pushed | lead | done
@@ -251,3 +257,4 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 ## Contributor validation: managed report shape (2026-10-15)
 - Base c09e992: a checker exiting 0 with `{}` is treated as a successful empty audit; `--rebaseline` can erase a previously reviewed inventory. Require an object report, a nonnegative integer managed_blocks count, a list when blocks is present, matching count, and valid block categories. Preserve Rust's omitted-empty-blocks encoding. This is tooling robustness against malformed checker output, not a demonstrated compiler soundness vulnerability.
 - Before fix: 26 failing and 14 erroring subcases in the new malformed-report test; valid empty-report control and 11 existing tests pass. After fix: all 13 managed-gate tests pass, including 40 malformed report/mode combinations. A separate real-subprocess stub returning `{}` reproduces original PASS/baseline erasure and patched exit 2/byte preservation. Existing report fixtures now include the counter emitted by the Rust serializer. `git diff --check` passes. Rust/Go suites were not run locally (pinned toolchains unavailable); upstream CI remains required. Main's existing ci.yml line 35 indentation failure is covered by #172/#199 and outside this change.
+

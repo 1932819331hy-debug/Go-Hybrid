@@ -1,22 +1,39 @@
-# W012 M1 evidence: current validation and historical snapshot
+# W012 M1 evidence: current validation and historical snapshots
 
 ## Reviewer decision brief (2026-10-19 JST)
 
-**Status: W-012 is scheduled for the 2026-11-01 wildcard M1 review, not yet M1-awarded or merged.** W-011 is adjacent (Go checking surface), not the same experiment (in-process delivery boundary). This PR is an executable feasibility and falsification record, **not** a request to replace the production toolchain.
+**Status: W-012 is scheduled for the 2026-11-01 M1 review. It is not yet M1-awarded or merged.** This is an executable feasibility and falsification record for embedding the existing Rust checker, not a production toolchain replacement or completed IDE integration.
 
-| Question the reviewer should ask | Evidence at current validated code head | Honest boundary |
+### Latest correctness fix: preserve real EOF diagnostics
+
+The Hybrid lexer reports EOF on the empty final line after a newline. Go's ordinary token line table omits that line, so an unterminated block ending in LF or CRLF previously returned an analyzer infrastructure error instead of its real `HYB-E0002` diagnostic. Empty source likewise had no usable EOF position.
+
+The analyzer now reserves one byte only in its token position table. The checker still receives the original source, and coordinate validation still uses the original content length. The new regressions verify LF, CRLF, repeated trailing newlines, the no-final-newline control, Unicode scalar-to-byte conversion, empty source, and rejection of positions beyond EOF.
+
+**Executed local validation:** Go 1.26.9, Rust 1.99.0 and Node 24.19.0, using source `6dafd4973114fe35c77133db89c19828a0ad07b6` plus the EOF fix. Both native and WASM checker artifacts were built from that same checkout.
+
+- The unmodified analyzer fails four new EOF cases; the no-final-newline and Unicode controls pass.
+- The fixed analyzer passes all six cases.
+- `go test -race -count=1 ./...` and `go vet ./...` pass.
+- `node test_wasm_parity.js` reports **60/60** corpus verdict agreement and **60/60** complete normalized native/WASM envelopes for this branch checkout.
+- `gofmt` and whitespace checks are clean.
+
+The branch's 60-fixture checkout is different from the 113-fixture synthetic merge used in earlier hosted CI. The earlier [validation run 39195170609](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39195170609) tested merge `b49e0606be4746d90cb5399ebdb04166024676b5`, not the bare branch head. Mixing a WASM artifact from that merge with a native binary from the branch produces invalid parity evidence because their compiler trees differ. Only the same-checkout results above establish this fix's local correctness; new hosted checks remain separate evidence.
+
+### Performance evidence preserved for M1 review
+
+The [committed raw measurement archive](spikes/w012-inprocess/validation-2026-10-19/README.md) preserves byte-identical JSONs from run 39195170609, with checked ZIP/file SHA-256 values and separate source, merge and base identities. These older measurements were not rerun or relabeled as timing results for the EOF fix. Original attachments expire October 26, before the November 1 review; the repository archive preserves them, and subsequent request/cache attachments now retain data for 30 days.
+
+| Question | Observed evidence | Boundary |
 | --- | --- | --- |
-| Can the existing Rust checker run in-process without a semantic rewrite? | `hy-wasm` + Wazero + Go `analysis.Analyzer`; native/WASM **113/113** complete normalized envelopes and corpus verdicts | A prebuilt WASM distribution is not shipped |
-| Is fail-closed behavior preserved across the boundary? | Fault injection, active cancellation, strict JSON checks, anonymous concurrent guest instances, source-read failures, input snapshots, and strict `Pass.ReadFile` contract tests pass under `go test -race` | Production RSS/leak bounds and pathological rapid edit/revert races are not formally proved |
-| Does this remove Go editor/compiler integration costs? | On-disk `.hy` source positions with a cache-safe `hybvet vet` wrapper | Stock gopls cannot load this analyzer dynamically or track unsaved `.hy` buffers |
-| Does this already beat the native CLI at real request latency? | Latest 25-file/100-edit *request-proxy* validation: native **1.493 ms** p50, public `Engine.Check` **2.620 ms**, experimental sequential reuse **1.799 ms** | The public WASM path is **slower** on the tested Linux host. This is not gopls, unsaved-buffer editing, or an end-to-end IDE test; do not cite the historical 18.7× claim. |
-| Does `TypesInfo` erase the opaque-foreign boundary? | Go types supply structural facts | They do **not** supply Hybrid ownership, borrows, or mutation-effect contracts |
+| Can the Rust checker run in-process? | Wazero executes the existing WASM checker; same-checkout native/WASM parity passes | A ready-to-install WASM distribution is not shipped |
+| Is the public request path faster? | Preserved 25-file/100-edit snapshot: native **1.150 ms** p50; public `Engine.Check` **2.096 ms**; experimental sequential reuse **1.451 ms** | Public WASM was slower on that host; this is an after-write changed-file request proxy, not editor or whole-package latency |
+| Does a compilation cache help cold startup? | Two distinct Go processes recorded **395.981 ms → 12.217 ms** with matching artifacts | This does not improve hot checks or cache analysis verdicts |
+| Can Go run a precompiled checker without invoking Rust? | The separate Go-consumer job in run 39195170609 passed with cargo/rustc command names deliberately blocked | The hosted VM may still contain Rust; no installer or CI-image-footprint result is claimed |
+| Are source diagnostics preserved? | Structured Engine results preserve warnings; the vet adapter reports errors only, including actual EOF positions | Stock gopls and unsaved `.hy` buffer integration remain unimplemented |
 
-**Current reproducible CI for the last code-bearing head:** [W-012 validation 39175130478](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39175130478) and [compiler CI 39175130569](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39175130569) **PASS** at `6719fa65e6777deaf6bd0d0d6915c2511db9c5ed`: **113/113** corpus verdicts and complete normalized native/WASM envelopes; Go race suite and vet pass, Go formatting is enforced, and the separately provisioned Go consumer runs the precompiled WASM without invoking cargo/rustc. Cross-process opt-in Wazero compilation caching measured **623.789 ms → 20.105 ms** for cold `GetEngine` initialization on the same hosted runner; it does **not** improve hot per-check latency. See [reproduction protocol and raw workflow evidence](spikes/w012-inprocess/WORKSPACE_EDIT_BENCHMARK.md). A shipped installer, stock-gopls integration, end-to-end IDE latency, Docker footprint, and long-term memory bounds remain unproven.
+**M1 design decision:** keep one Rust semantic implementation with a WASM adapter and retain native CLI for measured batch performance. The remaining product questions are editor integration, distribution, broad workloads, memory/RSS and CI footprint. Historical 18.7× and sub-millisecond prototype figures below must not be cited as performance of the current public path.
 
-**Interpretation of the current 100-edit sample:** It is a sequential changed-file *request-path proxy* on one hosted Linux runner, not a gopls/LSP or whole-workspace editor benchmark. The public Wazero wrapper remains slower than the native process for this sample; the experimental reused instance is not the public concurrent/cancellation-safe strategy. Raw artifacts belong to [run 39175130478](https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39175130478). Earlier timing figures below remain historical evidence, not current performance claims.
-
-**Design decision for M1:** preserve one Rust semantic implementation with a WASM adapter instead of an unbounded Go checker rewrite; retain native CLI for one-shot checking because it remains faster in the measured request path. The 25-file/100-edit source-update proxy is now reproduced, but it is not equivalent to an editor's keystroke-to-diagnostic or full 25-file package reanalysis. The defensible new advantage is **portable precompiled checker delivery plus optional protected filesystem compilation caching**, not a demonstrated hot-path speedup. M2 still requires the original IDE and CI-image-footprint measurements or published falsification. An M1 award remains a separate maintainer decision.
 
 ---
 
@@ -387,3 +404,4 @@ go vet -vettool=/tmp/hybvet ./testpkg
 ```
 
 Benchmark provenance: all canonical 100-run timing figures above are the recorded snapshot at `b3d73c2c3f211f69e856abd089adc4cad9a21f50`, before this closeout added envelope validation. They were not rerun or relabeled as measurements of the changed wrapper. The added validation cost and end-to-end editor latency remain unmeasured. The parity script's per-file timings are separate and are not the canonical benchmark. Long-duration memory behavior remains unproven. Stock-gopls plugins, unsaved `.hy` buffers, and a completed standalone LSP are not demonstrated.
+
