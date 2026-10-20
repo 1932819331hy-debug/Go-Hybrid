@@ -2238,6 +2238,42 @@ impl<'a> Collector<'a> {
                         }
                         return;
                     }
+                    if !res.is_empty()
+                        && self.fn_results_error_tail
+                        && res.len() + 1 == want.len()
+                    {
+                        for (r, w) in res.iter().zip(want.iter()) {
+                            self.report_return_conflict(r, w, values[0].span());
+                        }
+                        return;
+                    }
+                    let (nr, nw) = (res.len(), want.len());
+                    let msg = match (nw, nr) {
+                        (0, _) => format!(
+                            "`return` supplies `{}` with {nr} result{} in a function that declares no results — Go refuses `too many return values` (HYB-E1002)",
+                            callee.render(),
+                            if nr == 1 { "" } else { "s" }
+                        ),
+                        (_, 0) => format!(
+                            "`return` supplies `{}` which returns no value (void) but the signature declares {nw} result{} — Go refuses `{} (no value) used as value in return statement` (HYB-E1002)",
+                            callee.render(),
+                            if nw == 1 { "" } else { "s" },
+                            callee.render()
+                        ),
+                        _ => format!(
+                            "`return` supplies `{}` with {nr} result{} but the signature declares {nw} result{} — Go refuses `{} return values` (HYB-E1002)",
+                            callee.render(),
+                            if nr == 1 { "" } else { "s" },
+                            if nw == 1 { "" } else { "s" },
+                            if nr < nw { "not enough" } else { "too many" }
+                        ),
+                    };
+                    self.emit_e1002(
+                        values[0].span(),
+                        msg,
+                        "a return statement must supply exactly the results the signature declares",
+                    );
+                    return;
                 }
             }
         }
