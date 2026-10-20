@@ -40,28 +40,28 @@ VERDICT_RE = re.compile(
     r"^//\s*EXPECTED-VERDICT:\s*(ACCEPT-MANAGED|ACCEPT|REJECT)\b", re.M
 )
 
-# (path, regex with one capture group holding the claimed total, what it is)
+# (path, regex with capture groups holding each claimed total, what it is)
 TOTAL_SURFACES: list[tuple[str, str, str]] = [
     (
         "compiler/crates/hy-syntax/tests/parse_all.rs",
         # anchored on the corpus wording: the same file also asserts the
         # spike-6 count with the identical `files.len(), N,` shape.
-        r"files\.len\(\),\s*(\d+),\s*\"expected exactly \d+ corpus programs\"",
+        r"files\.len\(\),\s*(\d+),\s*\"expected exactly (\d+) corpus programs\"",
         "the corpus parse-all assertion",
     ),
     (
         ".github/workflows/ci.yml",
-        r"verdict agreement \((\d+)/\d+ \+ tripwire\)",
+        r"verdict agreement \((\d+)/(\d+) \+ tripwire\)",
         "the corpus CI step label",
     ),
     (
         "Makefile",
-        r"corpus verdicts \((\d+)/\d+\)",
+        r"corpus verdicts \((\d+)/(\d+)\)",
         "the `make corpus` help line",
     ),
     (
         "README.md",
-        r"checker corpus (\d+)/\d+",
+        r"checker corpus (\d+)/(\d+)",
         "the README corpus claim",
     ),
     (
@@ -102,7 +102,7 @@ def check_total_surfaces(root: Path, total: int) -> list[str]:
             problems.append(f"{rel}: missing ({label})")
             continue
         text = path.read_text(encoding="utf-8")
-        claims = re.findall(pattern, text, re.M)
+        claims = list(re.finditer(pattern, text, re.M))
         if not claims:
             problems.append(
                 f"{rel}: no corpus count found for {label} — "
@@ -110,8 +110,9 @@ def check_total_surfaces(root: Path, total: int) -> list[str]:
             )
             continue
         for claim in claims:
-            if int(claim) != total:
-                problems.append(f"{rel}: says {claim}, corpus holds {total} ({label})")
+            if any(int(count) != total for count in claim.groups()):
+                stated = " / ".join(claim.groups())
+                problems.append(f"{rel}: says {stated}, corpus holds {total} ({label})")
     return problems
 
 
