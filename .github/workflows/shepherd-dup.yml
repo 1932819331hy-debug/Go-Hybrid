@@ -53,19 +53,18 @@ jobs:
         run: python3 tools/shepherd.py gate --require dry-run
 
       - name: Scan + classify (fresh clusters)
-        run: python3 tools/triage_bot.py scan --out /tmp/triage --jobs 8 --token-env GITHUB_TOKEN
+        run: python3 tools/triage_bot.py --token-env GITHUB_TOKEN scan --out /tmp/triage --jobs 8
 
       - name: W4 duplicate-cluster pass
         run: |
           if [ "${{ github.event.inputs.phase_b || 'false' }}" = "true" ]; then
             python3 tools/shepherd.py gate --require live
-            python3 tools/shepherd.py dup --from-scan /tmp/triage/TRIAGE.json \
-              --phase-b --token-env GITHUB_TOKEN
+            python3 tools/shepherd.py --token-env GITHUB_TOKEN dup --from-scan /tmp/triage/TRIAGE.json \
+              --phase-b
           else
-            python3 tools/shepherd.py dup --from-scan /tmp/triage/TRIAGE.json \
-              --token-env GITHUB_TOKEN
+            python3 tools/shepherd.py --token-env GITHUB_TOKEN dup --from-scan /tmp/triage/TRIAGE.json
           fi
 
       - name: W7 session log
         if: always()
-        run: python3 tools/shepherd.py log --event dup-pass --note "phase A/B pass complete" --token-env GITHUB_TOKEN
+        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event dup-pass --note "phase A/B pass complete"

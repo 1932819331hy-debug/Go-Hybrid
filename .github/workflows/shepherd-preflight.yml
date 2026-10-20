@@ -113,7 +113,7 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR_NUM/labels" \
             -d "{\"labels\": [\"$LABEL\"]}" > /dev/null
-          python3 tools/shepherd.py comment --pr "$PR_NUM" \
-            --marker shepherd:preflight --body-file /tmp/preflight.md --token-env GITHUB_TOKEN
-          python3 tools/shepherd.py log --event preflight --pr "$PR_NUM" \
-            --verdict "$VERDICT" --token-env GITHUB_TOKEN
+          python3 tools/shepherd.py --token-env GITHUB_TOKEN comment --pr "$PR_NUM" \
+            --marker shepherd:preflight --body-file /tmp/preflight.md
+          python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event preflight --pr "$PR_NUM" \
+            --verdict "$VERDICT"

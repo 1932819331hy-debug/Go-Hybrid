@@ -51,14 +51,14 @@ jobs:
         run: python3 tools/shepherd.py gate --require read
 
       - name: Scan + classify every open PR
-        run: python3 tools/triage_bot.py scan --out /tmp/triage --jobs 8 --token-env GITHUB_TOKEN
+        run: python3 tools/triage_bot.py --token-env GITHUB_TOKEN scan --out /tmp/triage --jobs 8
 
       - name: Rewrite the board issue in place
-        run: python3 tools/triage_bot.py board --post --from-scan /tmp/triage/TRIAGE.json --token-env GITHUB_TOKEN
+        run: python3 tools/triage_bot.py --token-env GITHUB_TOKEN board --post --from-scan /tmp/triage/TRIAGE.json
 
       - name: Sync structural bot:* labels from the buckets
-        run: python3 tools/shepherd.py sync-labels --from-scan /tmp/triage/TRIAGE.json --token-env GITHUB_TOKEN
+        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN sync-labels --from-scan /tmp/triage/TRIAGE.json
 
       - name: W7 session log
         if: always()
-        run: python3 tools/shepherd.py log --event board-refresh --verdict "ok" --note "board + labels refreshed" --token-env GITHUB_TOKEN
+        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event board-refresh --verdict "ok" --note "board + labels refreshed"

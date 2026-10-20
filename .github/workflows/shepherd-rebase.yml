@@ -50,11 +50,11 @@ jobs:
       - name: Rebase candidates (mutations only in live mode)
         run: |
           if [ "$(python3 tools/shepherd.py gate --require live >/dev/null 2>&1; echo $?)" = "0" ]; then
-            python3 tools/shepherd.py rebase --token-env GITHUB_TOKEN
+            python3 tools/shepherd.py --token-env GITHUB_TOKEN rebase
           else
-            python3 tools/shepherd.py rebase --dry --token-env GITHUB_TOKEN
+            python3 tools/shepherd.py --token-env GITHUB_TOKEN rebase --dry
           fi
 
       - name: W7 session log
         if: always()
-        run: python3 tools/shepherd.py log --event rebase-tick --note "rebase shepherd tick" --token-env GITHUB_TOKEN
+        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event rebase-tick --note "rebase shepherd tick"
