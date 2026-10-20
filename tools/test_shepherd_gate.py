@@ -117,5 +117,22 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+
+class BoardW7Verdict(unittest.TestCase):
+    """A failed W1 board/label refresh must never emit an OK W7 receipt."""
+
+    def test_always_log_uses_actual_prior_job_status(self):
+        path = Path(__file__).resolve().parent.parent / ".github/workflows/shepherd-board.yml"
+        workflow = path.read_text(encoding="utf-8")
+        match = re.search(
+            r"- name: W7 session log\s*\n\s*if: always\(\)\s*\n\s*run: ([^\n]+)",
+            workflow,
+        )
+        self.assertIsNotNone(match, "W7 must still run after failures")
+        command = match.group(1)
+        self.assertIn('--verdict "${{ job.status }}"', command)
+        self.assertNotIn("board + labels refreshed", command)
+
+
 if __name__ == "__main__":
     unittest.main()
