@@ -976,8 +976,22 @@ impl<'a> Collector<'a> {
                     self.read(n);
                 }
             }
-            PlaceKind::Index { .. } | PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } => {
-                self.place_read(p)
+            PlaceKind::Index { base, .. } => {
+                let bk = self.kind_of_place(base);
+                if matches!(bk, OpKind::Str) {
+                    self.emit_e1002(
+                        p.span,
+                        format!(
+                            "cannot assign to string index `{}` — strings are immutable (HYB-E1002)",
+                            p.render()
+                        ),
+                        "strings in Go are immutable; string elements cannot be assigned or updated",
+                    );
+                }
+                self.place_read(p);
+            }
+            PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } => {
+                self.place_read(p);
             }
         }
     }
@@ -2848,13 +2862,34 @@ impl<'a> Collector<'a> {
             return;
         }
         // For slices, arrays, and strings, the index must be an integer.
+        self.check_single_value_position(index, "an index expression", /*binding_position=*/ false);
+        if let OpKind::Map(key_kind, _) = bk {
+            if **key_kind != OpKind::Unknown
+                && *ik != OpKind::Unknown
+                && kinds_conflict(key_kind, ik)
+            {
+                self.emit_e1002(
+                    index.span(),
+                    format!(
+                        "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
+                        index.render(),
+                        ik.label(),
+                        key_kind.label(),
+                        bk.label()
+                    ),
+                    "map index expression must match the map's key type",
+                );
+            }
+            return;
+        }
+        // For slices, arrays, and strings, the index must be an integer.
         let needs_int_idx = matches!(bk, OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str)
             || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
         // A fixed-size array carries its length in the type, so a constant index
-        // past that length is a compile-time error in Go (`a[3]` on `[2]int`).
+        // past that length is a compile-time error in Go ([3] on [2]int).
         let is_array = matches!(bk, OpKind::Array(_))
             || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
-        if needs_int_idx && !matches!(ik, OpKind::Unknown | OpKind::Int) {
+        if needs_int_idx && !matches!(ik, OpKind::Unknown | OpKind::Int | OpKind::Void) {
             self.emit_e1002(
                 index.span(),
                 format!(
@@ -2954,8 +2989,9 @@ impl<'a> Collector<'a> {
         let mut hi_const: Option<i128> = None;
         for (idx, bound_opt) in [lo, hi].into_iter().enumerate() {
             let Some(bound) = bound_opt else { continue };
+            self.check_single_value_position(bound, "a slice bound", /*binding_position=*/ false);
             let k = self.kind_of_expr(bound);
-            if !matches!(k, OpKind::Unknown | OpKind::Int) {
+            if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Void) {
                 self.emit_e1002(
                     bound.span(),
                     format!(
