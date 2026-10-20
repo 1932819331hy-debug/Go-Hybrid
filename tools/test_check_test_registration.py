@@ -192,6 +192,46 @@ class RegistrationTests(unittest.TestCase):
                 self.assertEqual(guard.registered_discoveries(
                     "python3 -m unittest discover -s tools " + " ".join(options)), [])
 
+    def test_help_and_unknown_options_do_not_register_unexecuted_tests(self):
+        root, _ = self.build("", ["tools/test_real.py"])
+        (root / "tools/test_real.py").write_text(
+            "raise AssertionError('unexecuted test sentinel')\n", encoding="utf-8")
+        for options, expected_exit in ((("--help",), 0), (("-h",), 0),
+                                       (("-v", "--help"), 0), (("--bogus",), 2),
+                                       (("-p", "test_real.py", "--help"), 0),
+                                       (("-p", "test_real.py", "--bogus"), 2)):
+            with self.subTest(options=options):
+                command = [sys.executable, "-m", "unittest", "discover", "-s", "tools", *options]
+                actual = subprocess.run(command, cwd=root, capture_output=True,
+                                        text=True, timeout=15)
+                self.assertEqual(actual.returncode, expected_exit, actual.stderr)
+                self.assertNotIn("unexecuted test sentinel", actual.stderr)
+                workflow = "python3 -m unittest discover -s tools " + " ".join(options)
+                self.assertEqual([rel for rel, _ in guard.unregistered(root, workflow)],
+                                 ["tools/test_real.py"])
+
+    def test_attached_short_options_match_real_discovery_and_last_value_wins(self):
+        root, _ = self.build("", ["tools/test_only.py", "tools/test_other.py"])
+        for name in ("only", "other"):
+            (root / f"tools/test_{name}.py").write_text(
+                "import unittest\nclass Real(unittest.TestCase):\n"
+                f"    def test_failure(self): self.fail('{name} sentinel')\n",
+                encoding="utf-8")
+        for options in (("-s", "tools", "-ptest_only.py"),
+                        ("-stools", "-p=test_only.py"),
+                        ("-s=tools", "-ttools", "-ptest_only.py"),
+                        ("-s", "tools", "-p", "test_other.py", "-ptest_only.py")):
+            with self.subTest(options=options):
+                command = [sys.executable, "-m", "unittest", "discover", *options]
+                actual = subprocess.run(command, cwd=root, capture_output=True,
+                                        text=True, timeout=15)
+                self.assertEqual(actual.returncode, 1, actual.stderr)
+                self.assertIn("only sentinel", actual.stderr)
+                self.assertNotIn("other sentinel", actual.stderr)
+                workflow = "python3 -m unittest discover " + " ".join(options)
+                self.assertEqual([rel for rel, _ in guard.unregistered(root, workflow)],
+                                 ["tools/test_other.py"])
+
     def test_default_pattern_keeps_start_directory_and_package_boundaries(self):
         root, text = self.build(
             "python3 -m unittest discover -s tools/suite\n",

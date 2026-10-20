@@ -105,23 +105,31 @@ def registered_discoveries(workflow_text):
         start, pattern = ".", "test*.py"
         options = iter(arguments[3:])
         for argument in options:
-            if argument in ("-s", "--start-directory", "-p", "--pattern",
-                            "-t", "--top-level-directory", "-k"):
-                # Consume values once, including options that do not change
-                # this guard's directory/pattern pair. Missing values cannot
-                # turn an invalid invocation into default discovery.
+            if argument in ("--verbose", "--quiet", "--failfast", "--catch",
+                            "--buffer", "--locals") or re.fullmatch(r"-[vqfcb]+", argument):
+                continue
+            option, attached, value = argument.partition("=")
+            if argument[:2] in ("-s", "-p", "-t", "-k") and len(argument) > 2:
+                option, attached, value = argument[:2], True, argument[2:]
+                if value.startswith("="):
+                    value = value[1:]
+            if option not in ("-s", "--start-directory", "-p", "--pattern",
+                              "-t", "--top-level-directory", "-k"):
+                # Help exits before discovery; unknown or unsupported syntax
+                # cannot establish that any test runs.
+                pattern = None
+                break
+            if not attached:
                 value = next(options, None)
                 if value is None or value.startswith("-"):
                     pattern = None
                     break
-                if argument in ("-s", "--start-directory"):
-                    start = value
-                elif argument in ("-p", "--pattern"):
-                    pattern = value
-            elif argument.startswith("--start-directory="):
-                start = argument.split("=", 1)[1]
-            elif argument.startswith("--pattern="):
-                pattern = argument.split("=", 1)[1]
+            # Consume each value once; attached forms and repeated options
+            # have the same last-value-wins behavior as unittest.
+            if option in ("-s", "--start-directory"):
+                start = value
+            elif option in ("-p", "--pattern"):
+                pattern = value
         if pattern is not None:
             discoveries.append((start, pattern))
     return discoveries
