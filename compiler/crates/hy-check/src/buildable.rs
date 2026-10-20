@@ -2098,7 +2098,17 @@ impl<'a> Collector<'a> {
     /// #577 C9 — method calls (`x.bump(k)`) declare their receiver
     /// separately, so the parameter count is the declared one.
     fn check_method_arity(&mut self, bk: &OpKind, name: &str, args: &[CallArg], span: Span) {
-        let Some(sn) = self.struct_name(bk) else {
+        // #880: a generic receiver carries its type arguments (`cache[int]`,
+        // `*lru_cache[k, v]`) while `method_decls` is keyed by the *base*
+        // name, so the bare `struct_name` lookup missed every instantiated
+        // receiver, early-returned, and exempted all of their method calls
+        // from C9 — the checker accepted calls the emitted Go cannot build
+        // (`not enough arguments in call to c.set`). Fold through
+        // `struct_base_name`, exactly like the `has_method` and C10
+        // (`call_result_kinds`) lookups a few lines above; `sn` is then the
+        // base name, which is also what the diagnostic renders for plain
+        // structs.
+        let Some(sn) = self.struct_base_name(bk) else {
             return;
         };
         let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
