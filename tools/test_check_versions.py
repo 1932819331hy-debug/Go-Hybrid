@@ -92,6 +92,39 @@ class CheckVersionsTests(unittest.TestCase):
         self.edit("compiler/crates/hyb/src/main.rs", '"go1.26.9"', '"go1x26x9"')
         self.assertDrift("hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
 
+    def test_default_pin_checks_accept_trailing_comments(self):
+        self.edit("compiler/crates/hyb/src/main.rs",
+                  '    None => "go1.26.9",',
+                  '    None => "go1.26.9", // default Go pin')
+        self.edit("compiler/crates/hyb/src/main.rs",
+                  '    None => "1.99.0",',
+                  '    None => "1.99.0", // default Rust pin')
+        self.edit("compiler/crates/hyb/build.rs",
+                  'const DEFAULT_PIN: &str = "1.99.0";',
+                  'const DEFAULT_PIN: &str = "1.99.0"; // build pin')
+        self.assertConsistent()
+
+    def test_historical_go_pin_comment_cannot_hide_default_drift(self):
+        self.edit("compiler/crates/hyb/src/main.rs",
+                  '    None => "go1.26.9",',
+                  '    // Previously: None => "go1.26.9",\n'
+                  '    None => "go1.26.8",')
+        self.assertDrift("hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
+
+    def test_historical_rust_pin_comment_cannot_hide_default_drift(self):
+        self.edit("compiler/crates/hyb/src/main.rs",
+                  '    None => "1.99.0",',
+                  '    // Previously: None => "1.99.0",\n'
+                  '    None => "1.98.0",')
+        self.assertDrift("hyb default pin (compiler/crates/hyb/src/main.rs) != rust 1.99.0")
+
+    def test_commented_build_guard_pin_cannot_hide_default_drift(self):
+        self.edit("compiler/crates/hyb/build.rs",
+                  'const DEFAULT_PIN: &str = "1.99.0";',
+                  '// const DEFAULT_PIN: &str = "1.99.0";\n'
+                  'const DEFAULT_PIN: &str = "1.98.0";')
+        self.assertDrift("hyb build.rs DEFAULT_PIN != rust 1.99.0")
+
     def test_build_guard_default_pin_dots_are_literal(self):
         self.edit("compiler/crates/hyb/build.rs", '"1.99.0"', '"1x99x0"')
         self.assertDrift("hyb build.rs DEFAULT_PIN != rust 1.99.0")

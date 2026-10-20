@@ -44,6 +44,14 @@ has_version() {
     grep -qE "$pat" "$file"
 }
 
+# Only inspect the named constant's active fallback. A quoted version in a
+# comment or another constant must not hide a stale compiled-in default.
+has_default_pin() {
+    local name="$1" version="$2"
+    sed -n "/^const $name: &str = match /,/^};/p" compiler/crates/hyb/src/main.rs \
+        | grep -qE "^[[:space:]]*None[[:space:]]*=>[[:space:]]*\"$(re_escape "$version")\"[[:space:]]*,"
+}
+
 echo "pins: $PINNED_GO / rust $PINNED_RUST (tools/env.sh)"
 
 # --- 2. Cross-reference every version-bearing artifact ----------------------
@@ -54,13 +62,13 @@ has_version README.md "Rust " "$PINNED_RUST" \
     && pass "README.md names Rust $PINNED_RUST" \
     || fail "README.md does not name Rust $PINNED_RUST"
 
-grep -qF "\"$PINNED_GO\"" compiler/crates/hyb/src/main.rs \
+has_default_pin PINNED_GO "$PINNED_GO" \
     && pass "hyb default pin matches ($PINNED_GO)" \
     || fail "hyb default pin (compiler/crates/hyb/src/main.rs) != $PINNED_GO"
-grep -qF "\"$PINNED_RUST\"" compiler/crates/hyb/src/main.rs \
+has_default_pin PINNED_RUST "$PINNED_RUST" \
     && pass "hyb default pin matches (rust $PINNED_RUST)" \
     || fail "hyb default pin (compiler/crates/hyb/src/main.rs) != rust $PINNED_RUST"
-grep -qF "const DEFAULT_PIN: &str = \"$PINNED_RUST\"" compiler/crates/hyb/build.rs \
+grep -qE "^[[:space:]]*const DEFAULT_PIN: &str = \"$(re_escape "$PINNED_RUST")\"[[:space:]]*;" compiler/crates/hyb/build.rs \
     && pass "hyb drift-guard default matches (rust $PINNED_RUST)" \
     || fail "hyb build.rs DEFAULT_PIN != rust $PINNED_RUST (the guard would refuse honest builds)"
 
