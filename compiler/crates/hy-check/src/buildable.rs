@@ -3123,13 +3123,93 @@ impl<'a> Collector<'a> {
     fn check_call_operands(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
         let bare = unwrap_parens(callee);
         match bare {
-            // `[]byte("ok")` / `[]rune(s)`: parser encodes slice type conversions as
+            // `[]byte("ok")` / `[]rune(s)`: parser encodes slice and array type conversions as
             // `Call { callee: SliceLit { elem: Some(T), items: [] }, args: [x] }`.
             Expr::SliceLit {
-                elem: Some(_),
+                elem: Some(elem_ty),
                 items,
                 ..
-            } if items.is_empty() && bare.as_array_lit().is_none() => {}
+            } if items.is_empty() => {
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    let target_str = arr_ty.render();
+                    if args.len() != 1 {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "a conversion to `{}` takes exactly 1 argument, found {} — Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
+                                target_str,
+                                args.len(),
+                                target_str
+                            ),
+                            "a type conversion has the form `T(x)`: exactly one argument",
+                        );
+                        return;
+                    }
+                    let arg = &args[0].value;
+                    self.check_single_value_position(arg, "a type conversion", false);
+                    let ak = self.kind_of_expr(arg);
+                    if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_)) {
+                        self.emit_e1002(
+                            arg.span(),
+                            format!(
+                                "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
+                                arg.render(),
+                                ak.label(),
+                                target_str
+                            ),
+                            "array type conversions require a slice or array operand",
+                        );
+                    }
+                    return;
+                }
+                let elem_str = elem_ty.render();
+                let target_str = format!("[]{}", elem_str);
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "a conversion to `{}` takes exactly 1 argument, found {} — Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
+                            target_str,
+                            args.len(),
+                            target_str
+                        ),
+                        "a type conversion has the form `T(x)`: exactly one argument",
+                    );
+                    return;
+                }
+                let arg = &args[0].value;
+                self.check_single_value_position(arg, "a type conversion", false);
+                let ak = self.kind_of_expr(arg);
+                let is_byte_or_rune = matches!(
+                    elem_str.as_str(),
+                    "byte" | "uint8" | "u8" | "rune" | "int32" | "i32"
+                );
+                if is_byte_or_rune {
+                    if !matches!(ak, OpKind::Unknown | OpKind::Str | OpKind::Slice(_)) {
+                        self.emit_e1002(
+                            arg.span(),
+                            format!(
+                                "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
+                                arg.render(),
+                                ak.label(),
+                                target_str
+                            ),
+                            "`[]byte` and `[]rune` conversions require a string or compatible slice operand",
+                        );
+                    }
+                } else if !matches!(ak, OpKind::Unknown | OpKind::Slice(_)) {
+                    self.emit_e1002(
+                        arg.span(),
+                        format!(
+                            "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
+                            arg.render(),
+                            ak.label(),
+                            target_str
+                        ),
+                        "slice type conversions require a string (for `[]byte`/`[]rune`) or compatible slice operand",
+                    );
+                }
+            }
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
                     match k {
