@@ -133,8 +133,22 @@ def ensure_palette(gh, cfg, extra=None):
                     {"name": name, "color": meta["color"],
                      "description": meta["description"]})
         except RuntimeError as e:
-            if "422" not in str(e):
-                tb.log("  label %s: %s" % (name, e))
+            # GitHub returns 422 both for existing labels and for invalid
+            # label definitions. Only an explicit "already_exists" error is
+            # safe to ignore; everything else must fail the refresh step.
+            message = str(e)
+            if " -> 422 " in message:
+                try:
+                    payload = json.loads(message.partition(" -> 422 ")[2])
+                except json.JSONDecodeError:
+                    payload = {}
+                errors = payload.get("errors") if isinstance(payload, dict) else None
+                if errors and all(
+                    isinstance(error, dict) and error.get("code") == "already_exists"
+                    for error in errors
+                ):
+                    continue
+            raise
 
 
 def cmd_labels(args):
@@ -155,6 +169,7 @@ def cmd_sync_labels(args):
                "CONFLICTS": "bot:conflict",
                "STALE-BASE": "bot:stale-base"}
     n = 0
+    failures = []
     for it in items:
         want = mapping.get(it["bucket"])
         if not want or it.get("wildcard_hold") or it.get("draft_parked"):
@@ -168,10 +183,16 @@ def cmd_sync_labels(args):
                     {"labels": [want]})
         except (RuntimeError, tb.RateGuard) as e:
             tb.log("  FAIL #%d: %s" % (it["number"], e))
+            failures.append(it["number"])
             if isinstance(e, tb.RateGuard):
                 break
     tb.log("sync-labels: %d candidates, %d calls, %s remaining"
            % (n, gh.calls, gh.remaining))
+    if failures:
+        # W7 reads job.status. A printed failure followed by exit 0 makes
+        # the board falsely report success. Surface partial writes as failure.
+        raise RuntimeError("sync-labels incomplete; failed PRs: %s"
+                           % ", ".join("#%d" % number for number in failures))
 
 
 # ------------------------------------------------------------------ W2 rebase

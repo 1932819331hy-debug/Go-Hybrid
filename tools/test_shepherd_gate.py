@@ -6,10 +6,14 @@ on. If the kill-switch matrix, the dup planner, the conflict classifier, or
 the probe parser drift, CI fails before any workflow can.
 """
 
+import json
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import shepherd as sh  # noqa: E402
@@ -132,6 +136,73 @@ class BoardW7Verdict(unittest.TestCase):
         command = match.group(1)
         self.assertIn('--verdict "${{ job.status }}"', command)
         self.assertNotIn("board + labels refreshed", command)
+
+
+class BoardLabelErrors(unittest.TestCase):
+    """The W1 label step must fail closed when a write did not complete."""
+
+    @staticmethod
+    def _palette(error):
+        gh = SimpleNamespace(repo="owner/repo", post=Mock(side_effect=error))
+        cfg = {"bot_labels": {
+            "bot:conflict": {"color": "123456", "description": "test"}
+        }}
+        return gh, cfg
+
+    def test_existing_label_is_idempotent(self):
+        response = (
+            'POST /repos/owner/repo/labels -> 422 '
+            '{"message":"Validation Failed","errors":'
+            '[{"resource":"Label","code":"already_exists","field":"name"}]}'
+        )
+        gh, cfg = self._palette(RuntimeError(response))
+        sh.ensure_palette(gh, cfg)
+        gh.post.assert_called_once()
+
+    def test_unrelated_422_is_not_silenced(self):
+        gh, cfg = self._palette(RuntimeError(
+            'POST /repos/owner/repo/labels -> 422 '
+            '{"errors":[{"resource":"Label","code":"invalid","field":"color"}]}'
+        ))
+        with self.assertRaisesRegex(RuntimeError, "422"):
+            sh.ensure_palette(gh, cfg)
+
+    def test_forbidden_palette_write_fails(self):
+        gh, cfg = self._palette(RuntimeError(
+            "POST /repos/owner/repo/labels -> 403 permission denied"
+        ))
+        with self.assertRaisesRegex(RuntimeError, "403"):
+            sh.ensure_palette(gh, cfg)
+
+    def _sync(self, error=None):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "scan.json"
+            path.write_text(json.dumps({"items": [
+                {"number": 42, "bucket": "LAND-CANDIDATE"}
+            ]}), encoding="utf-8")
+            args = SimpleNamespace(from_scan=str(path), dry=False)
+            gh = SimpleNamespace(
+                repo="owner/repo", calls=0, remaining=500,
+                post=Mock(side_effect=error),
+            )
+            with patch.object(sh, "load_cfg", return_value={
+                "repo": "owner/repo", "bot_labels": {}
+            }), patch.object(sh.tb, "Gh", return_value=gh), patch.object(
+                sh.tb, "load_token", return_value="fake-test-token"
+            ):
+                sh.cmd_sync_labels(args)
+            return gh
+
+    def test_successful_sync_exits_successfully(self):
+        self.assertEqual(self._sync().post.call_count, 1)
+
+    def test_forbidden_sync_fails_instead_of_exiting_zero(self):
+        with self.assertRaisesRegex(RuntimeError, "failed PRs: #42"):
+            self._sync(RuntimeError("403 Resource not accessible"))
+
+    def test_rate_guard_sync_fails_instead_of_exiting_zero(self):
+        with self.assertRaisesRegex(RuntimeError, "failed PRs: #42"):
+            self._sync(sh.tb.RateGuard("rate limit low"))
 
 
 if __name__ == "__main__":
