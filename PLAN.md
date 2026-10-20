@@ -1,10 +1,6 @@
 # Hybrid Language: Development Plan
 
-## Contributor validation — relative installer destinations (2026-10-18)
-- Base `da08ceb`: install a checksummed offline fixture with a relative `HYB_INSTALL_DIR`, then invoke its launcher from another directory without the install-time override. Require an absolute packaged runtime path, the same executable and unchanged arguments; preserve literal path characters and explicit runtime/install overrides.
-- Run the regression against the unchanged installer before the fix, then the existing runtime, checksum and upgrade suites plus shell syntax and diff checks. This validates installer behavior only; the pinned Go/Rust compiler suites and upstream CI remain required before final review.
-- Result: unchanged installer fails all three relative-path subcases (exit 126 after changing directory); its 11 other test methods pass. Prefixing relative install destinations with the installation working directory makes the runtime suite 12/12, checksum suite 7/7 and upgrade suite 3/3 pass offline on macOS/Apple Silicon. `sh -n install.sh` and `git diff --check` pass. No real release download, model API or Go/Rust compiler run was used; no bounty award is assumed.
-
+- Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
 
