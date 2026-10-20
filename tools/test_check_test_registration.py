@@ -254,6 +254,9 @@ class RegistrationTests(unittest.TestCase):
             ("cat >/dev/null <<EOF", "EOF", ""),
             ("cat >/dev/null <<'EOF'", "EOF", ""),
             ('cat >/dev/null <<"E O F"', "E O F", ""),
+            ("cat >/dev/null <<E\\ O\\ F", "E O F", ""),
+            ("cat >/dev/null <<'E'OF", "EOF", ""),
+            ('cat >/dev/null <<\'E\'"OF"', "EOF", ""),
             ("cat >/dev/null <<-EOF", "EOF", "\t"),
             ("cat >/dev/null <<- EOF", "EOF", "\t"),
             ("python3 - <<'EOF'", "EOF", "# "),
@@ -279,16 +282,26 @@ class RegistrationTests(unittest.TestCase):
                 self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
                                  ["tools/test_disabled.py", "tests/test_disabled.py"])
 
+    @unittest.skipIf(os.name == "nt", "requires a POSIX shell")
     def test_heredoc_delimiters_preserve_yaml_indentation_and_exact_matching(self):
         root, text = self.build(
             "  - run: |\n"
-            "      cat >/dev/null <<'EOF'\n"
+            "      echo START\n"
+            "        cat >/dev/null <<'EOF'\n"
             "       EOF\n"  # Leading spaces do not end an ordinary heredoc.
             "      EOF \n"  # Nor do trailing spaces.
             "      python3 tests/test_disabled.py\n"
             "      EOF\n"
             "      python3 tests/test_live.py\n",
             ["tests/test_disabled.py", "tests/test_live.py"])
+        (root / "tests/test_disabled.py").write_text(
+            "raise AssertionError('heredoc data was executed')\n", encoding="utf-8")
+        (root / "tests/test_live.py").write_text("print('live test ran')\n", encoding="utf-8")
+        commands = "\n".join(line[6:] for line in text.splitlines()[1:]) + "\n"
+        shell = subprocess.run(["/bin/sh", "-c", commands], cwd=root,
+                               capture_output=True, text=True, timeout=10)
+        self.assertEqual(shell.returncode, 0, shell.stderr)
+        self.assertIn("live test ran", shell.stdout)
         self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
                          ["tests/test_disabled.py"])
 
