@@ -371,6 +371,73 @@ class KaggleArgumentTests(unittest.TestCase):
             mock_status.assert_called_once_with("custom-slug")
 
 
+@unittest.skipUnless(os.name == "posix", "job.py's sh() runs /bin/sh")
+class KaggleWaitStatusTests(unittest.TestCase):
+    """An unsuccessful status command is not evidence about a kernel run."""
+
+    def wait(self, statuses):
+        import contextlib
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            responses = root / "responses.json"
+            responses.write_text(json.dumps(statuses), encoding="utf-8")
+            cli = root / "kaggle"
+            cli.write_text(
+                "#!" + sys.executable + "\n"
+                "import json, pathlib, sys\n"
+                "path = pathlib.Path(__file__).with_name('responses.json')\n"
+                "statuses = json.loads(path.read_text())\n"
+                "code, text = statuses.pop(0)\n"
+                "path.write_text(json.dumps(statuses))\n"
+                "print(text)\n"
+                "sys.exit(code)\n",
+                encoding="utf-8",
+            )
+            cli.chmod(0o755)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with patch.object(JOB, "KAGGLE_CLI", str(cli)), \
+                 patch.object(JOB.time, "sleep"), \
+                 contextlib.redirect_stdout(stdout), \
+                 contextlib.redirect_stderr(stderr):
+                result = JOB.kaggle_wait(1, "offline/kernel")
+            return result, stdout.getvalue(), stderr.getvalue()
+
+    def test_failed_active_status_cannot_authorize_a_later_complete(self):
+        result, stdout, stderr = self.wait([
+            [7, 'request failed while reading "KernelWorkerStatus.RUNNING"'],
+            [0, '"KernelWorkerStatus.COMPLETE"'],
+        ])
+        self.assertEqual(result, 1, stdout + stderr)
+        self.assertIn("exit 7", stderr)
+        self.assertNotIn("terminal after", stdout)
+
+    def test_failed_complete_status_cannot_report_success(self):
+        result, stdout, stderr = self.wait([
+            [0, '"KernelWorkerStatus.RUNNING"'],
+            [7, 'request failed while reading "KernelWorkerStatus.COMPLETE"'],
+        ])
+        self.assertEqual(result, 1, stdout + stderr)
+        self.assertIn("exit 7", stderr)
+        self.assertNotIn("terminal after", stdout)
+
+    def test_successful_active_then_complete_still_succeeds(self):
+        result, stdout, stderr = self.wait([
+            [0, '"KernelWorkerStatus.RUNNING"'],
+            [0, '"KernelWorkerStatus.COMPLETE"'],
+        ])
+        self.assertEqual(result, 0, stdout + stderr)
+        self.assertIn("terminal after 2 polls: COMPLETE", stdout)
+
+    def test_successful_active_then_kernel_error_still_fails(self):
+        result, stdout, stderr = self.wait([
+            [0, '"KernelWorkerStatus.RUNNING"'],
+            [0, '"KernelWorkerStatus.ERROR"'],
+        ])
+        self.assertEqual(result, 1, stdout + stderr)
+        self.assertIn("terminal after 2 polls: ERROR", stdout)
+
+
 class GhTokenTests(unittest.TestCase):
     def test_reads_token_from_environment(self):
         import importlib.util
