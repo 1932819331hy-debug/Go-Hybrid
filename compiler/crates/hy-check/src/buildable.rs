@@ -1223,6 +1223,8 @@ impl<'a> Collector<'a> {
                 }
                 if let Some((_, inner_elem, _)) = e.as_array_lit() {
                     self.check_array_lit_items(inner_elem, items);
+                } else if let Some(t) = elem {
+                    self.check_slice_lit_items(t, items);
                 }
             }
             Expr::MapLit {
@@ -1237,6 +1239,7 @@ impl<'a> Collector<'a> {
                     self.expr(k);
                     self.expr(v);
                 }
+                self.check_map_lit_entries(key, value, entries);
             }
             Expr::FnLit {
                 params,
@@ -3246,6 +3249,130 @@ impl<'a> Collector<'a> {
                 ),
                 "every element of an array composite literal `[N]T{...}` / `[...]T{...}` must be assignable to the element type `T`",
             );
+        }
+    }
+
+    fn check_slice_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
+        let resolved_ty = self.ck.resolve_type_alias(elem_ty);
+        let expected = self.kind_of_ty(&resolved_ty, 0);
+        if expected == OpKind::Unknown {
+            return;
+        }
+        for item in items {
+            let bare = unwrap_parens(item);
+            if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                continue;
+            }
+            if let Expr::SliceLit {
+                elem: None,
+                items: sub_items,
+                ..
+            } = bare
+            {
+                if let TypeExpr::Array { elem: sub_ty, .. }
+                | TypeExpr::Slice { elem: sub_ty, .. } = &resolved_ty
+                {
+                    self.check_slice_lit_items(sub_ty, sub_items);
+                    continue;
+                }
+            }
+            if let Expr::StructLit {
+                ty: None, fields, ..
+            } = bare
+            {
+                if matches!(expected, OpKind::Struct(_))
+                    || (fields.is_empty()
+                        && matches!(
+                            expected,
+                            OpKind::Array(_) | OpKind::Slice(_) | OpKind::Map(_, _)
+                        ))
+                {
+                    continue;
+                }
+            }
+            let ik = self.kind_of_expr(item);
+            if ik == OpKind::Unknown || ik == expected {
+                continue;
+            }
+            if expected == OpKind::Float
+                && ik == OpKind::Int
+                && crate::const_overflow::const_int_value(item).is_some()
+            {
+                continue;
+            }
+            if !kinds_conflict(&expected, &ik) {
+                continue;
+            }
+            self.emit_e1002(
+                item.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` value in slice literal (HYB-E1002)",
+                    item.render(),
+                    ik.label(),
+                    elem_ty.render()
+                ),
+                "every element of a slice composite literal `[]T{...}` must be assignable to the element type `T`",
+            );
+        }
+    }
+
+    fn check_map_lit_entries(
+        &mut self,
+        key_ty: &TypeExpr,
+        val_ty: &TypeExpr,
+        entries: &[(Expr, Expr)],
+    ) {
+        let resolved_key = self.ck.resolve_type_alias(key_ty);
+        let exp_key = self.kind_of_ty(&resolved_key, 0);
+        let resolved_val = self.ck.resolve_type_alias(val_ty);
+        let exp_val = self.kind_of_ty(&resolved_val, 0);
+        for (k, v) in entries {
+            if exp_key != OpKind::Unknown {
+                let kk = self.kind_of_expr(k);
+                if kk != OpKind::Unknown
+                    && kk != exp_key
+                    && !(exp_key == OpKind::Float
+                        && kk == OpKind::Int
+                        && crate::const_overflow::const_int_value(k).is_some())
+                    && kinds_conflict(&exp_key, &kk)
+                {
+                    self.emit_e1002(
+                        k.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
+                            k.render(),
+                            kk.label(),
+                            key_ty.render()
+                        ),
+                        "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
+                    );
+                }
+            }
+            if exp_val != OpKind::Unknown {
+                let bare_v = unwrap_parens(v);
+                if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    continue;
+                }
+                let vk = self.kind_of_expr(v);
+                if vk != OpKind::Unknown
+                    && vk != exp_val
+                    && !(exp_val == OpKind::Float
+                        && vk == OpKind::Int
+                        && crate::const_overflow::const_int_value(v).is_some())
+                    && kinds_conflict(&exp_val, &vk)
+                {
+                    self.emit_e1002(
+                        v.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in map value (HYB-E1002)",
+                            v.render(),
+                            vk.label(),
+                            val_ty.render()
+                        ),
+                        "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
+                    );
+                }
+            }
         }
     }
 
