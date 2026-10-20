@@ -190,6 +190,52 @@ fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     kinds_conflict(a, b) && kinds_conflict(b, a)
 }
 
+/// Does a type conversion `target(arg)` fail because the two types are incompatible in Go?
+///
+/// In Go, type conversions `T(x)` require compatible types:
+/// - A struct cannot be converted from a non-struct (or unrelated struct).
+/// - A bool cannot be converted to or from any other type.
+/// - Numeric types (int, float) cannot convert to/from string, slice, map, chan, struct.
+/// - Strings can only convert to/from integer (rune), byte/rune slices, or strings.
+/// - Maps and channels cannot convert to/from scalars.
+fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
+    use OpKind::*;
+    match (target, arg) {
+        // Fail-open: unresolved or interface (any(x) is valid in Go)
+        (Unknown, _) | (_, Unknown) => false,
+        (Interface, _) => false,
+        (a, b) if a == b => false,
+
+        // Struct targets: Go forbids converting non-structs to structs.
+        (Struct(_), other) if !matches!(other, Unknown | Struct(_)) => true,
+
+        // Bool target: only bool can convert to bool.
+        (Bool, other) if !matches!(other, Unknown | Bool) => true,
+        // Bool argument: bool cannot convert to anything (except bool or interface).
+        (other, Bool) if !matches!(other, Unknown | Bool | Interface) => true,
+
+        // Numeric targets (Int, Float): can convert between Int and Float.
+        // Cannot convert Str, Slice, Map, Chan, Struct to numeric.
+        (Int | Float, Str | Slice(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
+
+        // String target: can convert from Int (rune/byte code point) or Slice (byte/rune slice) or Str.
+        // Cannot convert from Float, Bool, Map, Chan, Struct.
+        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+
+        // Slice target: can convert from Str (to []byte/[]rune), or Slice/Array.
+        // Cannot convert from Int, Float, Bool, Map, Chan, Struct.
+        (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+
+        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct.
+        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_)) => true,
+
+        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
+        (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
+
+        _ => false,
+    }
+}
+
 /// Is every part of this kind resolved? (#682 U2/U3)
 ///
 /// A "has no field or method" claim is only sound when the checker actually
@@ -1930,19 +1976,39 @@ impl<'a> Collector<'a> {
         if matches!(k, OpKind::Unknown) {
             return;
         }
-        if args.len() == 1 {
+        if args.len() != 1 {
+            self.emit_e1002(
+                span,
+                format!(
+                    "a conversion to `{}` takes exactly 1 argument, found {} — Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
+                    name,
+                    args.len(),
+                    name
+                ),
+                "a type conversion has the form `T(x)`: exactly one argument",
+            );
             return;
         }
-        self.emit_e1002(
-            span,
-            format!(
-                "a conversion to `{}` takes exactly 1 argument, found {} — Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
-                name,
-                args.len(),
-                name
-            ),
-            "a type conversion has the form `T(x)`: exactly one argument",
-        );
+        let arg = &args[0].value;
+        self.check_single_value_position(arg, "a type conversion", /*binding_position=*/ false);
+        let arg_k = self.kind_of_expr(arg);
+        if conversion_kinds_conflict(&k, &arg_k) {
+            let note = if matches!(k, OpKind::Struct(_)) {
+                "structs cannot be instantiated via function-call conversions; write a struct literal like `T{...}` instead"
+            } else {
+                "in Go, type conversions `T(x)` require compatible types"
+            };
+            self.emit_e1002(
+                arg.span(),
+                format!(
+                    "cannot convert `{}` (type `{}`) to type `{}` (HYB-E1002)",
+                    arg.render(),
+                    arg_k.label(),
+                    name
+                ),
+                note,
+            );
+        }
     }
 
     /// #682 U6/U8 — the number of values a call expression produces, when it is
