@@ -107,16 +107,24 @@ jobs:
         run: |
           set -eo pipefail
           if git merge --no-commit --no-ff origin/main; then
-            git commit --no-edit -m "merge main into PR tree (battery base)"
+            # An already-current PR has no MERGE_HEAD: committing would fail
+            # with "nothing to commit" and prevent all W5 verification.
+            if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+              git commit --no-edit -m "merge main into PR tree (battery base)"
+            else
+              echo "PR already contains current main — nothing to merge."
+            fi
           else
             python3 tools/shepherd.py docs-resolve --docs-side theirs
             git commit --no-edit -m "merge main into PR tree (docs-only conflicts auto-resolved per #870 policy)"
           fi
 
       - name: Battery — cargo workspace
+        working-directory: compiler
         run: cargo test --workspace
 
       - name: Battery — build hyb
+        working-directory: compiler
         run: cargo build -p hyb --quiet
 
       - name: Battery — corpus harness
