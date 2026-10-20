@@ -153,8 +153,6 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // (`var f float64 = 1` builds). The kind model cannot tell an untyped
         // constant from an `int` variable, so this direction must stay allowed
         // or the check would reject buildable programs.
-        // No value is involved; the count check owns that case.
-        (Void, _) | (_, Void) => false,
         // An untyped int constant is assignable to a float result
         // (`fn f() float64 { return 1 }` builds). The kind model cannot tell
         // an untyped constant from an `int` variable, so this direction must
@@ -3051,6 +3049,13 @@ impl<'a> Collector<'a> {
         } else {
             None
         };
+        let is_array = matches!(bk, OpKind::Array(_))
+            || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
+        let const_arr_len = if is_array {
+            self.eval_const_array_len_at(base, span.start)
+        } else {
+            None
+        };
         let mut lo_const: Option<i128> = None;
         let mut hi_const: Option<i128> = None;
         for (idx, bound_opt) in [lo, hi].into_iter().enumerate() {
@@ -3090,6 +3095,19 @@ impl<'a> Collector<'a> {
                                     base.render()
                                 ),
                                 "a constant slice bound on a constant string must satisfy `0 <= bound <= len(s)`",
+                            );
+                        }
+                    }
+                    if let Some(arr_len) = const_arr_len {
+                        if v > arr_len {
+                            self.emit_e1002(
+                                bound.span(),
+                                format!(
+                                    "invalid slice index `{}` (out of bounds for a {}-element array) (HYB-E1002)",
+                                    bound.render(),
+                                    arr_len
+                                ),
+                                "a constant slice bound on a fixed-size array must satisfy `0 <= bound <= len(a)`",
                             );
                         }
                     }
