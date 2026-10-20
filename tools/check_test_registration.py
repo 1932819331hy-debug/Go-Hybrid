@@ -18,9 +18,9 @@ reference it, and fails closed on any file no reference reaches:
   tests/**/test_*.py  run directly, e.g. `python3 tests/test_install_runtime.py`
                       -> the path must be the invoked Python entry point
 
-Only explicit single-line Python invocations count. Comments, echoed text,
-step names, interpreter flags, chained later commands, and paths passed as
-arguments to other scripts register nothing. This is not a general
+Only explicit single-line Python invocations count. Comments, heredoc data,
+echoed text, step names, interpreter flags, chained later commands, and paths
+passed as arguments to other scripts register nothing. This is not a general
 shell/YAML interpreter.
 
 Usage: python3 tools/check_test_registration.py [--workflow PATH] [--root DIR]
@@ -44,16 +44,25 @@ PYTHON_RE = re.compile(r"(?:.*/)?python(?:3(?:\.\d+)?)?\Z")
 PYTHON_FLAGS_RE = re.compile(r"-[bBdEIOPqRsSuvx]+\Z")
 
 
-def shell_words(line):
-    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>()")
+def shell_words(line, *, posix=True):
+    lexer = shlex.shlex(line, posix=posix, punctuation_chars=";&|<>()")
     lexer.whitespace_split = True
     return list(lexer)
 
 
 def python_commands(workflow_text):
     """Yield arguments of explicit, single-line Python invocations."""
-    for line in workflow_text.splitlines():
-        line = line.strip()
+    heredocs = []
+    for raw_line in workflow_text.splitlines():
+        if heredocs:
+            delimiter, strip_tabs, indent = heredocs[0]
+            body = (raw_line[indent:] if raw_line.startswith(" " * indent)
+                    else raw_line)
+            if (body.lstrip("\t") if strip_tabs else body) == delimiter:
+                heredocs.pop(0)
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        line = raw_line.strip()
         inline_run = re.match(r"(?:-\s+)?run:\s*(.*)", line)
         if inline_run:
             line = inline_run.group(1)
@@ -61,7 +70,25 @@ def python_commands(workflow_text):
             tokens = shell_words(line)
             # A quoted YAML run scalar wraps the whole shell command.
             if inline_run and len(tokens) == 1:
-                tokens = shell_words(tokens[0])
+                line = tokens[0]
+                tokens = shell_words(line)
+            # Keep quotes here so an echoed '<<' is not a redirection.
+            # Offsets distinguish <<-EOF from a delimiter named -EOF.
+            raw_tokens = shell_words(line, posix=False)
+            offset = 0
+            for index, token in enumerate(raw_tokens[:-1]):
+                offset = line.index(token, offset) + len(token)
+                if token != "<<":
+                    continue
+                strip_tabs = line[offset:offset + 1] == "-"
+                delimiter = raw_tokens[index + 1]
+                if strip_tabs:
+                    delimiter = delimiter[1:]
+                    if not delimiter and index + 2 < len(raw_tokens):
+                        delimiter = raw_tokens[index + 2]
+                words = shlex.split(delimiter)
+                if len(words) == 1:
+                    heredocs.append((words[0], strip_tabs, indent))
         except ValueError:
             continue
         if tokens and PYTHON_RE.fullmatch(tokens[0]):

@@ -248,6 +248,66 @@ class RegistrationTests(unittest.TestCase):
 
     # --- explicit-invocation end-to-end (from pr-600, fixes #596) ---
 
+    @unittest.skipIf(os.name == "nt", "requires a POSIX shell")
+    def test_heredoc_data_does_not_register_tests(self):
+        for header, delimiter, body_prefix in (
+            ("cat >/dev/null <<EOF", "EOF", ""),
+            ("cat >/dev/null <<'EOF'", "EOF", ""),
+            ('cat >/dev/null <<"E O F"', "E O F", ""),
+            ("cat >/dev/null <<-EOF", "EOF", "\t"),
+            ("cat >/dev/null <<- EOF", "EOF", "\t"),
+            ("python3 - <<'EOF'", "EOF", "# "),
+        ):
+            with self.subTest(header=header):
+                # Python stdin consumes source too: use comments so its
+                # successful exit does not depend on valid Python commands.
+                commands = (header + "\n"
+                            + body_prefix + "python3 -m unittest discover -s tools -p test_disabled.py\n"
+                            + body_prefix + "python3 tests/test_disabled.py\n"
+                            + ("\t" if "<<-" in header else "") + delimiter + "\n"
+                            + "python3 tests/test_live.py\n")
+                root, text = self.build(commands, ["tools/test_disabled.py",
+                                                  "tests/test_disabled.py", "tests/test_live.py"])
+                for rel in ("tools/test_disabled.py", "tests/test_disabled.py"):
+                    (root / rel).write_text(
+                        "raise AssertionError('heredoc data was executed')\n", encoding="utf-8")
+                (root / "tests/test_live.py").write_text("print('live test ran')\n", encoding="utf-8")
+                shell = subprocess.run(["/bin/sh", "-c", commands], cwd=root,
+                                       capture_output=True, text=True, timeout=10)
+                self.assertEqual(shell.returncode, 0, shell.stderr)
+                self.assertIn("live test ran", shell.stdout)
+                self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                                 ["tools/test_disabled.py", "tests/test_disabled.py"])
+
+    def test_heredoc_delimiters_preserve_yaml_indentation_and_exact_matching(self):
+        root, text = self.build(
+            "  - run: |\n"
+            "      cat >/dev/null <<'EOF'\n"
+            "       EOF\n"  # Leading spaces do not end an ordinary heredoc.
+            "      EOF \n"  # Nor do trailing spaces.
+            "      python3 tests/test_disabled.py\n"
+            "      EOF\n"
+            "      python3 tests/test_live.py\n",
+            ["tests/test_disabled.py", "tests/test_live.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tests/test_disabled.py"])
+
+    def test_multiple_heredocs_are_consumed_in_order(self):
+        root, text = self.build(
+            "cat >/dev/null <<FIRST <<'SECOND'\n"
+            "python3 tests/test_one.py\n"
+            "FIRST\n"
+            "python3 tests/test_two.py\n"
+            "SECOND\n"
+            "python3 tests/test_live.py\n",
+            ["tests/test_one.py", "tests/test_two.py", "tests/test_live.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tests/test_one.py", "tests/test_two.py"])
+
+    def test_quoted_heredoc_operator_does_not_hide_later_commands(self):
+        self.assertTrue(guard.is_registered_direct(
+            "tests/test_live.py", "echo '<<' EOF\npython3 tests/test_live.py\n"))
+
     def test_successful_shell_with_disabled_tests_must_fail_registration(self):
         # The shell succeeds without running either deliberately failing test.
         # The guard must detect the missing execution, not approve the mentions.
