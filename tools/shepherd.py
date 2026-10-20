@@ -565,7 +565,10 @@ def cmd_comment(args):
 def cmd_log(args):
     """Structured session log: one JSON line per bot action, appended to
     logs/SESSION.jsonl on the automation/session-log branch via the contents
-    API (CAS-retried). The log is a record, the board is the view."""
+    API (CAS-retried). The log is a record, the board is the view.
+
+    Best-effort by design: an audit-log write failure must never fail the
+    parent workflow (a down log takes down nothing else)."""
     cfg = load_cfg()
     gh = tb.Gh(cfg["repo"], tb.load_token(args))
     branch, path = cfg["log_branch"], cfg["log_path"]
@@ -573,39 +576,47 @@ def cmd_log(args):
            "event": args.event, "pr": args.pr, "verdict": args.verdict,
            "sha": args.sha, "note": args.note, "run": run_url()}
     line = json.dumps(rec, ensure_ascii=False)
-    st, ref = gh.req("GET", "/repos/%s/git/ref/heads/%s" % (gh.repo, branch))
-    if st == 404:
-        main_sha = gh.get("/repos/%s/commits/main" % gh.repo)["sha"]
-        gh.post("/repos/%s/git/refs" % gh.repo,
-                {"ref": "refs/heads/" + branch, "sha": main_sha})
-        tb.log("log branch %s created from main" % branch)
+    try:
+        st, ref = gh.req("GET", "/repos/%s/git/ref/heads/%s" % (gh.repo, branch))
+        if st == 404:
+            main_sha = gh.get("/repos/%s/commits/main" % gh.repo)["sha"]
+            gh.post("/repos/%s/git/refs" % gh.repo,
+                    {"ref": "refs/heads/" + branch, "sha": main_sha})
+            tb.log("log branch %s created from main" % branch)
 
-    def read_log():
-        s, cur = gh.req("GET", "/repos/%s/contents/%s?ref=%s" % (gh.repo, path, branch))
-        if s == 404 or cur is None:
-            return None, ""
-        content = base64.b64decode(cur.get("content") or "").decode("utf-8",
-                                                                    errors="replace")
-        return cur["sha"], content
+        def read_log():
+            s, cur = gh.req("GET", "/repos/%s/contents/%s?ref=%s" % (gh.repo, path, branch))
+            if s == 404 or cur is None:
+                return None, ""
+            content = base64.b64decode(cur.get("content") or "").decode(
+                "utf-8", errors="replace")
+            return cur["sha"], content
 
-    payload_sha, content = read_log()
-    new_content = (content if content.endswith("\n") or not content else content + "\n") + line + "\n"
-    payload = {"message": "shepherd-log: %s %s" % (args.event, args.pr or ""),
-               "content": base64.b64encode(new_content.encode()).decode(),
-               "branch": branch}
-    if payload_sha:
-        payload["sha"] = payload_sha
-    for attempt in range(3):
-        try:
-            st2, _ = gh.req("PUT", "/repos/%s/contents/%s" % (gh.repo, path), payload)
-            if st2 in (200, 201):
-                tb.log("logged: %s" % line)
-                break
-        except RuntimeError:
-            pass
-        _, cur = gh.req("GET", "/repos/%s/contents/%s?ref=%s" % (gh.repo, path, branch))
-        if cur and cur.get("sha"):
-            payload["sha"] = cur["sha"]
+        payload_sha, content = read_log()
+        new_content = (content if content.endswith("\n") or not content
+                       else content + "\n") + line + "\n"
+        payload = {"message": "shepherd-log: %s %s" % (args.event, args.pr or ""),
+                   "content": base64.b64encode(new_content.encode()).decode(),
+                   "branch": branch}
+        if payload_sha:
+            payload["sha"] = payload_sha
+        for attempt in range(3):
+            try:
+                st2, _ = gh.req("PUT", "/repos/%s/contents/%s" % (gh.repo, path), payload)
+                if st2 in (200, 201):
+                    tb.log("logged: %s" % line)
+                    break
+            except RuntimeError:
+                pass
+            _, cur = gh.req("GET", "/repos/%s/contents/%s?ref=%s"
+                            % (gh.repo, path, branch))
+            if cur and cur.get("sha"):
+                payload["sha"] = cur["sha"]
+        else:
+            tb.log("LOG-WRITE-FAILED after retries (record kept in this run's log): %s" % line)
+    except (RuntimeError, tb.RateGuard) as e:
+        tb.log("LOG-WRITE-FAILED (non-fatal, record kept in this run's log): %s | %s"
+               % (line, e))
     step_summary("W7 log: `%s`" % line)
 
 
