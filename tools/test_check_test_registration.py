@@ -4,7 +4,7 @@ Each case builds a throwaway repo tree plus a throwaway workflow, so the
 guard is exercised against fixtures rather than the live repository. The
 guard covers two invocation styles, and both are pinned here:
 
-  tools/**/test_*.py  reached through `unittest discover -s DIR -p PATTERN`
+  tools/**/test_*.py  reached through `unittest discover -s DIR [-p PATTERN]`
   tests/**/test_*.py  reached by literal repo-relative path
 """
 import contextlib
@@ -31,6 +31,45 @@ class PatternExtractionTests(unittest.TestCase):
         )
         self.assertEqual(guard.registered_patterns(workflow),
                          ["test_hyfuzz.py", "test_managed_gate.py"])
+
+    def test_default_pattern_matches_unittest(self):
+        for options, start in (("", "."), ("-s tools", "tools"),
+                               ("--start-directory=tools", "tools"),
+                               ("-s tools -t tools", "tools"),
+                               ("-s tools --top-level-directory tools", "tools")):
+            with self.subTest(options=options):
+                self.assertEqual(guard.registered_discoveries(
+                    "python3 -m unittest discover " + options), [(start, "test*.py")])
+
+    def test_explicit_pattern_overrides_default(self):
+        for option in ("-p test_only.py", "--pattern test_only.py",
+                       "--pattern=test_only.py"):
+            with self.subTest(option=option):
+                self.assertEqual(guard.registered_discoveries(
+                    "python3 -m unittest discover -s tools " + option),
+                    [("tools", "test_only.py")])
+
+    def test_missing_option_values_do_not_fall_back_to_default(self):
+        for options in ("-s tools -p", "-s tools --pattern", "-s", "--start-directory",
+                        "-s tools -p -v", "-s tools -t --pattern=test_disabled.py",
+                        "-s tools -k --pattern=test_disabled.py"):
+            with self.subTest(options=options):
+                self.assertEqual(guard.registered_discoveries(
+                    "python3 -m unittest discover " + options), [])
+
+    def test_option_values_are_consumed_once(self):
+        # Even malformed values must not be reinterpreted as another option.
+        self.assertEqual(guard.registered_discoveries(
+            "python3 -m unittest discover -s tools -p --start-directory=elsewhere"), [])
+        self.assertEqual(guard.registered_discoveries(
+            "python3 -m unittest discover -s tools --pattern=--start-directory=elsewhere"),
+            [("tools", "--start-directory=elsewhere")])
+
+    def test_commented_and_echoed_default_discovery_is_not_registered(self):
+        for prefix in ("# ", "echo "):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(guard.registered_discoveries(
+                    prefix + "python3 -m unittest discover -s tools"), [])
 
     def test_non_discovery_python_lines_are_ignored(self):
         workflow = (
@@ -125,6 +164,42 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(guard.find_test_files(root, "tools"), [
             "tools/test_job_artifacts.py", "tools/test_job_cli.py", "tools/test_job_payload.py"])
         self.assertEqual(guard.unregistered(root, text), [])
+
+    def test_default_discovery_registers_tests_that_unittest_runs(self):
+        root, text = self.build("python3 -m unittest discover -s tools\n",
+                                ["tools/test_real.py"])
+        (root / "tools/test_real.py").write_text(
+            "import unittest\nclass Real(unittest.TestCase):\n"
+            "    def test_failure(self): self.fail('default discovery really ran')\n",
+            encoding="utf-8")
+        actual = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tools"],
+                                cwd=root, capture_output=True, text=True, timeout=15)
+        self.assertEqual(actual.returncode, 1, actual.stderr)
+        self.assertIn("default discovery really ran", actual.stderr)
+        self.assertEqual(guard.unregistered(root, text), [])
+
+    def test_missing_pattern_is_a_real_unittest_error(self):
+        root, _ = self.build("", ["tools/test_real.py"])
+        for options in (("-p",), ("--pattern",), ("-p", "-v"),
+                        ("-t", "--pattern=test_real.py"),
+                        ("-k", "--pattern=test_real.py")):
+            with self.subTest(options=options):
+                command = [sys.executable, "-m", "unittest", "discover", "-s", "tools", *options]
+                actual = subprocess.run(command, cwd=root, capture_output=True,
+                                        text=True, timeout=15)
+                self.assertEqual(actual.returncode, 2, actual.stderr)
+                self.assertIn("expected one argument", actual.stderr)
+                self.assertEqual(guard.registered_discoveries(
+                    "python3 -m unittest discover -s tools " + " ".join(options)), [])
+
+    def test_default_pattern_keeps_start_directory_and_package_boundaries(self):
+        root, text = self.build(
+            "python3 -m unittest discover -s tools/suite\n",
+            ["tools/test_outside.py", "tools/suite/test_one.py",
+             "tools/suite/pkg/__init__.py", "tools/suite/pkg/test_two.py",
+             "tools/suite/plain/test_hidden.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/suite/plain/test_hidden.py", "tools/test_outside.py"])
 
     def test_unregistered_suite_is_detected(self):
         workflow = "          python3 -m unittest discover -s tools -p test_job_cli.py -v\n"

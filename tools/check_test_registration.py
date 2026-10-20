@@ -11,10 +11,10 @@ since meant less than it looked.
 This guard resolves each test file the way the workflow would have to
 reference it, and fails closed on any file no reference reaches:
 
-  tools/**/test_*.py  run by `python3 -m unittest discover -s DIR -p PATTERN`
+  tools/**/test_*.py  run by `python3 -m unittest discover -s DIR [-p PATTERN]`
                       -> the file must lie inside DIR, be reachable through
                          package directories, and match PATTERN (a glob such
-                         as `test_job*.py` covers a family)
+                         as `test_job*.py` covers a family; default `test*.py`)
   tests/**/test_*.py  run directly, e.g. `python3 tests/test_install_runtime.py`
                       -> the path must be the invoked Python entry point
 
@@ -102,12 +102,22 @@ def registered_discoveries(workflow_text):
     for arguments in python_commands(workflow_text):
         if arguments[:3] != ["-m", "unittest", "discover"]:
             continue
-        start, pattern = ".", None
-        for index, argument in enumerate(arguments[3:], 3):
-            if argument in ("-s", "--start-directory") and index + 1 < len(arguments):
-                start = arguments[index + 1]
-            elif argument in ("-p", "--pattern") and index + 1 < len(arguments):
-                pattern = arguments[index + 1]
+        start, pattern = ".", "test*.py"
+        options = iter(arguments[3:])
+        for argument in options:
+            if argument in ("-s", "--start-directory", "-p", "--pattern",
+                            "-t", "--top-level-directory", "-k"):
+                # Consume values once, including options that do not change
+                # this guard's directory/pattern pair. Missing values cannot
+                # turn an invalid invocation into default discovery.
+                value = next(options, None)
+                if value is None or value.startswith("-"):
+                    pattern = None
+                    break
+                if argument in ("-s", "--start-directory"):
+                    start = value
+                elif argument in ("-p", "--pattern"):
+                    pattern = value
             elif argument.startswith("--start-directory="):
                 start = argument.split("=", 1)[1]
             elif argument.startswith("--pattern="):
@@ -118,7 +128,7 @@ def registered_discoveries(workflow_text):
 
 
 def registered_patterns(workflow_text):
-    """Every `-p` pattern the workflow passes to `unittest discover`."""
+    """Every explicit or default pattern used by `unittest discover`."""
     return [pattern for _, pattern in registered_discoveries(workflow_text)]
 
 
