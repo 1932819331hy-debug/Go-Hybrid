@@ -61,6 +61,16 @@ def consistent_tree(total=3, accept=1, managed=0, reject=2):
     return files
 
 
+TWO_TOTAL_SURFACES = {
+    "README.md": "checker corpus {first}/{second}\n",
+    "Makefile": "corpus verdicts ({first}/{second})\n",
+    ".github/workflows/ci.yml": "verdict agreement ({first}/{second} + tripwire)\n",
+    "compiler/crates/hy-syntax/tests/parse_all.rs": (
+        'assert_eq!(files.len(), {first}, "expected exactly {second} corpus programs");\n'
+    ),
+}
+
+
 class _ProblemsMixin:
     """Shared helper: the problems reported for a tree with one surface altered."""
 
@@ -91,6 +101,30 @@ class ConsistentTreeTests(unittest.TestCase):
 
 
 class DriftTests(_ProblemsMixin, unittest.TestCase):
+    def test_each_total_in_a_declaration_must_match_the_census(self):
+        for rel, template in TWO_TOTAL_SURFACES.items():
+            for first, second in ((3, 99), (99, 3), (99, 99)):
+                with self.subTest(rel=rel, first=first, second=second):
+                    hits = self._problems_with(rel, template.format(first=first, second=second))
+                    self.assertEqual(len(hits), 1)
+                    self.assertIn("99", hits[0])
+                    self.assertIn("corpus holds 3", hits[0])
+
+    def test_every_repeated_declaration_is_checked(self):
+        for rel, template in TWO_TOTAL_SURFACES.items():
+            with self.subTest(rel=rel):
+                content = "".join(
+                    template.format(first=first, second=second)
+                    for first, second in ((3, 3), (3, 99), (99, 3))
+                )
+                self.assertEqual(len(self._problems_with(rel, content)), 2)
+
+    def test_repeated_consistent_declarations_are_accepted(self):
+        for rel, template in TWO_TOTAL_SURFACES.items():
+            with self.subTest(rel=rel):
+                content = template.format(first=3, second=3) * 2
+                self.assertEqual(self._problems_with(rel, content), [])
+
     def test_stale_makefile_is_named(self):
         hits = self._problems_with(
             "Makefile",
