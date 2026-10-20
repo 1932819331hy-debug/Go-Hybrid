@@ -13,13 +13,134 @@ from unittest.mock import patch
 import hyfuzz
 
 
+class FuzzOutputEncodingTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="hyfuzz-encoding-test-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.checker = self.root / "checker.py"
+        self.calls = self.root / "calls"
+        self.real_run = subprocess.run
+
+    def configure_checker(self, stdout=b"", stderr=b"", code=0):
+        self.checker.write_text(
+            "import os\nfrom pathlib import Path\n"
+            f"with Path({str(self.calls)!r}).open('a') as calls:\n"
+            "    calls.write('run\\n')\n"
+            f"os.write(1, {stdout!r})\nos.write(2, {stderr!r})\n"
+            f"raise SystemExit({code})\n",
+            encoding="utf-8",
+        )
+
+    def run_with_legacy_locale(self, command, **kwargs):
+        # Use real OS pipes on every platform, with the cp936 text-mode
+        # fallback that exposed this problem on Windows. Explicit encodings
+        # remain untouched; byte capture bypasses locale decoding entirely.
+        if kwargs.get("text") or kwargs.get("universal_newlines"):
+            kwargs.setdefault("encoding", "cp936")
+        return self.real_run([sys.executable, str(self.checker), *command[1:]], **kwargs)
+
+    def check(self):
+        before = len(self.calls.read_text().splitlines()) if self.calls.exists() else 0
+        with patch.object(hyfuzz.subprocess, "run", self.run_with_legacy_locale):
+            try:
+                result = hyfuzz.check_one(str(self.checker), "fn main() {}", str(self.root), 2)
+            except UnicodeDecodeError as exc:
+                self.fail(f"checker output escaped classification: {exc}")
+        self.assertEqual(len(self.calls.read_text().splitlines()), before + 1)
+        return result
+
+    def test_invalid_utf8_on_either_stream_is_a_failed_case(self):
+        for code in (0, 1):
+            for stream in ("stdout", "stderr"):
+                with self.subTest(code=code, stream=stream):
+                    self.configure_checker(code=code, **{stream: b"\xff"})
+                    failure, accepted = self.check()
+                    self.assertTrue(failure.startswith("OUTPUT_ERROR:"), failure)
+                    self.assertIn("UTF-8", failure)
+                    self.assertFalse(accepted)
+
+    def test_valid_utf8_is_independent_of_the_parent_locale(self):
+        for code in (0, 1):
+            with self.subTest(code=code):
+                self.configure_checker(stdout="错".encode("utf-8"), stderr="错".encode("utf-8"), code=code)
+                self.assertEqual(self.check(), (None, code == 0))
+
+    def test_invalid_bytes_do_not_hide_ice_markers(self):
+        for marker in hyfuzz.BAD_TEXT:
+            for stream in ("stdout", "stderr"):
+                with self.subTest(marker=marker, stream=stream):
+                    self.configure_checker(**{stream: b"\xff" + marker.upper().encode("ascii")})
+                    failure, accepted = self.check()
+                    self.assertTrue(failure.startswith("ICE:"), failure)
+                    self.assertFalse(accepted)
+
+    def test_invalid_bytes_do_not_hide_abnormal_exit(self):
+        self.configure_checker(stdout=b"\xff", stderr=b"\xff", code=2)
+        self.assertEqual(self.check(), ("UNEXPECTED exit=2", False))
+
+    def test_ice_details_are_printable_on_a_legacy_console(self):
+        corpus = self.root / "corpus"
+        corpus.mkdir()
+        (corpus / "case.hy").write_text("fn main() {}", encoding="utf-8")
+        for prefix in (b"\xff", "🚀".encode("utf-8")):
+            with self.subTest(prefix=prefix):
+                self.configure_checker(stdout=prefix + b"STACK OVERFLOW" + b"x" * 130 + b"TAIL")
+                raw_output = io.BytesIO()
+                with io.TextIOWrapper(raw_output, encoding="cp936") as output:
+                    with patch.object(sys, "argv", [
+                        "hyfuzz.py", "--hyb", str(self.checker), "--corpus", str(corpus),
+                        "--cases", "1",
+                    ]), patch.object(hyfuzz.subprocess, "run", self.run_with_legacy_locale), \
+                         contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as failure:
+                        hyfuzz.main()
+                    self.assertEqual(failure.exception.code, 1)
+                    output.flush()
+                    rendered = raw_output.getvalue().decode("cp936")
+                self.assertIn("1 INVARIANT VIOLATIONS", rendered)
+                self.assertIn("ICE:", rendered)
+                self.assertIn("STACK OVERFLOW", rendered)
+                self.assertNotIn("TAIL", rendered)
+                self.assertTrue(rendered.isascii())
+
+    def test_invalid_output_is_saved_and_does_not_skip_later_cases(self):
+        self.configure_checker(stdout=b"\xff")
+        corpus = self.root / "corpus"
+        corpus.mkdir()
+        (corpus / "case.hy").write_text("fn main() {}", encoding="utf-8")
+        destination = self.root / "failures"
+        source = "// complete reproduction 错\n" + "x " * 200 + "TAIL\n"
+        output = io.StringIO()
+        with patch.object(sys, "argv", [
+            "hyfuzz.py", "--hyb", str(self.checker), "--corpus", str(corpus),
+            "--cases", "3", "--failures-dir", str(destination),
+        ]), patch.object(hyfuzz.subprocess, "run", self.run_with_legacy_locale), \
+             patch.object(hyfuzz, "gen_salad", return_value=source), \
+             patch.object(hyfuzz, "gen_mutate", return_value=source), \
+             patch.object(hyfuzz, "gen_nest", return_value=source), \
+             contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as failure:
+            hyfuzz.main()
+        self.assertEqual(failure.exception.code, 1)
+        self.assertEqual(len(self.calls.read_text().splitlines()), 3)
+        self.assertIn("clean-rejects=0, clean-accepts=0", output.getvalue())
+        self.assertIn("3 INVARIANT VIOLATIONS", output.getvalue())
+        sources = sorted(destination.glob("hyfuzz-*/*.hy"))
+        self.assertEqual(len(sources), 3)
+        for index, saved in enumerate(sources):
+            self.assertEqual(saved.read_text(encoding="utf-8"), source)
+            metadata = json.loads(saved.with_suffix(".json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["case_index"], index)
+            self.assertTrue(metadata["failure"].startswith("OUTPUT_ERROR:"))
+            self.assertEqual(metadata["source_sha256"], hashlib.sha256(saved.read_bytes()).hexdigest())
+
+
 class FuzzProcessTests(unittest.TestCase):
     def test_accept_and_clean_reject_are_valid(self):
         with tempfile.TemporaryDirectory() as workdir:
             for code in (0, 1):
                 with self.subTest(code=code), patch.object(
                     hyfuzz.subprocess, "run",
-                    return_value=subprocess.CompletedProcess([], code, "", ""),
+                    return_value=subprocess.CompletedProcess([], code, b"", b""),
                 ):
                     self.assertEqual(
                         hyfuzz.check_one("hyb", "fn main() {}", workdir, 1),
@@ -31,7 +152,7 @@ class FuzzProcessTests(unittest.TestCase):
             for code in (-11, -6, -9, 2, 101, 134, 139, 137, 3221225477):
                 with self.subTest(code=code), patch.object(
                     hyfuzz.subprocess, "run",
-                    return_value=subprocess.CompletedProcess([], code, "", ""),
+                    return_value=subprocess.CompletedProcess([], code, b"", b""),
                 ):
                     self.assertEqual(
                         hyfuzz.check_one("hyb", "fn main() {}", workdir, 1),
@@ -50,7 +171,7 @@ class FuzzProcessTests(unittest.TestCase):
             for text in hyfuzz.BAD_TEXT:
                 with self.subTest(text=text), patch.object(
                     hyfuzz.subprocess, "run",
-                    return_value=subprocess.CompletedProcess([], 1, "", text),
+                    return_value=subprocess.CompletedProcess([], 1, b"", text.encode("utf-8")),
                 ):
                     bad, accepted = hyfuzz.check_one("hyb", "", workdir, 1)
                     self.assertTrue(bad.startswith("ICE:"))
@@ -74,7 +195,7 @@ class FuzzProcessTests(unittest.TestCase):
                     "hyfuzz.py", "--hyb", sys.executable, "--corpus", corpus, "--cases", "3",
                 ]), patch.object(
                     hyfuzz.subprocess, "run",
-                    return_value=subprocess.CompletedProcess([], code, "", ""),
+                    return_value=subprocess.CompletedProcess([], code, b"", b""),
                 ) as run, contextlib.redirect_stdout(output):
                     hyfuzz.main()
                     self.assertEqual(run.call_count, 3)

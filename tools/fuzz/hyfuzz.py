@@ -117,7 +117,7 @@ def check_one(hyb, src, workdir, timeout):
     try:
         r = subprocess.run(
             [hyb, "check", path], cwd=workdir, capture_output=True,
-            text=True, timeout=timeout,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return "HANG", False
@@ -125,9 +125,16 @@ def check_one(hyb, src, workdir, timeout):
         return f"EXEC_ERROR: {err}", False
     if r.returncode not in (0, 1):
         return f"UNEXPECTED exit={r.returncode}", False
-    blob = (r.stdout + r.stderr).lower()
-    if any(b in blob for b in BAD_TEXT):
-        return f"ICE: {(r.stdout + r.stderr)[:120]}", False
+    # Capture bytes: text-mode locale decoding can fail inside a Windows
+    # reader thread before this case can be classified or saved.
+    blob = r.stdout + r.stderr
+    if any(b.encode("ascii") in blob.lower() for b in BAD_TEXT):
+        return f"ICE: {ascii(blob.decode('utf-8', 'replace')[:120])}", False
+    try:
+        r.stdout.decode("utf-8")
+        r.stderr.decode("utf-8")
+    except UnicodeDecodeError as err:
+        return f"OUTPUT_ERROR: checker output is not valid UTF-8: {err}", False
     return None, r.returncode == 0
 
 
