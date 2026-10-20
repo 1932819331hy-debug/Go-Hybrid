@@ -125,6 +125,44 @@ class CheckVersionsTests(unittest.TestCase):
                   'const DEFAULT_PIN: &str = "1.98.0";')
         self.assertDrift("hyb build.rs DEFAULT_PIN != rust 1.99.0")
 
+    def test_duplicate_fallback_cannot_hide_first_arm_drift(self):
+        self.edit("compiler/crates/hyb/src/main.rs",
+                  '    None => "go1.26.9",',
+                  '    None => "go1.26.8",\n    None => "go1.26.9",')
+        self.assertDrift("hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
+
+    def test_block_commented_fallback_cannot_hide_default_drift(self):
+        self.edit("compiler/crates/hyb/src/main.rs",
+                  '    None => "go1.26.9",',
+                  '    /*\n    None => "go1.26.9",\n    */\n'
+                  '    None => "go1.26.8",')
+        self.assertDrift("hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
+
+    def test_block_commented_build_pin_cannot_hide_default_drift(self):
+        self.edit("compiler/crates/hyb/build.rs",
+                  'const DEFAULT_PIN: &str = "1.99.0";',
+                  '/*\nconst DEFAULT_PIN: &str = "1.99.0";\n*/\n'
+                  'const DEFAULT_PIN: &str = "1.98.0";')
+        self.assertDrift("hyb build.rs DEFAULT_PIN != rust 1.99.0")
+
+    def test_default_pin_checks_accept_nested_block_comments(self):
+        self.edit("compiler/crates/hyb/src/main.rs",
+                  '    None => "go1.26.9",',
+                  '    /* historical\n    /* nested comment */\n'
+                  '    None => "go1.26.8",\n    */\n'
+                  '    None /* default */ => "go1.26.9",')
+        self.edit("compiler/crates/hyb/build.rs",
+                  'const DEFAULT_PIN: &str = "1.99.0";',
+                  '/*\nconst DEFAULT_PIN: &str = "1.98.0";\n*/\n'
+                  'const DEFAULT_PIN: &str = /* current */ "1.99.0";')
+        self.assertConsistent()
+
+    def test_multiline_string_is_not_the_pinned_version(self):
+        self.edit("compiler/crates/hyb/src/main.rs",
+                  '    None => "go1.26.9",',
+                  '    None => "go1.\n26.9",')
+        self.assertDrift("hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
+
     def test_build_guard_default_pin_dots_are_literal(self):
         self.edit("compiler/crates/hyb/build.rs", '"1.99.0"', '"1x99x0"')
         self.assertDrift("hyb build.rs DEFAULT_PIN != rust 1.99.0")

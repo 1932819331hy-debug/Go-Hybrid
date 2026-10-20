@@ -44,12 +44,52 @@ has_version() {
     grep -qE "$pat" "$file"
 }
 
-# Only inspect the named constant's active fallback. A quoted version in a
-# comment or another constant must not hide a stale compiled-in default.
+# Compare the complete supported declaration, not a quoted substring. Ignore
+# whitespace outside strings and Rust comments (including nested block comments).
+# Extra/alternate match arms and unsupported declaration forms fail closed.
+has_pin_declaration() {
+    local file="$1" name="$2" expected="$3"
+    awk -v name="$name" -v expected="$expected" '
+        {
+            clean = ""
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                pair = substr($0, i, 2)
+                if (depth) {
+                    if (pair == "/*") { depth++; i++ }
+                    else if (pair == "*/") { depth--; i++ }
+                } else if (quoted) {
+                    clean = clean c
+                    if (escaped) escaped = 0
+                    else if (c == "\\") escaped = 1
+                    else if (c == "\"") quoted = 0
+                } else if (pair == "//") {
+                    break
+                } else if (pair == "/*") {
+                    depth++; i++
+                } else if (c !~ /[[:space:]]/) {
+                    clean = clean c
+                    if (c == "\"") quoted = 1
+                }
+            }
+            if (quoted) clean = clean "\n"
+            if (!found && index(clean, "const" name ":") == 1) found = 1
+            if (found) {
+                declaration = declaration clean
+                if (clean ~ /;$/ && !depth && !quoted) {
+                    done = 1
+                    exit (declaration != expected)
+                }
+            }
+        }
+        END { if (!done) exit 1 }
+    ' "$file"
+}
+
 has_default_pin() {
     local name="$1" version="$2"
-    sed -n "/^const $name: &str = match /,/^};/p" compiler/crates/hyb/src/main.rs \
-        | grep -qE "^[[:space:]]*None[[:space:]]*=>[[:space:]]*\"$(re_escape "$version")\"[[:space:]]*,"
+    has_pin_declaration compiler/crates/hyb/src/main.rs "$name" \
+        "const$name:&str=matchoption_env!(\"HYB_$name\"){Some(v)=>v,None=>\"$version\",};"
 }
 
 echo "pins: $PINNED_GO / rust $PINNED_RUST (tools/env.sh)"
@@ -68,7 +108,8 @@ has_default_pin PINNED_GO "$PINNED_GO" \
 has_default_pin PINNED_RUST "$PINNED_RUST" \
     && pass "hyb default pin matches (rust $PINNED_RUST)" \
     || fail "hyb default pin (compiler/crates/hyb/src/main.rs) != rust $PINNED_RUST"
-grep -qE "^[[:space:]]*const DEFAULT_PIN: &str = \"$(re_escape "$PINNED_RUST")\"[[:space:]]*;" compiler/crates/hyb/build.rs \
+has_pin_declaration compiler/crates/hyb/build.rs DEFAULT_PIN \
+    "constDEFAULT_PIN:&str=\"$PINNED_RUST\";" \
     && pass "hyb drift-guard default matches (rust $PINNED_RUST)" \
     || fail "hyb build.rs DEFAULT_PIN != rust $PINNED_RUST (the guard would refuse honest builds)"
 

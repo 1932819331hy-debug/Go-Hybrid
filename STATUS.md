@@ -1,6 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
-- Contributor version guard: historical pin comments no longer mask stale compiler/build defaults; three RED regressions; focused 19/19, all tooling 390/390, runner 29/29 and fuzz 21/21 passed after repair. Rust workspace/corpus/differential and upstream CI remain delivery gates.
+- Contributor version guard: historical pin comments and duplicate fallback arms no longer mask stale compiler/build defaults; RED regressions; focused 24/24, all tooling 395/395, runner 29/29 and fuzz 21/21 passed after repair. Rust workspace/corpus/differential and upstream CI remain delivery gates.
 
 - Contributor #656 follow-up: apply the existing receiver guard to task callees and bound method values; 19 focused regressions cover residual defects and valid controls. Full workspace, corpus, differential, and CI are delivery gates.
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-23: triage bot shipped (PR #941) + Pareto landed 12 PRs verified (#892 #741 #869 #901 #915 #899 #913 #917 #671 #938 #885 #870) + #804/#793 evidence-closed (Go 1.26.9 accepts directional makes) — main tip b84fff6, battery cargo green, corpus 113/113, differential FULL 37+76, census 7/7
