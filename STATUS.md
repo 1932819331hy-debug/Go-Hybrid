@@ -1,4 +1,5 @@
 # STATUS (for the human — 15 lines max)
+- Tooling candidate: Kaggle wait stops on status-query failure; four real-CLI regressions and Python tooling pass. Pinned compiler/corpus/differential and upstream CI pending.
 
 - Contributor #656 follow-up: apply the existing receiver guard to task callees and bound method values; 19 focused regressions cover residual defects and valid controls. Full workspace, corpus, differential, and CI are delivery gates.
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-23: triage bot shipped (PR #941) + Pareto landed 12 PRs verified (#892 #741 #869 #901 #915 #899 #913 #917 #671 #938 #885 #870) + #804/#793 evidence-closed (Go 1.26.9 accepts directional makes) — main tip b84fff6, battery cargo green, corpus 113/113, differential FULL 37+76, census 7/7

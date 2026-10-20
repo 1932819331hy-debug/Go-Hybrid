@@ -156,7 +156,7 @@ def kaggle_wait(minutes, slug=None):
     run we just submitted (queue latency is ~11s, so the active window is
     comfortably observable with a 5s poll interval).
 
-    Exit codes: 0 = COMPLETE, 1 = kernel error/cancel, 2 = timeout.
+    Exit codes: 0 = COMPLETE, 1 = kernel error/cancel or status failure, 2 = timeout.
     """
     slug = slug or kaggle_slug()
     deadline = time.time() + minutes * 60
@@ -165,6 +165,10 @@ def kaggle_wait(minutes, slug=None):
     while time.time() < deadline:
         rc, out = sh("{} kernels status {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=60)
         polls += 1
+        if rc != 0:
+            print("kaggle kernels status failed (exit {}); no kernel state accepted".format(rc),
+                  file=sys.stderr)
+            return 1
         try:
             state = out.split('"')[-2].split(".")[-1].upper()  # '"KernelWorkerStatus.RUNNING"'
         except IndexError:
