@@ -79,6 +79,30 @@ class FuzzOutputEncodingTests(unittest.TestCase):
         self.configure_checker(stdout=b"\xff", stderr=b"\xff", code=2)
         self.assertEqual(self.check(), ("UNEXPECTED exit=2", False))
 
+    def test_ice_details_are_printable_on_a_legacy_console(self):
+        corpus = self.root / "corpus"
+        corpus.mkdir()
+        (corpus / "case.hy").write_text("fn main() {}", encoding="utf-8")
+        for prefix in (b"\xff", "🚀".encode("utf-8")):
+            with self.subTest(prefix=prefix):
+                self.configure_checker(stdout=prefix + b"STACK OVERFLOW" + b"x" * 130 + b"TAIL")
+                raw_output = io.BytesIO()
+                with io.TextIOWrapper(raw_output, encoding="cp936") as output:
+                    with patch.object(sys, "argv", [
+                        "hyfuzz.py", "--hyb", str(self.checker), "--corpus", str(corpus),
+                        "--cases", "1",
+                    ]), patch.object(hyfuzz.subprocess, "run", self.run_with_legacy_locale), \
+                         contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as failure:
+                        hyfuzz.main()
+                    self.assertEqual(failure.exception.code, 1)
+                    output.flush()
+                    rendered = raw_output.getvalue().decode("cp936")
+                self.assertIn("1 INVARIANT VIOLATIONS", rendered)
+                self.assertIn("ICE:", rendered)
+                self.assertIn("STACK OVERFLOW", rendered)
+                self.assertNotIn("TAIL", rendered)
+                self.assertTrue(rendered.isascii())
+
     def test_invalid_output_is_saved_and_does_not_skip_later_cases(self):
         self.configure_checker(stdout=b"\xff")
         corpus = self.root / "corpus"

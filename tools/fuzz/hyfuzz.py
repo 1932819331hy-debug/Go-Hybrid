@@ -129,7 +129,7 @@ def check_one(hyb, src, workdir, timeout):
     # reader thread before this case can be classified or saved.
     blob = r.stdout + r.stderr
     if any(b.encode("ascii") in blob.lower() for b in BAD_TEXT):
-        return f"ICE: {blob.decode('utf-8', 'replace')[:120]}", False
+        return f"ICE: {ascii(blob.decode('utf-8', 'replace')[:120])}", False
     try:
         r.stdout.decode("utf-8")
         r.stderr.decode("utf-8")
