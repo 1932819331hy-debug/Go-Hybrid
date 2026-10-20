@@ -220,6 +220,9 @@ def cmd_rebase(args):
         try:
             status, _ = gh.req("PUT", "/repos/%s/pulls/%d/update-branch" % (gh.repo, n),
                                {"expected_head_sha": sha})
+            if status != 202:
+                tb.log("  #%d update-branch -> %s (not accepted)" % (n, status))
+                continue
             tb.log("  #%d update-branch -> %s (CAS ok)" % (n, status))
         except RuntimeError as e:
             msg = str(e)
