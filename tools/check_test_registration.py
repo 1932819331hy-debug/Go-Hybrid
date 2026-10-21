@@ -154,6 +154,13 @@ def find_test_files(root, directory):
     """Repo-relative paths of every test_*.py under root/directory."""
     found = []
     base_dir = os.path.join(root, directory)
+    # One of the suite roots may be absent in a minimal test fixture. That
+    # is different from a present tree with an unreadable subdirectory.
+    # os.stat distinguishes absence from permission errors (unlike exists()).
+    try:
+        os.stat(base_dir)
+    except FileNotFoundError:
+        return []
     # Without onerror, os.walk silently skips unreadable subdirectories.
     # That turns an incomplete suite inventory into a false green CI gate.
     def fail_on_walk_error(error):
