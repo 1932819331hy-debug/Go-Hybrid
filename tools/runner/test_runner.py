@@ -235,6 +235,31 @@ class RunnerFailureTests(unittest.TestCase):
                 self.assertEqual(summary['steps'][-1]['name'], 'expected-result')
 
 
+class BoundedCaptureTests(unittest.TestCase):
+    def test_large_stdout_and_stderr_keep_only_final_tail(self):
+        # The old implementation collected every byte in subprocess.run()
+        # before slicing to 4000 characters. These real subprocesses exercise
+        # the bounded output path without any external network access.
+        payload = ('import sys; '
+                   'sys.stdout.write("discard-me" + "x" * 8000000); '
+                   'sys.stdout.flush(); '
+                   'sys.stderr.write("last-error\\n"); sys.stderr.flush()')
+        code, _, output = runner.run_cmd([sys.executable, "-c", payload], 15)
+        self.assertEqual(code, 0)
+        self.assertLessEqual(len(output), 4000)
+        self.assertTrue(output.endswith("last-error\\n"))
+        self.assertNotIn("discard-me", output)
+
+    def test_timeout_retains_progress_after_large_output(self):
+        payload = ('import sys,time; '
+                   'sys.stdout.write("x" * 1000000 + "progress\\n"); '
+                   'sys.stdout.flush(); time.sleep(60)')
+        code, _, output = runner.run_cmd([sys.executable, "-u", "-c", payload], 1)
+        self.assertEqual(code, 124)
+        self.assertLessEqual(len(output), 4000)
+        self.assertIn("progress", output)
+        self.assertIn("<<TIMEOUT after 1s>>", output)
+
 class RunnerOutputTests(unittest.TestCase):
     def timed(self, code):
         return runner.run_cmd([sys.executable, '-u', '-c', code], 0.5)
