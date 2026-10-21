@@ -779,4 +779,11 @@ def _edits(with_len_leaves: bool, with_float_conv: bool):
         edits.append((ARITH,
             "    if divisor_float_conv_zero(e, consts, st, defined, 0) {\n        return true;\n    }\n    matches!(",
             "    matches!("))
+    # (registry) the corpus join keys on tier0_rule_id — declare the
+    # invariant class this code enforces (BUILDABLE: every accepted
+    # program must emit go-buildable Go; the issue bodies cite it).
+    edits.append(("compiler/crates/hy-diag/data/diagnostics.json",
+                  '"code": "HYB-E6001",',
+                  '"code": "HYB-E6001",\n      "tier0_rule_id": "BUILDABLE",'))
+
     return edits

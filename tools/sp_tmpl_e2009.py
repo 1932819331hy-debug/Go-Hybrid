@@ -503,4 +503,11 @@ def _edits():
         None
     }"""))
 
+    # (registry) the corpus join keys on tier0_rule_id — declare the
+    # invariant class this code enforces (BUILDABLE: every accepted
+    # program must emit go-buildable Go; the issue bodies cite it).
+    edits.append(("compiler/crates/hy-diag/data/diagnostics.json",
+                  '"code": "HYB-E2009",',
+                  '"code": "HYB-E2009",\n      "tier0_rule_id": "BUILDABLE",'))
+
     return edits

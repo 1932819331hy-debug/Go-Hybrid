@@ -465,4 +465,11 @@ fn conv_const(e: &Expr) -> Option<ConvConst> {'''))
                 // `const a = int(2.5)` must reject like `x := int(2.5)`.
                 ck.check_expr_type_conversions(&c.value);"""))
 
+    # (registry) the corpus join keys on tier0_rule_id — declare the
+    # invariant class this code enforces (BUILDABLE: every accepted
+    # program must emit go-buildable Go; the issue bodies cite it).
+    edits.append(("compiler/crates/hy-diag/data/diagnostics.json",
+                  '"code": "HYB-E6006",',
+                  '"code": "HYB-E6006",\n      "tier0_rule_id": "BUILDABLE",'))
+
     return edits
