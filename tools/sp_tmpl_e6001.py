@@ -496,11 +496,15 @@ fn array_len_zero_divisor_rejects() {
         "HYB-E6001",
     );
     assert_code(
-        "var g [1 / 0]int\\n\\nfn main() {\\n    _ = g\\n}\\n",
+        "type arr = [1 / 0]int\\n\\nfn main() {\\n    _ = 1\\n}\\n",
         "HYB-E6001",
     );
     assert_code(
-        "type arr = [1 / 0]int\\n\\nfn main() {\\n    _ = 1\\n}\\n",
+        "struct s { a [1 % 0]int }\\n\\nfn main() {\\n    _ = 1\\n}\\n",
+        "HYB-E6001",
+    );
+    assert_code(
+        "fn f(a [1 / 0]int) {\\n    _ = a\\n}\\n\\nfn main() {\\n    _ = 1\\n}\\n",
         "HYB-E6001",
     );
     assert_code(
