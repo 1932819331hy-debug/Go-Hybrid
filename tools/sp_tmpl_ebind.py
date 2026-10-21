@@ -437,11 +437,18 @@ fn unwrap_parens_and_move(mut e: &Expr) -> &Expr {"""))
     fn static_bind_source_bound(&self, st: &FnState, expr: &Expr) -> Option<BindSourceBound> {
         match unwrap_parens_and_move(expr) {
             Expr::Receive { .. } => Some(BindSourceBound::AtMost(2)),
-            Expr::Index { base, .. } => match self.kind_of_expr(base) {
-                OpKind::Map(..) => Some(BindSourceBound::AtMost(2)),
-                OpKind::Slice(..) | OpKind::Array(..) | OpKind::Str => {
+            Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
+                TypeShape::Map(..) => Some(BindSourceBound::AtMost(2)),
+                TypeShape::Slice(..) | TypeShape::Array(..) | TypeShape::Str => {
                     Some(BindSourceBound::Exact(1))
                 }
+                // a pointer to an array auto-derefs on indexing in Go —
+                // still exactly one value; every other pointer/base stays
+                // fail-open.
+                TypeShape::Pointer(inner) => match &**inner {
+                    TypeShape::Array(..) => Some(BindSourceBound::Exact(1)),
+                    _ => None,
+                },
                 _ => None,
             },
             _ => None,
