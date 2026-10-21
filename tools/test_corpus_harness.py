@@ -256,6 +256,50 @@ class ManagedReportCliTests(unittest.TestCase):
                 del managed[field]
                 self.assert_invalid_report(managed)
 
+    def test_accepted_case_requires_managed_report_when_requested(self):
+        for expected in ("ACCEPT", "ACCEPT-MANAGED"):
+            for present in (False, True):
+                with self.subTest(expected=expected, report_present=present):
+                    payload = self.accept_payload(None)
+                    if not present:
+                        del payload["summary"]["managed"]
+                    if expected == "ACCEPT-MANAGED":
+                        payload["summary"]["warnings"] = 1
+                        payload["diagnostics"] = [
+                            {"severity": "warning", "code": "HYB-E8001"}
+                        ]
+                    run = self.run_cases([(expected, payload, 0)])
+                    self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+                    self.assertIn("harness-error", run.stdout)
+                    self.assertIn("missing managed report", run.stdout)
+                    self.assertIn("verdict agreement: 0/1", run.stdout)
+                    self.assertNotIn("Traceback", run.stderr)
+
+    def test_missing_report_does_not_skip_later_valid_case(self):
+        run = self.run_cases([
+            ("ACCEPT", self.accept_payload(None), 0),
+            ("ACCEPT", self.accept_payload(
+                {"managed_blocks": 2, "sites_via_managed": 1, "total_sites": 4}
+            ), 0),
+        ])
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("harness-error", run.stdout)
+        self.assertIn("verdict agreement: 1/2", run.stdout)
+        self.assertIn("managed aggregate: 2 block(s), 1/4 sites via managed = 25.0%",
+                      run.stdout)
+        self.assertNotIn("Traceback", run.stderr)
+
+    def test_absent_or_null_report_allowed_without_report_flag(self):
+        for present in (False, True):
+            with self.subTest(report_present=present):
+                payload = self.accept_payload(None)
+                if not present:
+                    del payload["summary"]["managed"]
+                run = self.run_cases([("ACCEPT", payload, 0)], report_managed=False)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("verdict agreement: 1/1", run.stdout)
+                self.assertNotIn("managed aggregate:", run.stdout)
+
     def test_present_report_requires_object_even_when_falsey(self):
         for managed in (False, 0, "", [], [1], "x"):
             with self.subTest(managed=managed):

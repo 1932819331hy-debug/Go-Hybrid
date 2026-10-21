@@ -173,6 +173,10 @@ def run_checker(bin_path, hy_path, report_managed=False):
         )
     if report_managed:
         managed = summary.get("managed")
+        # A successful check always emits a managed report when requested,
+        # even with no blocks/sites. Missing evidence must not become zeros.
+        if managed is None and verdict == "accept":
+            raise RuntimeError(f"checker missing managed report for {hy_path}")
         # Parse failures have no managed report. A report that is present
         # must carry the usize counters emitted by hy_diag::ManagedReport;
         # silently defaulting malformed counters to zero hides audit drift.

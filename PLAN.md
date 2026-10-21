@@ -1,5 +1,6 @@
 # Hybrid Language: Development Plan
 
+- Contributor validation (2026-10-21): corpus `--report-managed` now rejects accepted checker output without a managed report instead of silently aggregating zeros. Five failing CLI cases reproduced on `9f61f54`; 41 focused, 389 tools, 29 runner and 21 fuzz tests pass after the fix. Rejected-case and no-report-flag compatibility remain covered. Rust/compiler/corpus/differential execution and upstream CI remain unverified because Rust is unavailable locally.
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
