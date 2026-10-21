@@ -592,15 +592,17 @@ def cmd_log(args):
                 "utf-8", errors="replace")
             return cur["sha"], content
 
-        payload_sha, content = read_log()
-        new_content = (content if content.endswith("\n") or not content
-                       else content + "\n") + line + "\n"
-        payload = {"message": "shepherd-log: %s %s" % (args.event, args.pr or ""),
-                   "content": base64.b64encode(new_content.encode()).decode(),
-                   "branch": branch}
-        if payload_sha:
-            payload["sha"] = payload_sha
         for attempt in range(3):
+            # Content and SHA must come from the same fresh snapshot. Updating
+            # only the SHA after a conflict would overwrite concurrent appends.
+            payload_sha, content = read_log()
+            new_content = (content if content.endswith("\n") or not content
+                           else content + "\n") + line + "\n"
+            payload = {"message": "shepherd-log: %s %s" % (args.event, args.pr or ""),
+                       "content": base64.b64encode(new_content.encode()).decode(),
+                       "branch": branch}
+            if payload_sha:
+                payload["sha"] = payload_sha
             try:
                 st2, _ = gh.req("PUT", "/repos/%s/contents/%s" % (gh.repo, path), payload)
                 if st2 in (200, 201):
@@ -608,10 +610,6 @@ def cmd_log(args):
                     break
             except RuntimeError:
                 pass
-            _, cur = gh.req("GET", "/repos/%s/contents/%s?ref=%s"
-                            % (gh.repo, path, branch))
-            if cur and cur.get("sha"):
-                payload["sha"] = cur["sha"]
         else:
             tb.log("LOG-WRITE-FAILED after retries (record kept in this run's log): %s" % line)
     except (RuntimeError, tb.RateGuard) as e:
