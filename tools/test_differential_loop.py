@@ -447,3 +447,53 @@ class TimeoutCorpusTests(unittest.TestCase):
         status, output = self.run_with_timeout(None)
         self.assertEqual(status, 0, output)
         self.assertIn("differential: FULL AGREEMENT", output)
+
+
+@unittest.skipUnless(os.name == "posix", "requires POSIX executable permissions")
+class ProcessLaunchReportingTests(unittest.TestCase):
+    """Launch errors must be failed cases, not tracebacks aborting the corpus."""
+
+    def test_builder_launch_error_is_a_failed_case(self):
+        with tempfile.TemporaryDirectory() as td:
+            ok, detail = HARNESS_MOD.build_and_run(
+                str(pathlib.Path(td) / "missing-hyb"),
+                str(pathlib.Path(td) / "sample.hy"), td
+            )
+            self.assertFalse(ok)
+            self.assertIn("builder could not be run", detail)
+
+    def test_unexecutable_program_does_not_abort_later_cases(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            corpus = root / "corpus"
+            corpus.mkdir()
+            for name in ("01-first.hy", "02-second.hy"):
+                (corpus / name).write_text(
+                    "// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n",
+                    encoding="utf-8",
+                )
+
+            builder = root / "hyb"
+            program = f"#!{sys.executable}\n"
+            builder.write_text(
+                f"#!{sys.executable}\n"
+                "import pathlib, sys\n"
+                "output = pathlib.Path('a.out')\n"
+                f"output.write_text({program!r}, encoding='utf-8')\n"
+                "output.chmod(0o644 if sys.argv[2].endswith('01-first.hy') else 0o755)\n",
+                encoding="utf-8",
+            )
+            builder.chmod(0o755)
+
+            result = REAL_RUN(
+                [sys.executable, str(HARNESS), "--bin", str(builder),
+                 "--corpus", str(corpus)],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("FAIL  01-first.hy", result.stdout)
+            self.assertIn("program could not be run", result.stdout)
+            self.assertIn("PASS  02-second.hy", result.stdout)
+            self.assertIn("differential accept-side (build+run): 1/2", result.stdout)
+            self.assertNotIn("FULL AGREEMENT", result.stdout)
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
