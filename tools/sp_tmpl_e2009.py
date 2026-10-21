@@ -250,7 +250,7 @@ def _edits():
                 // type-check as a comparison after `i := lo; i < hi` (and
                 // the inclusive `hyLo`/`hyHi` form), and constant bounds
                 // must fit the counter's integer type.
-                self.check_range_bound_types(st, var, lo, hi, inclusive);
+                self.check_range_bound_types(st, var, lo, hi, *inclusive);
             }"""))
 
     # (2) nil literal + predeclared spellings + AddrOf inside the kind match.
