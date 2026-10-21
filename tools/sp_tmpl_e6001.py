@@ -585,7 +585,6 @@ def candidates():
         "edits": _edits(with_len_leaves=True, with_float_conv=True),
         "new_files": [
             (TEST_PATH, TEST_SRC),
-            (FIXTURE_PATH, FIXTURE_SRC),
         ],
         "rust_tests": ["--test", TEST_STEM],
         "rationale": (
@@ -602,7 +601,6 @@ def candidates():
         "edits": _edits(with_len_leaves=False, with_float_conv=False),
         "new_files": [
             (TEST_PATH, TEST_SRC_CORE_FALLBACK),
-            (FIXTURE_PATH, FIXTURE_SRC),
         ],
         "rust_tests": ["--test", TEST_STEM],
         "rationale": (
