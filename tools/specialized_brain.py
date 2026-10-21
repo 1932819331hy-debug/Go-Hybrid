@@ -118,7 +118,8 @@ def surface_edits(issue_no: int, slug: str, why: str) -> list[tuple]:
     t1, r1 = total + 1, rej + 1
     edits.append(("tests/checker-corpus/README.md", m.group(0),
                   f"**Current registered corpus: {t1} programs — "
-                  f"ACCEPT {acc} · ACCEPT-MANAGED {managed} · REJECT {r1}"))
+                  f"ACCEPT {acc} · ACCEPT-MANAGED {managed} · REJECT {r1}",
+                  True))  # the count line appears twice (lede + body)
 
     def bump(path, pattern, flags=0):
         src = head(path)
