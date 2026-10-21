@@ -445,7 +445,7 @@ fn unwrap_parens_and_move(mut e: &Expr) -> &Expr {"""))
                 // a pointer to an array auto-derefs on indexing in Go —
                 // still exactly one value; every other pointer/base stays
                 // fail-open.
-                TypeShape::Pointer(inner) => match &**inner {
+                TypeShape::Pointer(inner) => match inner.as_ref() {
                     TypeShape::Array(..) => Some(BindSourceBound::Exact(1)),
                     _ => None,
                 },
