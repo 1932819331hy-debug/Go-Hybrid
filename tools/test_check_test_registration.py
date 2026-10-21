@@ -12,6 +12,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+from unittest.mock import patch
 import subprocess
 import sys
 import tempfile
@@ -297,6 +298,47 @@ class GuardMisuseTests(unittest.TestCase):
     def test_root_without_suites_fails_closed(self):
         self.assertEqual(
             self.run_main("python3 -m unittest discover -s tools -p test_x.py\n"), 2)
+
+    def test_scandir_error_is_not_an_empty_test_list(self):
+        # os.walk without onerror silently skips files under unreadable dirs.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "tools").mkdir()
+            (root / "tools/test_x.py").write_text("# must be discovered\n")
+            with patch.object(guard.os, "scandir",
+                              side_effect=PermissionError("simulated denial")):
+                with self.assertRaisesRegex(PermissionError, "simulated denial"):
+                    guard.find_test_files(root, "tools")
+
+    def test_partial_walk_cannot_claim_every_suite_is_registered(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workflow = root / "ci.yml"
+            workflow.write_text(
+                "python3 -m unittest discover -s tools -p test_x.py\n"
+                "python3 tests/test_y.py\n", encoding="utf-8")
+            for relative in ("tools/test_x.py", "tests/test_y.py"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# test\n", encoding="utf-8")
+            original_scandir = guard.os.scandir
+
+            def selective_scandir(path):
+                if Path(path) == root / "tools":
+                    raise PermissionError("cannot scan tools")
+                return original_scandir(path)
+
+            err = io.StringIO()
+            with patch.object(guard.sys, "argv", [
+                    "check_test_registration.py", "--workflow", str(workflow),
+                    "--root", str(root)]):
+                with patch.object(guard.os, "scandir",
+                                  side_effect=selective_scandir):
+                    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                        code = guard.main()
+            self.assertEqual(code, 2)
+            self.assertIn("test discovery scan failed", err.getvalue())
+            self.assertIn("cannot scan tools", err.getvalue())
 
     def test_fully_registered_tree_passes(self):
         self.assertEqual(
