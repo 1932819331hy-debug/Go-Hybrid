@@ -549,6 +549,7 @@
     },
     {
       "code": "HYB-E6001",
+      "tier0_rule_id": "BUILDABLE",
       "name": "div-by-const-zero",
       "category": "overflow-bounds",
       "severity": "error",
