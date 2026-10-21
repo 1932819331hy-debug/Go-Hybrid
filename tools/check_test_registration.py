@@ -18,9 +18,9 @@ reference it, and fails closed on any file no reference reaches:
   tests/**/test_*.py  run directly, e.g. `python3 tests/test_install_runtime.py`
                       -> the path must be the invoked Python entry point
 
-Only explicit single-line Python invocations count. Comments, echoed text,
-step names, interpreter flags, chained later commands, and paths passed as
-arguments to other scripts register nothing. This is not a general
+Only explicit single-line Python invocations count. Comments, heredoc data,
+echoed text, step names, interpreter flags, chained later commands, and paths
+passed as arguments to other scripts register nothing. This is not a general
 shell/YAML interpreter.
 
 Usage: python3 tools/check_test_registration.py [--workflow PATH] [--root DIR]
@@ -42,6 +42,11 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # as execution.
 PYTHON_RE = re.compile(r"(?:.*/)?python(?:3(?:\.\d+)?)?\Z")
 PYTHON_FLAGS_RE = re.compile(r"-[bBdEIOPqRsSuvx]+\Z")
+# Preserve shell word spelling until heredoc operators have been identified:
+# shlex's POSIX mode removes quotes, while its non-POSIX mode splits words
+# containing escaped spaces or adjacent quoted/unquoted pieces.
+SHELL_TOKEN_RE = re.compile(
+    r"""(?:[^\s;&|<>()'"\\]|\\.|'[^']*'|"(?:\\.|[^"\\])*")+|<<<|<<|[;&|()]+|[<>]+""")
 
 
 def shell_words(line):
@@ -52,16 +57,59 @@ def shell_words(line):
 
 def python_commands(workflow_text):
     """Yield arguments of explicit, single-line Python invocations."""
-    for line in workflow_text.splitlines():
-        line = line.strip()
+    heredocs = []
+    run_indent = block_indent = None
+    for raw_line in workflow_text.splitlines():
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if run_indent is not None and raw_line.strip():
+            if indent <= run_indent:
+                run_indent = block_indent = None
+                heredocs.clear()
+            elif block_indent is None:
+                block_indent = indent
+        if heredocs:
+            delimiter, strip_tabs, indent = heredocs[0]
+            body = (raw_line[indent:] if raw_line.startswith(" " * indent)
+                    else raw_line)
+            if (body.lstrip("\t") if strip_tabs else body) == delimiter:
+                heredocs.pop(0)
+            continue
+        line = raw_line.strip()
         inline_run = re.match(r"(?:-\s+)?run:\s*(.*)", line)
         if inline_run:
             line = inline_run.group(1)
+            run_indent, block_indent = indent, None
+            if re.fullmatch(r"\|[-+]?(?:\s+#.*)?", line):
+                continue
+        elif run_indent is None and re.match(
+                r"""(?:-\s+)?(?:[\w-]+|'[^']*'|"(?:\\.|[^"\\])*"):(?:\s|$)""", line):
+            # YAML metadata is not shell source, even when a step name
+            # contains an unquoted heredoc operator.
+            continue
         try:
             tokens = shell_words(line)
             # A quoted YAML run scalar wraps the whole shell command.
             if inline_run and len(tokens) == 1:
-                tokens = shell_words(tokens[0])
+                line = tokens[0]
+                tokens = shell_words(line)
+            # Keep quotes here so an echoed '<<' is not a redirection.
+            # Offsets distinguish <<-EOF from a delimiter named -EOF.
+            raw_tokens = list(SHELL_TOKEN_RE.finditer(line))
+            for index, token in enumerate(raw_tokens[:-1]):
+                if token.group().startswith("#"):
+                    break
+                if token.group() != "<<":
+                    continue
+                strip_tabs = line[token.end():token.end() + 1] == "-"
+                delimiter = raw_tokens[index + 1].group()
+                if strip_tabs:
+                    delimiter = delimiter[1:]
+                    if not delimiter and index + 2 < len(raw_tokens):
+                        delimiter = raw_tokens[index + 2].group()
+                words = shlex.split(delimiter)
+                if len(words) == 1:
+                    heredocs.append((words[0], strip_tabs,
+                                     block_indent if block_indent is not None else indent))
         except ValueError:
             continue
         if tokens and PYTHON_RE.fullmatch(tokens[0]):
