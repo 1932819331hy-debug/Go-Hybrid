@@ -248,6 +248,15 @@ def propose(issue_no: int, round_no: int, repro_src: str, expected: str,
                 f"target/author-brain-trace/issue-{issue_no}.jsonl. BLOCK.")
 
     cand = cands[idx]
+    # census surfaces: derived from the family's fixture (slug + rationale)
+    fixture_path, fixture_src = next(
+        (p, c) for p, c in cand["new_files"]
+        if p.startswith("tests/checker-corpus/") and p.endswith(".hy"))
+    slug = pathlib.Path(fixture_path).stem
+    wm = re.search(r"---- Why this is a REJECT ----\n(.*?)\n//", fixture_src, re.S)
+    why = wm.group(1).strip() if wm else "see the fixture header for the rule citation"
+    cand = dict(cand)
+    cand["edits"] = list(cand["edits"]) + surface_edits(issue_no, slug, why)
     rec = {"kind": "candidate", "round": round_no, "family": fam,
            "variant": cand["name"]}
     try:
