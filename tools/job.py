@@ -335,29 +335,34 @@ def actions_fetch(run_id, jobdir):
     if not arts:
         print("actions fetch: run {} has no artifacts to download".format(run_id), file=sys.stderr)
         return 1
-    os.makedirs(os.path.join(jobdir, "result"), exist_ok=True)
-    for a in arts:
-        url = a["archive_download_url"]
-        dest = os.path.join(jobdir, "result", a["name"] + ".zip")
-        req = urllib.request.Request(url)
-        # GitHub redirects archive downloads to a signed storage URL. urllib
-        # forwards normal headers across hosts; do not send our token there.
-        req.add_unredirected_header("Authorization", "token " + tok)
-        # Finish the response before touching a previous valid archive. Publish
-        # via a sibling temporary file so write/replace failures preserve it too.
-        with urllib.request.urlopen(req, timeout=120) as r:
-            data = r.read()
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile(dir=os.path.dirname(dest),
-                                             prefix=".artifact-", delete=False) as f:
-                temporary = f.name
+    result_dir = os.path.join(jobdir, "result")
+    os.makedirs(result_dir, exist_ok=True)
+    # Download the entire run into a separate directory before publishing
+    # any archive. If shard N fails after shards 1..N-1 have downloaded,
+    # leave ALL previously reviewed archives unchanged; a mixture of old
+    # and new shards is not evidence for this run.
+    with tempfile.TemporaryDirectory(prefix=".artifact-batch-", dir=result_dir) as staging:
+        prepared = []
+        for index, a in enumerate(arts):
+            url = a["archive_download_url"]
+            dest = os.path.join(result_dir, a["name"] + ".zip")
+            req = urllib.request.Request(url)
+            # GitHub redirects archive downloads to a signed storage URL.
+            # Do not forward the GitHub token across hosts.
+            req.add_unredirected_header("Authorization", "token " + tok)
+            with urllib.request.urlopen(req, timeout=120) as r:
+                data = r.read()
+            staged = os.path.join(staging, "{}.zip".format(index))
+            with open(staged, "wb") as f:
                 f.write(data)
-            os.replace(temporary, dest)
-        finally:
-            if temporary is not None and os.path.exists(temporary):
-                os.remove(temporary)
-        print("artifact {} ({} bytes) -> {}".format(a["name"], a["size_in_bytes"], dest))
+            prepared.append((staged, dest, a))
+        # Files are published only once every network transfer succeeds.
+        # Individual replacements remain atomic; unexpected filesystem
+        # errors during this final loop are not a whole-directory transaction.
+        for staged, dest, a in prepared:
+            os.replace(staged, dest)
+            print("artifact {} ({} bytes) -> {}".format(
+                a["name"], a["size_in_bytes"], dest))
     return 0
 
 
