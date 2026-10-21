@@ -138,19 +138,19 @@ class DriftTests(_ProblemsMixin, unittest.TestCase):
         cases = [
             (
                 "compiler/crates/hy-syntax/tests/parse_all.rs",
-                'assert_eq!(files.len(), 3, "expected exactly 99 corpus programs");\\n',
+                'assert_eq!(files.len(), 3, "expected exactly 99 corpus programs");\n',
             ),
             (
                 ".github/workflows/ci.yml",
-                "      - name: verdict agreement (3/99 + tripwire)\\n",
+                "      - name: verdict agreement (3/99 + tripwire)\n",
             ),
             (
                 "Makefile",
-                '\\t@echo "make corpus — Tier-0 corpus verdicts (3/99)"\\n',
+                '\t@echo "make corpus — Tier-0 corpus verdicts (3/99)"\n',
             ),
             (
                 "README.md",
-                "| x | [checker corpus 3/99](tests/checker-corpus/) |\\n",
+                "| x | [checker corpus 3/99](tests/checker-corpus/) |\n",
             ),
         ]
         for rel, content in cases:
