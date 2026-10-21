@@ -314,7 +314,15 @@ def run_author(issue_no: int, out: pathlib.Path, max_rounds: int,
         for cpath in ACCEPT_CONTROLS:
             gs = sh(["git", "show", f"HEAD:{cpath}"], timeout=60)
             if gs.returncode != 0 or not gs.stdout:
-                continue
+                error = "empty control from HEAD"
+                if gs.returncode != 0:
+                    error = (gs.stderr or "").strip() or "git show failed"
+                feedback = (f"cannot read accept control {cpath} from HEAD "
+                            f"(exit {gs.returncode}): {error}")
+                tr(trace, "gate-control-read-failed", round=rnd, control=cpath,
+                   exit=gs.returncode, error=error)
+                controls_ok = False
+                break
             tmpc = REPRO_DIR / ("control-" + pathlib.Path(cpath).name)
             tmpc.write_text(gs.stdout)
             cc, _ = hyb_check(str(tmpc.relative_to(ROOT)))

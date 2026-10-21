@@ -42,6 +42,7 @@ check:
 	@$(PY) -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/differential_loop.py && echo "py-syntax OK"
 
 	@$(PY) -m unittest discover -s tools -p test_differential_loop.py -v
+	@$(PY) -m unittest discover -s tools -p test_author_stage.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_versions.py -v
 	@$(PY) -m unittest discover -s tools -p test_workload_run.py -v
 	@$(PY) -m unittest discover -s tools -p test_runner_env_report.py -v
