@@ -96,7 +96,8 @@ def registered_discoveries(workflow_text):
 
     Like the original guard, this reads explicit one-line commands run from
     the repository root; it is not a general shell/YAML or load_tests
-    interpreter.
+    interpreter. Method-filtered (-k) discovery cannot establish full-file
+    registration; a separate unfiltered invocation must reach the file.
     """
     discoveries = []
     for arguments in python_commands(workflow_text):
@@ -109,12 +110,12 @@ def registered_discoveries(workflow_text):
                             "--buffer", "--locals") or re.fullmatch(r"-[vqfcb]+", argument):
                 continue
             option, attached, value = argument.partition("=")
-            if argument[:2] in ("-s", "-p", "-t", "-k") and len(argument) > 2:
+            if argument[:2] in ("-s", "-p", "-t") and len(argument) > 2:
                 option, attached, value = argument[:2], True, argument[2:]
                 if value.startswith("="):
                     value = value[1:]
             if option not in ("-s", "--start-directory", "-p", "--pattern",
-                              "-t", "--top-level-directory", "-k"):
+                              "-t", "--top-level-directory"):
                 # Help exits before discovery; unknown or unsupported syntax
                 # cannot establish that any test runs.
                 pattern = None
@@ -238,3 +239,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

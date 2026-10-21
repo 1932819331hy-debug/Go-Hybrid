@@ -178,6 +178,50 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("default discovery really ran", actual.stderr)
         self.assertEqual(guard.unregistered(root, text), [])
 
+    def test_method_filters_cannot_establish_full_file_registration(self):
+        root, _ = self.build("", ["tools/test_real.py"])
+        (root / "tools/test_real.py").write_text(
+            "import unittest\nclass Real(unittest.TestCase):\n"
+            "    def test_selected(self): self.fail('selected sentinel')\n"
+            "    def test_other(self): self.fail('other sentinel')\n",
+            encoding="utf-8")
+        for pattern in ((), ("-p", "test_real.py")):
+            for selector in ("nevermatches", "selected"):
+                for option in (("-k", selector), ("-k" + selector,),
+                               ("-k=" + selector,)):
+                    with self.subTest(pattern=pattern, option=option):
+                        arguments = ["-m", "unittest", "discover", "-s", "tools",
+                                     *pattern, *option]
+                        actual = subprocess.run([sys.executable, *arguments], cwd=root,
+                                                capture_output=True, text=True, timeout=15)
+                        self.assertNotIn("other sentinel", actual.stderr)
+                        if selector == "selected":
+                            self.assertEqual(actual.returncode, 1, actual.stderr)
+                            self.assertIn("selected sentinel", actual.stderr)
+                            self.assertIn("Ran 1 test", actual.stderr)
+                        else:
+                            self.assertIn("Ran 0 tests", actual.stderr)
+                            self.assertNotIn("selected sentinel", actual.stderr)
+                        workflow = "python3 " + " ".join(arguments)
+                        self.assertEqual([rel for rel, _ in guard.unregistered(root, workflow)],
+                                         ["tools/test_real.py"])
+
+    def test_unfiltered_command_still_registers_alongside_filtered_command(self):
+        root, _ = self.build("", ["tools/test_real.py"])
+        filtered = "python3 -m unittest discover -s tools -k selected\n"
+        for unfiltered in ("python3 -m unittest discover -s tools\n",
+                           "python3 -m unittest discover -s tools -p test_real.py\n"):
+            for workflow in (filtered + unfiltered, unfiltered + filtered):
+                with self.subTest(workflow=workflow):
+                    self.assertEqual(guard.unregistered(root, workflow), [])
+
+    def test_repeated_method_filters_do_not_establish_full_file_registration(self):
+        root, text = self.build(
+            "python3 -m unittest discover -s tools -k nevermatches -k selected\n",
+            ["tools/test_real.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/test_real.py"])
+
     def test_missing_pattern_is_a_real_unittest_error(self):
         root, _ = self.build("", ["tools/test_real.py"])
         for options in (("-p",), ("--pattern",), ("-p", "-v"),
@@ -431,3 +475,4 @@ class GuardMisuseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
