@@ -133,6 +133,32 @@ class DriftTests(_ProblemsMixin, unittest.TestCase):
         )
         self.assertEqual(hits, [])
 
+    def test_second_corpus_counts_cannot_disagree_silently(self):
+        """Both parts of N/N and the assertion message claim the same census."""
+        cases = [
+            (
+                "compiler/crates/hy-syntax/tests/parse_all.rs",
+                'assert_eq!(files.len(), 3, "expected exactly 99 corpus programs");\\n',
+            ),
+            (
+                ".github/workflows/ci.yml",
+                "      - name: verdict agreement (3/99 + tripwire)\\n",
+            ),
+            (
+                "Makefile",
+                '\\t@echo "make corpus — Tier-0 corpus verdicts (3/99)"\\n',
+            ),
+            (
+                "README.md",
+                "| x | [checker corpus 3/99](tests/checker-corpus/) |\\n",
+            ),
+        ]
+        for rel, content in cases:
+            with self.subTest(surface=rel):
+                hits = self._problems_with(rel, content)
+                self.assertEqual(len(hits), 1)
+                self.assertIn("says 99", hits[0])
+
     def test_stale_breakdown_is_named(self):
         hits = self._problems_with(
             "tests/checker-corpus/README.md",
