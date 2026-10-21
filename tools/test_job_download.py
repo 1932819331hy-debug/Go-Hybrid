@@ -245,6 +245,55 @@ class DownloadIntegrityTests(unittest.TestCase):
             self.assertEqual(dest.read_bytes(), b"old")
             self.assertEqual([p.name for p in result.iterdir()], ["results.zip"])
 
+    def test_later_shard_download_failure_preserves_all_previous_archives(self):
+        for preexisting in (False, True):
+            with self.subTest(preexisting=preexisting), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                result = root / "result"
+                result.mkdir()
+                first = result / "first.zip"
+                second = result / "second.zip"
+                if preexisting:
+                    first.write_bytes(b"reviewed first")
+                    second.write_bytes(b"reviewed second")
+                artifacts = [
+                    {"name": name, "archive_download_url": "https://example.invalid/" + name,
+                     "size_in_bytes": 9}
+                    for name in ("first", "second")
+                ]
+                with mock.patch.object(job, "gh_api",
+                                       return_value={"artifacts": artifacts}), \
+                     mock.patch.object(job, "gh_token", return_value="fixture"), \
+                     mock.patch.object(job.urllib.request, "urlopen",
+                                       side_effect=[io.BytesIO(b"new first"),
+                                                    http.client.IncompleteRead(b"partial", 10)]), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(http.client.IncompleteRead):
+                        job.actions_fetch(123, str(root))
+                self.assertEqual(first.read_bytes() if first.exists() else None,
+                                 b"reviewed first" if preexisting else None)
+                self.assertEqual(second.read_bytes() if second.exists() else None,
+                                 b"reviewed second" if preexisting else None)
+                self.assertEqual(sorted(p.name for p in result.iterdir()),
+                                 ["first.zip", "second.zip"] if preexisting else [])
+
+    def test_all_shards_publish_after_complete_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = [
+                {"name": name, "archive_download_url": "https://example.invalid/" + name,
+                 "size_in_bytes": 1}
+                for name in ("first", "second")
+            ]
+            with mock.patch.object(job, "gh_api",
+                                   return_value={"artifacts": artifacts}), \
+                 mock.patch.object(job, "gh_token", return_value="fixture"), \
+                 mock.patch.object(job.urllib.request, "urlopen",
+                                   side_effect=[io.BytesIO(b"A"), io.BytesIO(b"B")]), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(job.actions_fetch(123, tmp), 0)
+            self.assertEqual((Path(tmp) / "result/first.zip").read_bytes(), b"A")
+            self.assertEqual((Path(tmp) / "result/second.zip").read_bytes(), b"B")
+
     def test_success_creates_new_archive(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
