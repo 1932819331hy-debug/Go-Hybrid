@@ -78,6 +78,50 @@ class SummaryIdentityTests(unittest.TestCase):
     def test_matching_failed_result_is_still_available_for_diagnosis(self):
         self.fetch(json.dumps(dict(PIN, ok=False, steps=[{"exit": 1}])))
 
+    def test_multiple_downloaded_reports_selects_matching_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "submitted.json").write_text(json.dumps(PIN), encoding="utf-8")
+            wanted = dict(PIN, ok=True)
+            other = dict(PIN, job="wrong-job", ok=True)
+
+            def download(command, **kwargs):
+                staging = next((root / "result/raw").glob(".staging-*"))
+                for name, report in (("a", wanted), ("z", other)):
+                    folder = staging / name
+                    folder.mkdir()
+                    (folder / "summary.json").write_text(json.dumps(report), encoding="utf-8")
+                return 0, "offline successful transfer"
+
+            with mock.patch.object(job, "sh", side_effect=download), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(job.kaggle_fetch(str(root), slug="fixture/kernel"), 0)
+            self.assertEqual(json.loads((root / "result/summary.json").read_text()),
+                             wanted)
+
+    def test_ambiguous_matching_reports_do_not_replace_previous_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "submitted.json").write_text(json.dumps(PIN), encoding="utf-8")
+            dest = root / "result/summary.json"
+            dest.parent.mkdir()
+            dest.write_text('{"previous": true}', encoding="utf-8")
+
+            def download(command, **kwargs):
+                staging = next((root / "result/raw").glob(".staging-*"))
+                for name in ("a", "z"):
+                    folder = staging / name
+                    folder.mkdir()
+                    (folder / "summary.json").write_text(
+                        json.dumps(dict(PIN, ok=True)), encoding="utf-8")
+                return 0, "offline successful transfer"
+
+            with mock.patch.object(job, "sh", side_effect=download), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    job.kaggle_fetch(str(root), slug="fixture/kernel")
+            self.assertEqual(dest.read_text(encoding="utf-8"), '{"previous": true}')
+
     def test_fetch_without_local_submission_record_remains_supported(self):
         self.fetch(json.dumps({"job": "external-job", "sha": "c" * 40, "ok": True}),
                    submitted=MISSING)
