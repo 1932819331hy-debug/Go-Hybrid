@@ -61,7 +61,7 @@ use crate::model::{as_addr_of, unwrap_parens, Checker};
 /// `Unknown` stays permissive (fail-open for operand checks; concurrency
 /// boundaries remain fail-closed in `sendability.rs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum OpKind {
+pub(crate) enum OpKind {
     Unknown,
     /// A known interface type (`any`) — #682 U9-U12.
     ///
@@ -1650,7 +1650,7 @@ impl<'a> Collector<'a> {
             .map(|(_, ty)| self.kind_of_ty_with_subst(ty, &subst, 0))
     }
 
-    fn kind_of_expr(&self, e: &Expr) -> OpKind {
+    pub(crate) fn kind_of_expr(&self, e: &Expr) -> OpKind {
         match e {
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
