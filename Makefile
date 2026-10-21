@@ -48,6 +48,7 @@ check:
 	@$(PY) -m unittest discover -s tools -p test_corpus_harness.py -v
 	@$(PY) -m unittest discover -s tools -p test_package_version.py -v
 	@$(PY) -m unittest discover -s tools/runner -p test_runner.py -v
+	@$(PY) -m unittest discover -s tools -p test_job_pipeline_status.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_test_registration.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_corpus_census.py -v
 	@$(PY) tools/check_corpus_census.py && echo "corpus census OK"

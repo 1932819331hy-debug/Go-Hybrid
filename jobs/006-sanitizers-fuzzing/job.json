@@ -27,13 +27,25 @@
         },
         {
             "name": "asan-bridge",
-            "run": "export PATH=/tmp/go/bin:$HOME/.cargo/bin:$PATH CGO_ENABLED=1 && rm -rf /tmp/asanws && mkdir -p /tmp/asanws/lib && printf 'module hybrid.program\\n\\ngo 1.26\\n' > /tmp/asanws/go.mod && cp -r runtime/go/* /tmp/asanws/ && (cd runtime/rust/hyrt && cargo build --release --quiet) && cp runtime/rust/hyrt/target/release/libhyrt.a /tmp/asanws/lib/ && cd /tmp/asanws && go test -asan -count=1 -timeout 8m ./jsonbinding ./regexbinding ./sha3binding ./hybridge 2>&1 | tail -20",
+            "run": [
+                "bash",
+                "-o",
+                "pipefail",
+                "-c",
+                "export PATH=/tmp/go/bin:$HOME/.cargo/bin:$PATH CGO_ENABLED=1 && rm -rf /tmp/asanws && mkdir -p /tmp/asanws/lib && printf 'module hybrid.program\\n\\ngo 1.26\\n' > /tmp/asanws/go.mod && cp -r runtime/go/* /tmp/asanws/ && (cd runtime/rust/hyrt && cargo build --release --quiet) && cp runtime/rust/hyrt/target/release/libhyrt.a /tmp/asanws/lib/ && cd /tmp/asanws && go test -asan -count=1 -timeout 8m ./jsonbinding ./regexbinding ./sha3binding ./hybridge 2>&1 | tail -20"
+            ],
             "timeout": 1500,
             "cwd": "repo"
         },
         {
             "name": "race-bridge",
-            "run": "export PATH=/tmp/go/bin:$HOME/.cargo/bin:$PATH CGO_ENABLED=1 && rm -rf /tmp/racews && mkdir -p /tmp/racews/lib && printf 'module hybrid.program\\n\\ngo 1.26\\n' > /tmp/racews/go.mod && cp -r runtime/go/* /tmp/racews/ && cp runtime/rust/hyrt/target/release/libhyrt.a /tmp/racews/lib/ 2>/dev/null || (cd runtime/rust/hyrt && cargo build --release --quiet && cp target/release/libhyrt.a /tmp/racews/lib/) && cd /tmp/racews && go test -race -count=1 -timeout 8m ./... 2>&1 | tail -12",
+            "run": [
+                "bash",
+                "-o",
+                "pipefail",
+                "-c",
+                "export PATH=/tmp/go/bin:$HOME/.cargo/bin:$PATH CGO_ENABLED=1 && rm -rf /tmp/racews && mkdir -p /tmp/racews/lib && printf 'module hybrid.program\\n\\ngo 1.26\\n' > /tmp/racews/go.mod && cp -r runtime/go/* /tmp/racews/ && cp runtime/rust/hyrt/target/release/libhyrt.a /tmp/racews/lib/ 2>/dev/null || (cd runtime/rust/hyrt && cargo build --release --quiet && cp target/release/libhyrt.a /tmp/racews/lib/) && cd /tmp/racews && go test -race -count=1 -timeout 8m ./... 2>&1 | tail -12"
+            ],
             "timeout": 1200,
             "cwd": "repo"
         },

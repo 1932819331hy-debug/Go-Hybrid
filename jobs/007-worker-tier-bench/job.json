@@ -27,7 +27,13 @@
         },
         {
             "name": "g2-bench-worker-tier",
-            "run": "export PATH=/tmp/go/bin:$HOME/.cargo/bin:$PATH && cd compiler && ./target/release/hyb bench-overhead 2>&1 | tee /tmp/g2bench.out",
+            "run": [
+                "bash",
+                "-o",
+                "pipefail",
+                "-c",
+                "export PATH=/tmp/go/bin:$HOME/.cargo/bin:$PATH && cd compiler && ./target/release/hyb bench-overhead 2>&1 | tee /tmp/g2bench.out"
+            ],
             "timeout": 1200,
             "cwd": "repo"
         },
