@@ -46,8 +46,8 @@ HYB = ROOT / "compiler" / "target" / "debug" / "hyb"
 COMPILER = ROOT / "compiler"
 
 
-def sh(args, **kw) -> subprocess.CompletedProcess:
-    return subprocess.run(args, cwd=ROOT, capture_output=True, text=True, **kw)
+def sh(args, cwd=None, **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(args, cwd=cwd or ROOT, capture_output=True, text=True, **kw)
 
 
 def die(kind: str, slug: str, detail: str, code: int) -> "int":
@@ -86,7 +86,9 @@ def battery() -> list[tuple[str, bool, str]]:
     ]
     results = []
     for name, cmd in steps:
-        r = sh(cmd)
+        # cargo steps run from the workspace root (compiler/); the python
+        # tooling steps run from the repo root (they resolve their own paths).
+        r = sh(cmd, cwd=str(COMPILER) if cmd[0] == "cargo" else None)
         ok = r.returncode == 0
         results.append((name, ok, (r.stdout + r.stderr)[-600:] if not ok else ""))
         if not ok:
