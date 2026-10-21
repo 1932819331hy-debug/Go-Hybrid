@@ -100,63 +100,53 @@ def _bump(m: re.Match) -> str:
 
 
 def surface_edits(issue_no: int, slug: str, why: str) -> list[tuple]:
-    """Census surfaces: +1 REJECT fixture, bump every count surface."""
+    """Census surfaces — ALL 8, each set to the NEW corpus total (total+1).
+
+    The census tool (tools/check_corpus_census.py) compares every claim
+    against the corpus directory. Note: ci.yml + Makefile were left at 120
+    by the #998/#999 landing while the corpus moved to 122 — the census was
+    already drifting at HEAD; this bundle repairs that as a side effect.
+    """
     edits = []
-    total = rej = None
 
+    rm = head("tests/checker-corpus/README.md")
     m = re.search(r"\*\*Current registered corpus: (\d+) programs — ACCEPT (\d+)"
-                  r" · ACCEPT-MANAGED (\d+) · REJECT (\d+)\*\*",
-                  head("tests/checker-corpus/README.md"))
-    if m:
-        total, acc, managed, rej = map(int, m.groups())
-        edits.append(("tests/checker-corpus/README.md", m.group(0), _bump(m)))
-    if total is None:
+                  r" · ACCEPT-MANAGED (\d+) · REJECT (\d+)", rm)
+    if not m:
         raise RuntimeError("corpus README count line not found")
+    total, acc, managed, rej = (int(m.group(i)) for i in range(1, 5))
+    t1, r1 = total + 1, rej + 1
+    edits.append(("tests/checker-corpus/README.md", m.group(0),
+                  f"**Current registered corpus: {t1} programs — "
+                  f"ACCEPT {acc} · ACCEPT-MANAGED {managed} · REJECT {r1}"))
 
-    # parse_all.rs: the hard assert + the doc line
-    pa = head("compiler/crates/hy-syntax/tests/parse_all.rs")
-    m2 = re.search(r"assert_eq!\(files\.len\(\), (\d+), \"expected exactly (\d+) corpus programs\"",
-                   pa)
-    if not m2:
-        raise RuntimeError("parse_all.rs assert not found")
-    edits.append(("compiler/crates/hy-syntax/tests/parse_all.rs", m2.group(0),
-                  m2.group(0).replace(str(total), str(total + 1))))
-    m3 = re.search(r"\((\d+) programs — the checker corpus;", pa)
-    if m3:
-        edits.append(("compiler/crates/hy-syntax/tests/parse_all.rs", m3.group(0),
-                      m3.group(0).replace(str(total), str(total + 1))))
+    def bump(path, pattern, flags=0):
+        src = head(path)
+        mm = re.search(pattern, src, flags)
+        if not mm:
+            raise RuntimeError(f"census surface not found in {path}: {pattern}")
+        old, cur = mm.group(0), int(mm.group(1))
+        edits.append((path, old, old.replace(str(cur), str(t1), 1)))
 
-    # ast.rs doc
-    m4 = re.search(r"checker-corpus/\*\.hy \((\d+) programs\)",
-                   head("compiler/crates/hy-syntax/src/ast.rs"))
-    if m4:
-        edits.append(("compiler/crates/hy-syntax/src/ast.rs", m4.group(0),
-                      m4.group(0).replace(str(total), str(total + 1))))
+    bump("compiler/crates/hy-syntax/tests/parse_all.rs",
+         r"files\.len\(\),\s*(\d+),\s*\"expected exactly \d+ corpus programs\"")
+    bump(".github/workflows/ci.yml", r"verdict agreement \((\d+)/\d+ \+ tripwire\)")
+    bump("Makefile", r"corpus verdicts \((\d+)/\d+\)")
+    bump("README.md", r"checker corpus (\d+)/\d+")
+    bump("GUARANTEES.md", r"^\s*(\d+) programs, each with an", re.M)
+    bump("compiler/crates/hy-syntax/src/ast.rs", r"checker-corpus/\*\.hy \((\d+) programs\)")
 
-    # root README
-    m5 = re.search(r"checker corpus (\d+)/(\d+)", head("README.md"))
-    if m5:
-        edits.append(("README.md", m5.group(0),
-                      f"checker corpus {total + 1}/{total + 1}"))
-
-    # GUARANTEES.md
-    m6 = re.search(r"^  (\d+) programs, each with", head("GUARANTEES.md"), re.M)
-    if m6:
-        edits.append(("GUARANTEES.md", m6.group(0),
-                      m6.group(0).replace(str(total), str(total + 1))))
-
-    # VERDICTS.md: append the section + bump the closing count sentence
     vm = head("tests/checker-corpus/VERDICTS.md")
     section = (
         f"\n-------------------------------------------------------------------------------\n\n"
         f"### {slug} (issue #{issue_no}) — REJECT\n\n{why}\n\n"
-        f"With this registration the corpus is **{total + 1} programs: ACCEPT 38 ·\n"
-        f"ACCEPT-MANAGED 2 · REJECT {rej + 1}** — main's {total} plus this one.\n")
-    tail_re = re.search(r"With this registration the corpus is \*\*\d+ programs: ACCEPT \d+ ·\s*\n"
-                        r"ACCEPT-MANAGED \d+ · REJECT \d+\*\*[^\n]*\n?", vm)
-    if tail_re:
-        edits.append(("tests/checker-corpus/VERDICTS.md", tail_re.group(0),
-                      tail_re.group(0) + section))
+        f"With this registration the corpus is **{t1} programs: ACCEPT {acc} ·\n"
+        f"ACCEPT-MANAGED {managed} · REJECT {r1}** — main's {total} plus this one.\n")
+    tail_pat = r"With this registration the corpus is \*\*\d+ programs: ACCEPT \d+ ·\s*\nACCEPT-MANAGED \d+ · REJECT \d+\*\*[^\n]*\n?"
+    tails = re.findall(tail_pat, vm)
+    if tails:
+        tail = tails[-1]  # the CURRENT registration sentence, not a historical one
+        edits.append(("tests/checker-corpus/VERDICTS.md", tail, tail + section))
     else:
         edits.append(("tests/checker-corpus/VERDICTS.md", vm[-200:], vm[-200:] + section))
     return edits
