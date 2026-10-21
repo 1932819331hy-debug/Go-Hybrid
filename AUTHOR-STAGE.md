@@ -121,8 +121,36 @@ patch cannot weaken them.
 Scope: **3 unclaimed `soundness(hy-check)` issues from the top-2 classes**
 (no `[wildcard]`/`[tooling]` prefixes; smallest self-contained bodies;
 the final pick is recorded in the run log BEFORE any brain is invoked).
-Brains: `ornith-1.0-9B@kaggle` · `ornith-1.5-9B@kaggle` · one cloud model
-via the same OpenAI-compatible seam.
+Brains: `specialized` · `ornith-1.0-9B@kaggle` · `ornith-1.5-9B@kaggle` ·
+one cloud model via the same OpenAI-compatible seam.
+
+**Amendment (2026-10-22, recorded BEFORE any brain ran):** a fourth arm,
+`specialized` — a deterministic per-class template fitter (`tools/
+specialized_brain.py`, stdlib-only, $0, no LLM) whose template families
+are transplants of already-landed fix patterns (#998 const-map resolution,
+#999 place-base propagation, #926/#928 void-position guards). Rationale:
+the user's thesis "autoland + specialized functions could beat any LLM"
+is testable under the same frozen judge, and the fix shape of the top-2
+classes (guard extensions onto existing rules) favors it. Anti-Goodhart
+binding: templates stay CLASS-LEVEL — an issue whose fix cannot be
+expressed by a class template must BLOCK, never be hand-tailored. The
+judge metrics below are unchanged.
+
+**Amendment 2 (2026-10-22, still pre-run):** claim rule refined on
+evidence — a strict scan (`reports/assets/bakeoff-r1-claims.json`,
+ghost-fork repo) found ZERO unclaimed issues in the whole 63-issue top-2
+pool: the community companions every soundness issue within ~a day, then
+the PRs rot (`bot:stale-base`, 600+ commits behind). The bottleneck is
+stale-base decay, not authoring. Rule: a companion PR is a LIVE claim
+iff open AND not `bot:stale-base` AND not `bot:dup-of:*`; a stale-base
+companion is the repo's established revival lane — the issue may be
+harvested and the stale companion's author MUST be credited in the bundle
+meta + landing message (sibling takes, the #856/#960 precedent). Round-1
+pick (pre-run, in `reports/assets/bakeoff-r1-pick.json`): **#758 #823
+#827** — each a harvest-with-credit of a sonson0910 stale-base companion
+(#759/#824/#828). #1013 is OUT (live claim: #1014, no stale label);
+#817 rejected (premise partially stale — its gap 1 was landed by #998,
+whole-file baseline now REJECTs at HEAD).
 
 Judge (all pre-declared; anti-Goodhart: **no gate, harness scoring, or
 battery change during the bake-off**; results recorded even when ugly):
