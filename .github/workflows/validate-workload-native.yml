@@ -1,24 +1,50 @@
+# Isolated harness only. Publish a tree containing the single validation workflow.
+# The checked-out candidate retains its unmodified .github/workflows/ci.yml.
+# Every original quick/compiler run step is copied verbatim below.
 # CI (quick, on push) — SPEC.md §2: small CI workflow on push.
 # Runs: tool syntax checks, runner self-test, job.json validity, doc sanity.
 # Deliberately tiny now; grows with the compiler (cargo check, unit tests, compile-fail suite).
-name: ci
+name: exact-candidate-workload-native
 
 on:
   push:
     branches:
-      - main
-  pull_request:
+      - ci/exact-workload-native-20261022
 
 permissions:
   contents: read
 
 jobs:
   quick:
+    if: github.repository == '1932819331hy-debug/Go-Hybrid' && github.repository_id == '1421338510' && github.repository_owner_id == '343001481'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout (pinned v4)
+      - name: Checkout exact workload-native candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: 1932819331hy-debug/Go-Hybrid
+          ref: a3efb18b5eff430f61f6f5ee56d646bea6a28832
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify exact candidate and original CI identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_sha='a3efb18b5eff430f61f6f5ee56d646bea6a28832'
+          expected_tree='2b38d73e7531437b756c7f9df7f2894bcf930445'
+          expected_ci_blob='ce9df96250379993538c368c12bf18385a9b8f18'
+          expected_ci_sha256='077250e1996970999cf9c66f5656a8b1cbcc74c63f375f9c6704e53a2758d540'
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git rev-parse 'HEAD^{tree}')"
+          actual_ci_blob="$(git rev-parse 'HEAD:.github/workflows/ci.yml')"
+          printf 'Harness commit: %s\nCandidate commit: %s\nCandidate tree: %s\nCandidate ci.yml blob: %s\n' "$GITHUB_SHA" "$actual_sha" "$actual_tree" "$actual_ci_blob"
+          test "$actual_sha" = "$expected_sha"
+          test "$actual_tree" = "$expected_tree"
+          test "$actual_ci_blob" = "$expected_ci_blob"
+          printf '%s  .github/workflows/ci.yml\n' "$expected_ci_sha256" | sha256sum --check --strict
+          git diff --exit-code HEAD --
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Python syntax + self-tests
         run: |
           set -e
@@ -121,11 +147,38 @@ jobs:
   # The compiler (lands with MVP-0): pinned toolchains, full test suite,
   # corpus verdict agreement, and the walking-skeleton examples end-to-end.
   compiler:
+    if: github.repository == '1932819331hy-debug/Go-Hybrid' && github.repository_id == '1421338510' && github.repository_owner_id == '343001481'
+    concurrency:
+      group: exact-workload-native-compiler-20261022
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout (pinned v4)
+      - name: Checkout exact workload-native candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: 1932819331hy-debug/Go-Hybrid
+          ref: a3efb18b5eff430f61f6f5ee56d646bea6a28832
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify exact candidate and original CI identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_sha='a3efb18b5eff430f61f6f5ee56d646bea6a28832'
+          expected_tree='2b38d73e7531437b756c7f9df7f2894bcf930445'
+          expected_ci_blob='ce9df96250379993538c368c12bf18385a9b8f18'
+          expected_ci_sha256='077250e1996970999cf9c66f5656a8b1cbcc74c63f375f9c6704e53a2758d540'
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git rev-parse 'HEAD^{tree}')"
+          actual_ci_blob="$(git rev-parse 'HEAD:.github/workflows/ci.yml')"
+          printf 'Harness commit: %s\nCandidate commit: %s\nCandidate tree: %s\nCandidate ci.yml blob: %s\n' "$GITHUB_SHA" "$actual_sha" "$actual_tree" "$actual_ci_blob"
+          test "$actual_sha" = "$expected_sha"
+          test "$actual_tree" = "$expected_tree"
+          test "$actual_ci_blob" = "$expected_ci_blob"
+          printf '%s  .github/workflows/ci.yml\n' "$expected_ci_sha256" | sha256sum --check --strict
+          git diff --exit-code HEAD --
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Install pinned toolchains (same URLs as tools/env.sh discipline)
         run: |
           set -e
@@ -230,3 +283,140 @@ jobs:
         run: |
           set -e
           CARGO_TARGET_DIR="$PWD/compiler/target" bash tools/run_examples.sh
+
+      - name: Native Cargo workload target matrix (Go and Hybrid stand-ins)
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'Native validation candidate: %s\n' "$(git rev-parse HEAD)"
+          printf 'Native validation tree: %s\n' "$(git rev-parse 'HEAD^{tree}')"
+          go version
+          cargo --version
+          rustc -vV
+          verifier="$(mktemp)"
+          trap 'rm -f "$verifier"' EXIT
+          cat > "$verifier" <<'NATIVE_WORKLOAD_VERIFIER'
+          #!/usr/bin/env python3
+          """Native Rust workload validation; Go/Hybrid are explicitly stand-ins.
+          
+          Run from a checkout: python3 verify_native_workload.py [checkout]
+          Requires installed Cargo/rustc. No downloads or source-checkout changes.
+          Metric structure is checked, never timing equality or performance.
+          """
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import tempfile
+          
+          repo = Path(sys.argv[1] if len(sys.argv) > 1 else '.').resolve()
+          runner = repo / 'benchmarks/workloads/run.sh'
+          source_hash = hashlib.sha256(runner.read_bytes()).hexdigest()
+          for tool in ('cargo', 'rustc'):
+              if not shutil.which(tool):
+                  raise SystemExit(f'Required native tool missing: {tool}')
+              print(subprocess.check_output([tool, '--version'], text=True).strip(), flush=True)
+          host = next(line.split(': ', 1)[1] for line in subprocess.check_output(
+              ['rustc', '-vV'], text=True).splitlines() if line.startswith('host: '))
+          
+          STUB = '''#!PYTHON
+          import os
+          from pathlib import Path
+          import sys
+          name = Path(sys.argv[0]).name
+          with open(os.environ['STANDIN_TRACE'], 'a') as out:
+              out.write(name + ' ' + ' '.join(sys.argv[1:]) + '\\n')
+          if '-o' in sys.argv:
+              target = Path(sys.argv[sys.argv.index('-o') + 1])
+              target.write_text('#!/bin/sh\\necho STANDIN-' + name + '\\n')
+              target.chmod(0o755)
+          '''.replace('PYTHON', sys.executable)
+          metric = re.compile(r'^(alloc|load) p50=\d+ns p99=\d+ns mean=\d+\.\d+ns n=100$', re.M)
+          
+          for case in ('default', 'relative-env-spaces', 'absolute-env-spaces',
+                       'config-only-spaces', 'host-triple', 'compile-error', 'runtime-exit19'):
+              with tempfile.TemporaryDirectory(prefix='native workload ') as directory:
+                  root = Path(directory)
+                  checkout = root / 'checkout'
+                  workload = checkout / 'benchmarks/workloads'
+                  shutil.copytree(repo / 'benchmarks/workloads', workload,
+                                  ignore=shutil.ignore_patterns('target', 'Cargo.lock', '__pycache__'))
+                  shutil.copytree(repo / 'runtime/go', checkout / 'runtime/go')
+                  assert hashlib.sha256((workload / 'run.sh').read_bytes()).hexdigest() == source_hash
+                  binaries = root / 'standins'
+                  binaries.mkdir()
+                  for tool in ('go', 'hyb'):
+                      path = binaries / tool
+                      path.write_text(STUB)
+                      path.chmod(0o755)
+                  scratch = root / 'scratch'
+                  scratch.mkdir()
+                  trace = root / 'standin-trace'
+                  env = dict(os.environ)
+                  for key in ('CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET', 'CARGO_BUILD_TARGET_DIR',
+                              'CARGO_ENCODED_RUSTFLAGS', 'RUSTFLAGS', 'RUSTC_WRAPPER',
+                              'RUSTC_WORKSPACE_WRAPPER'):
+                      env.pop(key, None)
+                  env.update(PATH=str(binaries) + os.pathsep + env['PATH'],
+                             HYB=str(binaries / 'hyb'), TMPDIR=str(scratch),
+                             STANDIN_TRACE=str(trace), CARGO_HOME=str(root / 'cargo-home'),
+                             CARGO_NET_OFFLINE='true')
+                  rust = workload / 'rust'
+                  expected = rust / 'target'
+                  if case == 'relative-env-spaces':
+                      env['CARGO_TARGET_DIR'] = 'relative target with spaces'
+                      expected = rust / env['CARGO_TARGET_DIR']
+                  elif case in ('absolute-env-spaces', 'compile-error', 'runtime-exit19'):
+                      expected = root / 'absolute target with spaces'
+                      env['CARGO_TARGET_DIR'] = str(expected)
+                  elif case == 'config-only-spaces':
+                      config = rust / '.cargo'
+                      config.mkdir(exist_ok=True)
+                      (config / 'config.toml').write_text('[build]\ntarget-dir = "configured target with spaces"\n')
+                      expected = rust / 'configured target with spaces'
+                      assert 'CARGO_TARGET_DIR' not in env
+                  elif case == 'host-triple':
+                      env['CARGO_BUILD_TARGET'] = host
+                      expected = rust / 'target' / host
+                  stale = rust / 'target/release/workloads'
+                  if case != 'default':
+                      stale.parent.mkdir(parents=True, exist_ok=True)
+                      stale.write_text('#!/bin/sh\necho STALE-RUST-METRICS\n')
+                      stale.chmod(0o755)
+                  if case == 'compile-error':
+                      with (rust / 'src/main.rs').open('a') as out:
+                          out.write('\nfn intentionally_broken( {\n')
+                  elif case == 'runtime-exit19':
+                      (rust / 'src/main.rs').write_text(
+                          'fn main() { eprintln!("NATIVE-RUST-EXIT19"); std::process::exit(19); }\n')
+                  result = subprocess.run(['bash', str(workload / 'run.sh')], cwd=root,
+                                          env=env, capture_output=True, text=True, timeout=120)
+                  report = dict(case=case, exit=result.returncode,
+                                stdout=result.stdout, stderr=result.stderr,
+                                scratch_entries=[p.name for p in scratch.iterdir()])
+                  print(json.dumps(report), flush=True)
+                  assert not report['scratch_entries'], report
+                  assert 'STALE-RUST-METRICS' not in result.stdout, report
+                  if case == 'compile-error':
+                      assert result.returncode != 0 and 'error' in result.stderr, report
+                  elif case == 'runtime-exit19':
+                      assert result.returncode == 19 and 'NATIVE-RUST-EXIT19' in result.stderr, report
+                  else:
+                      assert result.returncode == 0, report
+                      assert metric.findall(result.stdout) == ['alloc', 'load'], report
+                      assert (expected / 'release/workloads').is_file(), report
+                      assert 'STANDIN-go' in result.stdout and result.stdout.count('STANDIN-hyb') == 2, report
+                  if case in ('compile-error', 'runtime-exit19'):
+                      assert '== Hybrid twins' not in result.stdout, report
+                      assert not any(line.startswith('hyb ') for line in trace.read_text().splitlines()), report
+                  if case != 'default':
+                      assert 'STALE-RUST-METRICS' in stale.read_text(), case
+          assert hashlib.sha256(runner.read_bytes()).hexdigest() == source_hash
+          print('PASS: native Rust matrix (7 cases); Go/Hybrid stand-ins; no performance claims.', flush=True)
+          NATIVE_WORKLOAD_VERIFIER
+          printf '%s  %s\n' '2e1c511ecaf08a580e3a18c096d21c129fd5ec04bb5f01530070c023c6996443' "$verifier" | sha256sum --check --strict
+          python3 "$verifier" "$GITHUB_WORKSPACE"
