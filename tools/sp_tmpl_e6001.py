@@ -557,7 +557,7 @@ FIXTURE_SRC = '''// ============================================================
 // time and stays accepted; a local shadowing the const name is a runtime
 // binding and stays accepted too.
 //
-machine-readable verdict marker below; regression pins live in
+// machine-readable verdict marker below; regression pins live in
 // `hy-check/tests/const_zero_divisor_const_forms.rs`.
 // ============================================================================
 

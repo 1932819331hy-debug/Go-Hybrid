@@ -204,7 +204,7 @@ FIXTURE_SRC = '''// ============================================================
 // The SPEC X4 literal fold (`u8(300) == 44`) stays accepted — but only
 // for LITERAL operands, which is what the emitter actually rewrites.
 //
-machine-readable verdict marker below; regression pins live in
+// machine-readable verdict marker below; regression pins live in
 // `hy-check/tests/const_conversion_target_forms.rs`.
 // ============================================================================
 
