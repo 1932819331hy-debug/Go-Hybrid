@@ -263,3 +263,10 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 ## Contributor validation: submit revision lookup (2026-10-16)
 - Base 00610f7: resolve_head ignores failed git rev-parse, allowing an invalid revision/error message into a Kaggle upload and submitted.json. Abort before touching worker files or invoking Kaggle when HEAD lookup fails.
 - Three new offline tests: original two failures/one pass; patched all 11 job-test methods pass. Real temporary Git repositories cover unborn and committed HEAD; a mocked upload boundary verifies no push, payload mutation or submission record after lookup failure. git diff --check passes. No real Kaggle submission or compiler/Rust/Go suite run; maintainer CI remains required, including repair of existing workflow conflict markers (#339).
+
+## Contributor follow-up: W2 HTTP failure classification (#986)
+
+- Preserve visible update-branch failures without applying `bot:conflict` for HTTP 403 or exhausted 429/502/503/504 responses. Credit the independent exception-path report in #986; label reconciliation and returned-status CAS handling remain separate.
+- Offline HTTP regression: five failures on unpatched main; all 12 new tests pass with the patch, including success, CAS mismatch, dry-run, exemption, and unknown-error controls.
+- Python 3.12.14: all 33 CI-registered Python test commands pass (470 tests); registration, conflict-marker, syntax, census, and diff-whitespace checks pass. Pinned Rust/Go toolchains are unavailable locally; full compiler/corpus/differential and remote CI remain delivery gates.
+- Scope limitation: the existing earlier CAS substring check is unchanged; HTTP response bodies mentioning `422` or `was modified` can still be classified as CAS mismatches.
