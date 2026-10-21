@@ -1063,6 +1063,15 @@ receive/map-index over two names, slice-index multi-name, select-recv 3 names, a
 
 With this registration the corpus is **125 programs: ACCEPT 38 ·
 ACCEPT-MANAGED 2 · REJECT 85** — main's 124 plus this one.
+
+-------------------------------------------------------------------------------
+
+### parallel-bind-count-and-decl-type-reject (issue #905) — REJECT
+
+parallel decl/assign count mismatches, provably-single sources bound to several names, typed-decl initializer conflicts, positional parallel-assign kind conflicts — all rejected fail-closed (BUILDABLE)
+
+With this registration the corpus is **126 programs: ACCEPT 38 ·
+ACCEPT-MANAGED 2 · REJECT 86** — main's 125 plus this one.
 by the autonomous pipeline (bundles author-758 / author-827, landings
 0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
 companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
