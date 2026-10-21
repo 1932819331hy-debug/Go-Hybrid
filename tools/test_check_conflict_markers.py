@@ -177,6 +177,80 @@ class CliTests(unittest.TestCase):
             capture_output=True, text=True, timeout=20,
         )
 
+    def _run_with_scandir_error(self, root, blocked):
+        # Inject only the OS enumeration failure; exercise the real os.walk,
+        # scanners, argument parser and process exit without changing ACLs.
+        code = """
+import errno
+import os
+import runpy
+import sys
+from unittest.mock import patch
+script, root, blocked = sys.argv[1:]
+real_scandir = os.scandir
+
+def scandir(path):
+    if os.fspath(path) == blocked:
+        raise PermissionError(errno.EACCES, "Permission denied", blocked)
+    return real_scandir(path)
+
+sys.argv = [script, "--root", root]
+with patch("os.scandir", side_effect=scandir):
+    runpy.run_path(script, run_name="__main__")
+"""
+        return subprocess.run(
+            [sys.executable, "-c", code, str(SCRIPT), str(root), str(blocked)],
+            capture_output=True, text=True, timeout=20,
+        )
+
+    def _assert_scan_error(self, result, blocked):
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("scan error", result.stderr)
+        self.assertIn(str(blocked), result.stderr)
+        self.assertNotIn("conflict markers: none", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_root_enumeration_error_is_not_clean(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "broken.py").write_text("<<<<<<< HEAD\n", encoding="utf-8")
+            self._assert_scan_error(self._run_with_scandir_error(td, td), td)
+
+    def test_child_enumeration_error_is_not_clean(self):
+        with tempfile.TemporaryDirectory() as td:
+            blocked = Path(td, ".github", "workflows")
+            blocked.mkdir(parents=True)
+            (blocked / "ci.yml").write_text("<<<<<<< HEAD\n", encoding="utf-8")
+            self._assert_scan_error(self._run_with_scandir_error(td, blocked), blocked)
+
+    def test_enumeration_error_after_marker_is_scan_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "broken.py").write_text("<<<<<<< HEAD\n", encoding="utf-8")
+            blocked = Path(td, "source")
+            blocked.mkdir()
+            self._assert_scan_error(self._run_with_scandir_error(td, blocked), blocked)
+
+    def test_ignored_directories_are_not_enumerated(self):
+        for name in sorted(MOD.SKIP_DIRS):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                blocked = Path(td, name)
+                blocked.mkdir()
+                (blocked / "broken.py").write_text("<<<<<<< HEAD\n", encoding="utf-8")
+                res = self._run_with_scandir_error(td, blocked)
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertIn("conflict markers: none", res.stdout)
+
+    def test_directory_symlink_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside:
+            Path(outside, "broken.py").write_text("<<<<<<< HEAD\n", encoding="utf-8")
+            link = Path(td, "linked")
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+            res = self._run_with_scandir_error(td, link)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertIn("conflict markers: none", res.stdout)
+
     def test_clean_exits_zero(self):
         with tempfile.TemporaryDirectory() as td:
             Path(td, "a.md").write_text("ok\n", encoding="utf-8")
