@@ -46,16 +46,24 @@ has_version() {
 
 # Compare the complete supported declaration, not a quoted substring. Ignore
 # whitespace outside strings and Rust comments (including nested block comments).
+# Raw strings and character literals cannot supply a declaration. Require exactly
+# one target declaration; do not try to choose between conditional cfg branches.
 # Extra/alternate match arms and unsupported declaration forms fail closed.
 has_pin_declaration() {
     local file="$1" name="$2" expected="$3"
     awk -v name="$name" -v expected="$expected" '
         {
-            clean = ""
+            # Text continuing from a string is never a declaration start.
+            clean = quoted ? "<string>" : ""
             for (i = 1; i <= length($0); i++) {
                 c = substr($0, i, 1)
                 pair = substr($0, i, 2)
-                if (depth) {
+                if (raw_end != "") {
+                    if (substr($0, i, length(raw_end)) == raw_end) {
+                        i += length(raw_end) - 1
+                        raw_end = ""
+                    }
+                } else if (depth) {
                     if (pair == "/*") { depth++; i++ }
                     else if (pair == "*/") { depth--; i++ }
                 } else if (quoted) {
@@ -67,22 +75,39 @@ has_pin_declaration() {
                     break
                 } else if (pair == "/*") {
                     depth++; i++
+                } else if (match(substr($0, i), /^[bc]?r#*"/)) {
+                    raw_size = RLENGTH
+                    raw_end = substr($0, i, raw_size)
+                    gsub(/[^#]/, "", raw_end)
+                    raw_end = "\"" raw_end
+                    clean = clean "<raw>"
+                    i += raw_size - 1
+                } else if (c == "\047" && match(substr($0, i),
+                           /^\047([^\\\047]|\\([\\\047"nrt0]|x[[:xdigit:]][[:xdigit:]]|u\{[[:xdigit:]_]+\}))\047/)) {
+                    # Only a complete char literal consumes apostrophes;
+                    # lifetimes such as &\047static and <\047a> stay in code.
+                    clean = clean substr($0, i, RLENGTH)
+                    i += RLENGTH - 1
                 } else if (c !~ /[[:space:]]/) {
                     clean = clean c
                     if (c == "\"") quoted = 1
                 }
             }
             if (quoted) clean = clean "\n"
-            if (!found && index(clean, "const" name ":") == 1) found = 1
-            if (found) {
+            if (!collecting && index(clean, "const" name ":") == 1) {
+                collecting = 1
+                declaration = ""
+                count++
+            }
+            if (collecting) {
                 declaration = declaration clean
-                if (clean ~ /;$/ && !depth && !quoted) {
-                    done = 1
-                    exit (declaration != expected)
+                if (clean ~ /;$/ && !depth && !quoted && raw_end == "") {
+                    if (declaration != expected) invalid = 1
+                    collecting = 0
                 }
             }
         }
-        END { if (!done) exit 1 }
+        END { exit (count != 1 || collecting || invalid) }
     ' "$file"
 }
 

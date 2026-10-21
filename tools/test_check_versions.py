@@ -163,6 +163,109 @@ class CheckVersionsTests(unittest.TestCase):
                   '    None => "go1.\n26.9",')
         self.assertDrift("hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
 
+
+    def test_raw_string_history_cannot_hide_default_drift(self):
+        path = self.root / "compiler/crates/hyb/src/main.rs"
+        original = path.read_text(encoding="utf-8")
+        declaration = ('const PINNED_GO: &str = match option_env!("HYB_PINNED_GO") {\n'
+                       '    Some(v) => v,\n    None => "go1.26.9",\n};')
+        self.assertIn(declaration, original)
+        for prefix, ty in (("r", "&str"), ("br", "&[u8]"),
+                           ("cr", "&std::ffi::CStr")):
+            for hashes in ("#", "###"):
+                with self.subTest(prefix=prefix, hashes=hashes):
+                    # The apparent declaration is data in a valid raw literal.
+                    history = (f'const EXAMPLE: {ty} = {prefix}{hashes}""\n'
+                               + declaration + f'\n""{hashes};\n')
+                    path.write_text(original.replace(
+                        declaration, history + declaration.replace(
+                            '"go1.26.9"', '"go1.26.8"')), encoding="utf-8")
+                    self.assertDrift(
+                        "hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
+
+    def test_raw_string_bodies_do_not_change_pin_parsing(self):
+        path = self.root / "compiler/crates/hyb/src/main.rs"
+        original = path.read_text(encoding="utf-8")
+        for prefix, ty, hashes, body in (
+            ("r", "&str", "", "text // /* '"),
+            ("r", "&str", "##", 'a shorter terminator "#\n/* still data'),
+            ("br", "&[u8]", "#", 'a quote " and // text'),
+            ("cr", "&std::ffi::CStr", "###", 'a shorter terminator "##\n/* data'),
+        ):
+            with self.subTest(prefix=prefix, hashes=hashes):
+                literal = f'const EXAMPLE: {ty} = {prefix}{hashes}"{body}"{hashes};\n'
+                path.write_text(literal + original, encoding="utf-8")
+                self.assertConsistent()
+
+    def test_character_literals_do_not_change_pin_parsing(self):
+        path = self.root / "compiler/crates/hyb/src/main.rs"
+        original = path.read_text(encoding="utf-8")
+        for literal in ('\'"\'', r"'\"'", r"'\''", r"'\\'",
+                        r"'\x22'", r"'\u{22}'", "'🦀'", 'b\'"\''):
+            with self.subTest(literal=literal):
+                ty = "u8" if literal.startswith("b") else "char"
+                path.write_text(f"const EXAMPLE: {ty} = {literal};\n" + original,
+                                encoding="utf-8")
+                self.assertConsistent()
+
+    def test_multiline_string_text_does_not_declare_a_pin(self):
+        path = self.root / "compiler/crates/hyb/src/main.rs"
+        original = path.read_text(encoding="utf-8")
+        path.write_text(
+            'const EXAMPLE: &str = "\\\n'
+            'constPINNED_GO:&str=only example text;\n'
+            '";\n' + original, encoding="utf-8")
+        self.assertConsistent()
+
+    def test_lifetimes_do_not_start_character_literals(self):
+        path = self.root / "compiler/crates/hyb/src/main.rs"
+        original = path.read_text(encoding="utf-8")
+        path.write_text(
+            "fn keep<'a>(v: &'a str) -> &'a str { v }\n"
+            'const EXAMPLE: &\'static str = "unchanged";\n' + original,
+            encoding="utf-8")
+        self.assertConsistent()
+
+    def test_multiple_compiler_pin_declarations_fail_closed(self):
+        path = self.root / "compiler/crates/hyb/src/main.rs"
+        original = path.read_text(encoding="utf-8")
+        declaration = ('const PINNED_GO: &str = match option_env!("HYB_PINNED_GO") {\n'
+                       '    Some(v) => v,\n    None => "go1.26.9",\n};')
+        self.assertIn(declaration, original)
+        for first, second in (("go1.26.9", "go1.26.8"),
+                              ("go1.26.8", "go1.26.9"),
+                              ("go1.26.9", "go1.26.9")):
+            with self.subTest(first=first, second=second):
+                # Do not interpret cfg: any ambiguous target declaration is drift.
+                replacement = ("#[cfg(any())]\n"
+                               + declaration.replace("go1.26.9", first) + "\n"
+                               + declaration.replace("go1.26.9", second))
+                path.write_text(original.replace(declaration, replacement),
+                                encoding="utf-8")
+                self.assertDrift(
+                    "hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
+
+    def test_multiple_build_pin_declarations_fail_closed(self):
+        path = self.root / "compiler/crates/hyb/build.rs"
+        original = path.read_text(encoding="utf-8")
+        declaration = 'const DEFAULT_PIN: &str = "1.99.0";'
+        for second in ("1.98.0", "1.99.0"):
+            with self.subTest(second=second):
+                path.write_text(original.replace(
+                    declaration, "#[cfg(any())]\n" + declaration + "\n"
+                    + declaration.replace("1.99.0", second)), encoding="utf-8")
+                self.assertDrift("hyb build.rs DEFAULT_PIN != rust 1.99.0")
+
+    def test_raw_string_fallback_is_outside_supported_pin_form(self):
+        path = self.root / "compiler/crates/hyb/src/main.rs"
+        original = path.read_text(encoding="utf-8")
+        for value in ('r"go1.26.9"', 'r#"go1.26.9"#'):
+            with self.subTest(value=value):
+                path.write_text(original.replace(
+                    'None => "go1.26.9",', "None => " + value + ","), encoding="utf-8")
+                self.assertDrift(
+                    "hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
+
     def test_build_guard_default_pin_dots_are_literal(self):
         self.edit("compiler/crates/hyb/build.rs", '"1.99.0"', '"1x99x0"')
         self.assertDrift("hyb build.rs DEFAULT_PIN != rust 1.99.0")
