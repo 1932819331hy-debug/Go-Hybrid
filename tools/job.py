@@ -244,35 +244,55 @@ def kaggle_fetch(jobdir, slug=None):
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     if found:
-        source = sorted(found)[-1]
-        # A successful transfer may still contain an older kernel's result.
-        # Validate before replacing the local summary used as job evidence.
+        # All candidates come from this download, but a Kaggle output may
+        # contain multiple summary.json files. Lexical filename order says
+        # nothing about which result belongs to the submitted job.
+        submitted_path = os.path.join(jobdir, "submitted.json")
         try:
-            with open(source, encoding="utf-8") as f:
-                summary = json.load(f)
-            if not isinstance(summary, dict):
-                raise ValueError("summary.json must be an object")
-            submitted_path = os.path.join(jobdir, "submitted.json")
-            try:
-                with open(submitted_path, encoding="utf-8") as f:
-                    submitted = json.load(f)
-            except FileNotFoundError:
-                submitted = None  # Support fetching jobs submitted elsewhere.
-            else:
-                if not isinstance(submitted, dict) or any(
-                    not isinstance(submitted.get(key), str) or not submitted[key]
-                    for key in ("job", "sha")
-                ):
-                    raise ValueError("submitted.json must identify the job and revision")
-                for key in ("job", "sha"):
-                    if summary.get(key) != submitted[key]:
-                        raise ValueError("summary.json {} does not match submitted.json".format(key))
+            with open(submitted_path, encoding="utf-8") as f:
+                submitted = json.load(f)
+        except FileNotFoundError:
+            submitted = None  # Support fetching jobs submitted elsewhere.
         except (OSError, ValueError) as error:
             sys.exit("REFUSING to promote fetched summary: {}".format(error))
+        if submitted is not None and (
+            not isinstance(submitted, dict) or any(
+                not isinstance(submitted.get(key), str) or not submitted[key]
+                for key in ("job", "sha")
+            )
+        ):
+            sys.exit("REFUSING to promote fetched summary: submitted.json must identify the job and revision")
+
+        matches = []
+        for source in found:
+            try:
+                with open(source, encoding="utf-8") as f:
+                    summary = json.load(f)
+            except (OSError, ValueError):
+                # Do not mistake an invalid or unrelated report for the
+                # wanted result when another candidate can be validated.
+                continue
+            if not isinstance(summary, dict):
+                continue
+            if submitted is None or all(
+                summary.get(key) == submitted[key] for key in ("job", "sha")
+            ):
+                matches.append(source)
+
+        # Without a local submission record, promoting one of several
+        # candidates would invent an identity. Likewise, multiple matching
+        # reports are ambiguous: keep the previously reviewed summary.
+        if len(matches) != 1:
+            sys.exit(
+                "REFUSING to promote fetched summary: {} matching reports among {} candidates".format(
+                    len(matches), len(found)
+                )
+            )
+        source = matches[0]
         dst = os.path.join(jobdir, "result", "summary.json")
         shutil.copyfile(source, dst)
         print("summary.json -> " + dst)
-        with open(dst) as f:
+        with open(dst, encoding="utf-8") as f:
             print(json.dumps(json.load(f), indent=2)[:3000])
         return 0
     # No summary.json is a hard failure for a fetch: nothing was retrieved to
