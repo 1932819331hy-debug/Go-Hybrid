@@ -175,6 +175,48 @@ so in those words if it happens.
 - **Ghost-Fork P1/P2** recorded per landing (a dimension humans never measured)
 - **cost per landed fix** (Kaggle = $0 compute; cloud = $/bundle)
 
+## 6b. Round-1 result (2026-10-22) — the specialized arm landed two fixes
+
+**Arm A0 `specialized` (deterministic class-template fitter, no LLM, $0):
+2/2 issues authored READY in round 1 and LANDED through the unchanged
+autoland gates.**
+
+| judge metric (frozen §5) | #758 (T-E6001) | #827 (T-E2009) |
+|---|---|---|
+| bundle→READY rate (≤4 rounds) | 1 round | 1 round |
+| autoland gates | baseline ACCEPT → patched REJECT (HYB-E6001) ✓ | ACCEPT → REJECT (HYB-E2009) ✓ |
+| full battery | green (LAND-CONFIRMED 0107658) | green (LAND-CONFIRMED d0a2db5) |
+| over-reach escapes | 0 (accept controls clean) | 0 |
+| Ghost-Fork P1 seed before authoring | **NOT RUN** (protocol miss, recorded) | **NOT RUN** |
+| cost per landed fix | $0 compute, CPU-only | $0 |
+
+Latency: authoring ~minutes per issue (deterministic, no tokens); the two
+landings closed issues #758/#827 the same hour. Human baseline (last 10
+landings: 10/10 green, 0 reverts) is MET on this slice — 2/2 green, 0
+reverts, corpus 124/124, differential FULL 40/40+84/84, census clean.
+
+Honest record of the round: (a) #823 was dropped pre-run — its premise is
+partially stale (later-landed E1002 rules already cover 3 of its 6 repro
+cases at HEAD; whole-file baseline REJECTs); (b) #1013 was dropped — LIVE
+claim (companion PR #1014, not stale-base; contributor credit is
+non-negotiable); (c) the third pick could not exist: the strict claim scan
+found the whole 63-issue top-2 pool companioned, and only 2 had clean
+premises + stale-base-only companions; (d) the census was already drifting
+at HEAD (ci.yml + Makefile said 120, corpus held 122 — a #998/#999-landing
+miss) — repaired session-side before the author run; (e) the harness had
+pre-run bugs (cargo cwd in author_stage + autoland, difflib lineterm,
+import paths) — fixed and committed before any bundle was judged; (f)
+corpus-fixture registration is OUT of the author arm's scope by design —
+done session-side post-landing with sibling-take credit (sonson0910,
+#759/#828).
+
+Thesis status (user, 2026-10-22: "autoland plus specialized functions
+could beat any llm"): **supported on the measured slice** — the two classes
+holding 63.4% of the open bug mass are exactly where deterministic
+templates clear every gate at $0. The LLM arms (Ornith-1.0/1.5-9B, cloud)
+remain UNRUN and now target the RESIDUAL (issues outside the families),
+not the head classes.
+
 ## 7. Shipped today / not shipped
 
 Shipped: `tools/author_stage.py` (v0, selftest green, stdlib-only),
