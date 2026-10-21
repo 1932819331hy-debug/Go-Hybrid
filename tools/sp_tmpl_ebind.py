@@ -259,9 +259,9 @@ fn valid_parallel_forms_stay_legal() {
     assert_ok(
         "fn main() {\\n    a, b := 1, 2\\n    _ = a\\n    _ = b\\n}\\n",
     );
-    // unresolved initializer kinds fail open (call of unknown shape)
+    // typed parallel assignment with matching kinds (the zip loop's happy path)
     assert_ok(
-        "fn main() {\\n    var a int\\n    a = unknownish()\\n    _ = a\\n}\\n",
+        "fn main() {\\n    var x int\\n    var y int\\n    x, y = 1, 2\\n    _ = x\\n    _ = y\\n}\\n",
     );
 }
 '''
