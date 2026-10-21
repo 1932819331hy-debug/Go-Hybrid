@@ -74,6 +74,11 @@ def build() -> None:
 def check_repro(repro_rel: str) -> tuple[int, str]:
     r = sh([str(HYB), "check", repro_rel])
     out = (r.stdout or "") + (r.stderr or "")
+    # hyb check reserves 0 for acceptance and 1 for a diagnostic rejection.
+    # Input/usage errors (2), panics (101), and signals are failed checks,
+    # even if output emitted before the failure contains the expected code.
+    if r.returncode not in (0, 1):
+        raise RuntimeError(f"hyb check failed (exit {r.returncode}): {out[-800:]}")
     return r.returncode, out
 
 

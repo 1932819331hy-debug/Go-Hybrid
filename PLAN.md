@@ -1,5 +1,6 @@
 # Hybrid Language: Development Plan
 
+- Contributor validation (2026-10-21): autoland now distinguishes checker verdict exits (0/1) from input errors, panics and signals before either repro gate can proceed. On main `9f61f54`, 6 of 12 new offline CLI regressions failed, including four actual false landings into disposable local-only Git remotes; all 12 pass with the fix. The compiler/Cargo are explicit fixtures, not a claim of a real compiler crash. All 470 Python tooling/runner/fuzz/installer tests pass; registration/census/conflict checks pass. `make test-quick` stops at missing Cargo after its Python checks; real compiler suites and upstream CI remain required.
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
