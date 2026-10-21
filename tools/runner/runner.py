@@ -41,36 +41,68 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 UTC = lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def run_cmd(cmd, timeout, cwd=None, env=None):
-    """Run one command; return (exit_code, duration_s, tail_of_output). Never raises."""
+    """Run a command and retain only the bounded output tail.
+
+    subprocess.run(capture_output=True) buffers the ENTIRE combined output
+    before slicing it to 4,000 characters. A noisy build can exhaust the
+    worker's RAM even though its summary retains only 1,500 characters.
+    Drain the child pipe concurrently into a small rolling byte buffer.
+    """
     start = time.monotonic()
-    out_tail = ""
+    # Four-byte UTF-8 code points need at most 4 * 4000 bytes for the final
+    # 4000 characters, plus a few bytes for a split code point at the boundary.
+    capacity = 4 * 4000 + 4
+    tail_bytes = bytearray()
+
+    def drain(stream):
+        try:
+            while True:
+                chunk = stream.read(8192)
+                if not chunk:
+                    break
+                tail_bytes.extend(chunk)
+                if len(tail_bytes) > capacity:
+                    del tail_bytes[:-capacity]
+        except (OSError, ValueError):
+            # A descendant can hold the pipe after the direct child exits;
+            # closing the stream after a bounded join must not crash the runner.
+            pass
+
     try:
-        p = subprocess.run(
+        with subprocess.Popen(
             cmd if isinstance(cmd, list) else ["/bin/sh", "-c", cmd],
             cwd=cwd, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=timeout,
-        )
-        code, out = p.returncode, p.stdout.decode("utf-8", "replace")
-    except subprocess.TimeoutExpired as exc:
-        # communicate() has already collected output before the deadline. Keep it
-        # so a slow build/test does not lose its last useful diagnostic.
-        partial = exc.output or b""
-        if isinstance(partial, bytes):
-            partial = partial.decode("utf-8", "replace")
-        code = 124
-        out = partial + ("" if not partial or partial.endswith("\n") else "\n")
-        out += "<<TIMEOUT after {}s>>".format(timeout)
+        ) as proc:
+            reader = threading.Thread(target=drain, args=(proc.stdout,), daemon=True)
+            reader.start()
+            try:
+                code = proc.wait(timeout=timeout)
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()  # Existing contract: stop the direct child only.
+                except ProcessLookupError:
+                    pass
+                proc.wait()
+                code, timed_out = 124, True
+            # Reap buffered output without indefinitely waiting on a
+            # descendant that inherited the stdout file descriptor.
+            reader.join(timeout=1)
+            out = bytes(tail_bytes).decode("utf-8", "replace")
+            if timed_out:
+                out += ("" if not out or out.endswith("\n") else "\n")
+                out += "<<TIMEOUT after {}s>>".format(timeout)
     except Exception as e:  # noqa: BLE001 — runner must never die
         code, out = 125, "<<runner error: {}>>".format(e)
-    out_tail = out[-4000:]
-    return code, round(time.monotonic() - start, 2), out_tail
+    return code, round(time.monotonic() - start, 2), out[-4000:]
 
 
 def env_report():
