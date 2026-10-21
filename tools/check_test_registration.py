@@ -154,6 +154,12 @@ def find_test_files(root, directory):
     """Repo-relative paths of every test_*.py under root/directory."""
     found = []
     base_dir = os.path.join(root, directory)
+    # Either test subtree may be absent in standalone guard fixtures.
+    # Missing is different from unreadable; propagate other stat errors.
+    try:
+        os.lstat(base_dir)
+    except FileNotFoundError:
+        return []
     # os.walk skips unreadable directories by default. A partial scan must
     # never be mistaken for complete CI test coverage.
     def fail_on_walk_error(error):
