@@ -42,8 +42,9 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 QUEUE = ROOT / "automation" / "land-queue"
-HYB = ROOT / "compiler" / "target" / "debug" / "hyb"
 COMPILER = ROOT / "compiler"
+TARGET = COMPILER / "target"
+HYB = TARGET / "debug" / "hyb"
 
 
 def sh(args, cwd=None, **kw) -> subprocess.CompletedProcess:
@@ -66,7 +67,10 @@ def read_meta(d: pathlib.Path) -> dict:
 
 
 def build() -> None:
-    r = sh(["cargo", "build", "-p", "hyb", "--quiet"], cwd=str(COMPILER))
+    # Keep Cargo's output aligned with the binary every gate executes, even
+    # when tools/env.sh or Cargo configuration selects a shared target dir.
+    r = sh(["cargo", "build", "-p", "hyb", "--quiet", "--target-dir", str(TARGET)],
+           cwd=str(COMPILER))
     if r.returncode != 0:
         raise RuntimeError(f"cargo build failed: {r.stderr[-800:]}")
 
@@ -79,7 +83,7 @@ def check_repro(repro_rel: str) -> tuple[int, str]:
 
 def battery() -> list[tuple[str, bool, str]]:
     steps = [
-        ("workspace", ["cargo", "test", "--workspace"]),
+        ("workspace", ["cargo", "test", "--workspace", "--target-dir", str(TARGET)]),
         ("corpus", ["python3", "tools/corpus_harness.py", "--bin", str(HYB)]),
         ("census", ["python3", "tools/check_corpus_census.py"]),
         ("differential", ["python3", "tools/differential_loop.py",
