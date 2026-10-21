@@ -223,10 +223,10 @@ fn typed_decl_initializer_conflict_reject() {
         "fn main() {\\n    const s string = 456\\n    _ = s\\n}\\n",
         "HYB-E1002",
     );
-    assert_code(
-        "fn main() {\\n    var a, b int = 1, \\"x\\"\\n    _ = a\\n    _ = b\\n}\\n",
-        "HYB-E1002",
-    );
+    // NOTE: the grammar has no multi-name typed declaration (`var a, b int =
+    // 1, 2` is E0002 at the parser), so the positional zip guard in `local`
+    // is defensive class-shape; the single-name forms above are the issue's
+    // actual repros.
 }
 
 #[test]
@@ -255,9 +255,9 @@ fn valid_parallel_forms_stay_legal() {
     assert_ok(
         "fn main() {\\n    var a any = 1\\n    var b any = \\"str\\"\\n    _ = a\\n    _ = b\\n}\\n",
     );
-    // matching positional types in a parallel declaration
+    // matching counts in a parallel declaration stay legal
     assert_ok(
-        "fn main() {\\n    var a, b int = 1, 2\\n    _ = a\\n    _ = b\\n}\\n",
+        "fn main() {\\n    a, b := 1, 2\\n    _ = a\\n    _ = b\\n}\\n",
     );
     // unresolved initializer kinds fail open (call of unknown shape)
     assert_ok(
