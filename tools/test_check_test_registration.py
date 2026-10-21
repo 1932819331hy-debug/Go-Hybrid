@@ -8,6 +8,7 @@ guard covers two invocation styles, and both are pinned here:
   tests/**/test_*.py  reached by literal repo-relative path
 """
 import contextlib
+import errno
 import importlib.util
 import io
 import os
@@ -332,6 +333,83 @@ class ScanFailureTests(unittest.TestCase):
             with patch.object(guard.os, "walk", unreadable_walk):
                 with self.assertRaisesRegex(PermissionError, "permission denied"):
                     guard.find_test_files(td, "tools")
+
+
+    def test_absent_and_empty_optional_roots_have_empty_inventories(self):
+        with tempfile.TemporaryDirectory() as td:
+            for directory in ("tools", "tests"):
+                with self.subTest(directory=directory):
+                    self.assertEqual(guard.find_test_files(td, directory), [])
+                    (Path(td) / directory).mkdir()
+                    self.assertEqual(guard.find_test_files(td, directory), [])
+
+    def test_invalid_root_types_are_not_treated_as_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "tools").write_text("not a directory", encoding="utf-8")
+            with self.assertRaises(NotADirectoryError):
+                guard.find_test_files(root, "tools")
+            (root / "tools").unlink()
+            (root / "tools").symlink_to(root / "missing", target_is_directory=True)
+            with self.assertRaises(FileNotFoundError):
+                guard.find_test_files(root, "tools")
+
+    def test_root_inspection_errors_are_not_treated_as_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            for error_number in (errno.EACCES, errno.EIO):
+                with self.subTest(errno=error_number):
+                    error = OSError(error_number, "root inspection failed", td + "/tools")
+                    with patch.object(guard.os, "lstat", side_effect=error):
+                        with self.assertRaises(OSError) as raised:
+                            guard.find_test_files(td, "tools")
+                    self.assertIs(raised.exception, error)
+
+    def test_real_walk_errors_in_both_inventory_passes_fail_closed(self):
+        # Inject at scandir, not at the finder/walker boundary: exercise the
+        # real optional-root check, os.walk callback, and CLI error handling.
+        for directory in ("tools", "tests"):
+            for nested in (False, True):
+                for scan_pass in (1, 2):
+                    for error_number in (errno.ENOENT, errno.EACCES, errno.EIO):
+                        with self.subTest(directory=directory, nested=nested,
+                                          scan_pass=scan_pass, errno=error_number), \
+                                tempfile.TemporaryDirectory() as td:
+                            root = Path(td)
+                            for name in ("tools", "tests"):
+                                (root / name).mkdir()
+                                (root / name / "test_visible.py").write_text("# test\n")
+                            target = root / directory
+                            if nested:
+                                target = target / "nested"
+                                target.mkdir()
+                                (target / "test_hidden.py").write_text("# test\n")
+                            workflow = root / "ci.yml"
+                            workflow.write_text(
+                                "python3 -m unittest discover -s tools -p test_*.py\n"
+                                "python3 tests/test_visible.py\n")
+                            real_scandir = os.scandir
+                            visits = 0
+
+                            def failing_scandir(path):
+                                nonlocal visits
+                                if Path(path) == target:
+                                    visits += 1
+                                    if visits == scan_pass:
+                                        raise OSError(error_number, "scan failed", str(path))
+                                return real_scandir(path)
+
+                            stdout, stderr = io.StringIO(), io.StringIO()
+                            with patch.object(guard.os, "scandir", failing_scandir), \
+                                    patch.object(guard.sys, "argv", [
+                                        "check_test_registration.py", "--root", td,
+                                        "--workflow", str(workflow)]), \
+                                    contextlib.redirect_stdout(stdout), \
+                                    contextlib.redirect_stderr(stderr):
+                                code = guard.main()
+                            self.assertEqual(code, 2)
+                            self.assertEqual(visits, scan_pass)
+                            self.assertIn("test inventory scan failed", stderr.getvalue())
+                            self.assertNotIn("test registration: OK", stdout.getvalue())
 
     def run_main_with_finder(self, finder):
         with tempfile.TemporaryDirectory() as td:

@@ -154,11 +154,11 @@ def find_test_files(root, directory):
     """Repo-relative paths of every test_*.py under root/directory."""
     found = []
     base_dir = os.path.join(root, directory)
-    # One of the suite roots may be absent in a minimal test fixture. That
-    # is different from a present tree with an unreadable subdirectory.
-    # os.stat distinguishes absence from permission errors (unlike exists()).
+    # A repository may contain only tools/ or only tests/. Check absence
+    # before walking; once an entry exists, every traversal error is fatal.
+    # lstat preserves dangling symlinks so they fail rather than look absent.
     try:
-        os.stat(base_dir)
+        os.lstat(base_dir)
     except FileNotFoundError:
         return []
     # Without onerror, os.walk silently skips unreadable subdirectories.
