@@ -43,6 +43,7 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 QUEUE = ROOT / "automation" / "land-queue"
 HYB = ROOT / "compiler" / "target" / "debug" / "hyb"
+COMPILER = ROOT / "compiler"
 
 
 def sh(args, **kw) -> subprocess.CompletedProcess:
@@ -65,7 +66,7 @@ def read_meta(d: pathlib.Path) -> dict:
 
 
 def build() -> None:
-    r = sh(["cargo", "build", "-p", "hyb", "--quiet"])
+    r = sh(["cargo", "build", "-p", "hyb", "--quiet"], cwd=str(COMPILER))
     if r.returncode != 0:
         raise RuntimeError(f"cargo build failed: {r.stderr[-800:]}")
 
