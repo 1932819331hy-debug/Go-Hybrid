@@ -80,9 +80,10 @@ def check_repro(repro_rel: str) -> tuple[int, str]:
 def battery() -> list[tuple[str, bool, str]]:
     steps = [
         ("workspace", ["cargo", "test", "--workspace"]),
-        ("corpus", ["python3", "tools/corpus_harness.py"]),
+        ("corpus", ["python3", "tools/corpus_harness.py", "--bin", str(HYB)]),
         ("census", ["python3", "tools/check_corpus_census.py"]),
-        ("differential", ["python3", "tools/differential_loop.py"]),
+        ("differential", ["python3", "tools/differential_loop.py",
+                          "--bin", str(HYB)]),
     ]
     results = []
     for name, cmd in steps:
