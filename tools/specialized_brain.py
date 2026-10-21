@@ -194,10 +194,10 @@ def diff_of(path: str, new_content: str) -> str:
         old = None
     if old is None:
         d = difflib.unified_diff([], new_content.splitlines(True),
-                                 fromfile="/dev/null", tofile=f"b/{path}", lineterm="")
+                                 fromfile="/dev/null", tofile=f"b/{path}", lineterm="\n")
     else:
         d = difflib.unified_diff(old.splitlines(True), new_content.splitlines(True),
-                                 fromfile=f"a/{path}", tofile=f"b/{path}", lineterm="")
+                                 fromfile=f"a/{path}", tofile=f"b/{path}", lineterm="\n")
     return "".join(d)
 
 

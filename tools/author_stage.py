@@ -285,6 +285,8 @@ def run_author(issue_no: int, out: pathlib.Path, max_rounds: int,
                 applied = False
                 break
         if not applied:
+            tr(trace, "gate-apply-failed", round=rnd,
+               note=feedback[:200])
             revert_tree()
             continue
 
