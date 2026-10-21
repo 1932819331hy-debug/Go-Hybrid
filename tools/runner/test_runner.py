@@ -247,7 +247,7 @@ class BoundedCaptureTests(unittest.TestCase):
         code, _, output = runner.run_cmd([sys.executable, "-c", payload], 15)
         self.assertEqual(code, 0)
         self.assertLessEqual(len(output), 4000)
-        self.assertTrue(output.endswith("last-error\\n"))
+        self.assertTrue(output.endswith("last-error\n"))
         self.assertNotIn("discard-me", output)
 
     def test_timeout_retains_progress_after_large_output(self):
