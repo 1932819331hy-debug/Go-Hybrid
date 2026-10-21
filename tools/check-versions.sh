@@ -44,6 +44,79 @@ has_version() {
     grep -qE "$pat" "$file"
 }
 
+# Compare the complete supported declaration, not a quoted substring. Ignore
+# whitespace outside strings and Rust comments (including nested block comments).
+# Raw strings and character literals cannot supply a declaration. Require exactly
+# one target declaration; do not try to choose between conditional cfg branches.
+# Extra/alternate match arms and unsupported declaration forms fail closed.
+has_pin_declaration() {
+    local file="$1" name="$2" expected="$3"
+    awk -v name="$name" -v expected="$expected" '
+        {
+            # Text continuing from a string is never a declaration start.
+            clean = quoted ? "<string>" : ""
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                pair = substr($0, i, 2)
+                if (raw_end != "") {
+                    if (substr($0, i, length(raw_end)) == raw_end) {
+                        i += length(raw_end) - 1
+                        raw_end = ""
+                    }
+                } else if (depth) {
+                    if (pair == "/*") { depth++; i++ }
+                    else if (pair == "*/") { depth--; i++ }
+                } else if (quoted) {
+                    clean = clean c
+                    if (escaped) escaped = 0
+                    else if (c == "\\") escaped = 1
+                    else if (c == "\"") quoted = 0
+                } else if (pair == "//") {
+                    break
+                } else if (pair == "/*") {
+                    depth++; i++
+                } else if (match(substr($0, i), /^[bc]?r#*"/)) {
+                    raw_size = RLENGTH
+                    raw_end = substr($0, i, raw_size)
+                    gsub(/[^#]/, "", raw_end)
+                    raw_end = "\"" raw_end
+                    clean = clean "<raw>"
+                    i += raw_size - 1
+                } else if (c == "\047" && match(substr($0, i),
+                           /^\047([^\\\047]|\\([\\\047"nrt0]|x[[:xdigit:]][[:xdigit:]]|u\{[[:xdigit:]_]+\}))\047/)) {
+                    # Only a complete char literal consumes apostrophes;
+                    # lifetimes such as &\047static and <\047a> stay in code.
+                    clean = clean substr($0, i, RLENGTH)
+                    i += RLENGTH - 1
+                } else if (c !~ /[[:space:]]/) {
+                    clean = clean c
+                    if (c == "\"") quoted = 1
+                }
+            }
+            if (quoted) clean = clean "\n"
+            if (!collecting && index(clean, "const" name ":") == 1) {
+                collecting = 1
+                declaration = ""
+                count++
+            }
+            if (collecting) {
+                declaration = declaration clean
+                if (clean ~ /;$/ && !depth && !quoted && raw_end == "") {
+                    if (declaration != expected) invalid = 1
+                    collecting = 0
+                }
+            }
+        }
+        END { exit (count != 1 || collecting || invalid) }
+    ' "$file"
+}
+
+has_default_pin() {
+    local name="$1" version="$2"
+    has_pin_declaration compiler/crates/hyb/src/main.rs "$name" \
+        "const$name:&str=matchoption_env!(\"HYB_$name\"){Some(v)=>v,None=>\"$version\",};"
+}
+
 echo "pins: $PINNED_GO / rust $PINNED_RUST (tools/env.sh)"
 
 # --- 2. Cross-reference every version-bearing artifact ----------------------
@@ -54,13 +127,14 @@ has_version README.md "Rust " "$PINNED_RUST" \
     && pass "README.md names Rust $PINNED_RUST" \
     || fail "README.md does not name Rust $PINNED_RUST"
 
-grep -qF "\"$PINNED_GO\"" compiler/crates/hyb/src/main.rs \
+has_default_pin PINNED_GO "$PINNED_GO" \
     && pass "hyb default pin matches ($PINNED_GO)" \
     || fail "hyb default pin (compiler/crates/hyb/src/main.rs) != $PINNED_GO"
-grep -qF "\"$PINNED_RUST\"" compiler/crates/hyb/src/main.rs \
+has_default_pin PINNED_RUST "$PINNED_RUST" \
     && pass "hyb default pin matches (rust $PINNED_RUST)" \
     || fail "hyb default pin (compiler/crates/hyb/src/main.rs) != rust $PINNED_RUST"
-grep -qF "const DEFAULT_PIN: &str = \"$PINNED_RUST\"" compiler/crates/hyb/build.rs \
+has_pin_declaration compiler/crates/hyb/build.rs DEFAULT_PIN \
+    "constDEFAULT_PIN:&str=\"$PINNED_RUST\";" \
     && pass "hyb drift-guard default matches (rust $PINNED_RUST)" \
     || fail "hyb build.rs DEFAULT_PIN != rust $PINNED_RUST (the guard would refuse honest builds)"
 
