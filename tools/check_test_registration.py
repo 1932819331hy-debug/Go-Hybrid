@@ -46,7 +46,7 @@ PYTHON_FLAGS_RE = re.compile(r"-[bBdEIOPqRsSuvx]+\Z")
 # shlex's POSIX mode removes quotes, while its non-POSIX mode splits words
 # containing escaped spaces or adjacent quoted/unquoted pieces.
 SHELL_TOKEN_RE = re.compile(
-    r"""(?:[^\s;&|<>()'"\\]|\\.|'[^']*'|"(?:\\.|[^"\\])*")+|[;&|<>()]+""")
+    r"""(?:[^\s;&|<>()'"\\]|\\.|'[^']*'|"(?:\\.|[^"\\])*")+|<<<|<<|[;&|()]+|[<>]+""")
 
 
 def shell_words(line):
@@ -64,6 +64,7 @@ def python_commands(workflow_text):
         if run_indent is not None and raw_line.strip():
             if indent <= run_indent:
                 run_indent = block_indent = None
+                heredocs.clear()
             elif block_indent is None:
                 block_indent = indent
         if heredocs:
@@ -77,8 +78,14 @@ def python_commands(workflow_text):
         inline_run = re.match(r"(?:-\s+)?run:\s*(.*)", line)
         if inline_run:
             line = inline_run.group(1)
-            if line in ("|", "|-", "|+"):
-                run_indent, block_indent = indent, None
+            run_indent, block_indent = indent, None
+            if re.fullmatch(r"\|[-+]?(?:\s+#.*)?", line):
+                continue
+        elif run_indent is None and re.match(
+                r"""(?:-\s+)?(?:[\w-]+|'[^']*'|"(?:\\.|[^"\\])*"):(?:\s|$)""", line):
+            # YAML metadata is not shell source, even when a step name
+            # contains an unquoted heredoc operator.
+            continue
         try:
             tokens = shell_words(line)
             # A quoted YAML run scalar wraps the whole shell command.
