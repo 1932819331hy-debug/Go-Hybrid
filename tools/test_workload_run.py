@@ -39,6 +39,7 @@ import os
 from pathlib import Path
 import sys
 import time
+import subprocess
 
 tool = Path(sys.argv[0]).name
 args = sys.argv[1:]
@@ -63,14 +64,20 @@ if tool == "go":
             sys.exit(23)
     output = Path(args[args.index("-o") + 1])
 elif tool == "cargo":
-    output = Path("target/release/workloads")
+    output = Path(os.environ.get("CARGO_TARGET_DIR", "target")) / "release/workloads"
 elif tool == "hyb" and args[0] == "build":
     output = Path(args[args.index("-o") + 1])
 else:
     sys.exit(0)
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text("#!/bin/sh\\nprintf '%s\\\\n' 'run " + output.name + "' >> \\\"$TRACE\\\"\\n")
+if tool == "cargo":
+    with output.open("a") as binary:
+        binary.write("echo 'rust-load p50=1ns p99=2ns mean=1ns n=100'\\n")
+        binary.write("exit " + os.environ.get("RUST_EXIT", "0") + "\\n")
 output.chmod(0o755)
+if tool == "cargo" and args[0] == "run":
+    sys.exit(subprocess.run([str(output.resolve())]).returncode)
 '''
         for tool in ("go", "cargo", "hyb"):
             path = self.bin / tool
@@ -88,13 +95,67 @@ output.chmod(0o755)
             "TMPDIR": str(self.scratch),
         }
 
-    def run_triplet(self, failure=""):
+    def run_triplet(self, failure="", **overrides):
+        env = self.triplet_env(failure)
+        env.update(overrides)
         result = subprocess.run(
-            ["bash", str(self.runner)], env=self.triplet_env(failure), cwd=self.root,
+            ["bash", str(self.runner)], env=env, cwd=self.root,
             capture_output=True, text=True, timeout=10,
         )
         trace = self.trace.read_text().splitlines()
         return result, trace
+
+    def seed_stale_rust(self):
+        stale = self.workloads / "rust/target/release/workloads"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text("#!/bin/sh\necho STALE-RUST-METRICS\n")
+        stale.chmod(0o755)
+        return stale
+
+    def test_rust_runs_fresh_artifact_from_inherited_target_directory(self):
+        for target in ("relative-target", "relative target with spaces",
+                       str(self.root / "absolute-target"),
+                       str(self.root / "absolute target with spaces")):
+            with self.subTest(target=target):
+                stale = self.seed_stale_rust()
+                result, trace = self.run_triplet(CARGO_TARGET_DIR=target)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("rust-load p50=1ns p99=2ns mean=1ns n=100", result.stdout)
+                self.assertNotIn("STALE-RUST-METRICS", result.stdout)
+                self.assertIn("run workloads", trace)
+                artifact = Path(target)
+                if not artifact.is_absolute():
+                    artifact = self.workloads / "rust" / artifact
+                self.assertTrue((artifact / "release/workloads").exists())
+                self.assertIn("STALE-RUST-METRICS", stale.read_text())
+                self.trace.unlink()
+
+    def test_default_rust_metrics_are_unchanged(self):
+        result, trace = self.run_triplet()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "== Go twin ==", "== Rust twin ==",
+            "rust-load p50=1ns p99=2ns mean=1ns n=100",
+            "== Hybrid twins (hyb check + build; the checker runs) ==",
+        ])
+        self.assertEqual(trace.count("run workloads"), 1)
+
+    def test_failed_rust_build_does_not_run_stale_binary(self):
+        self.seed_stale_rust()
+        result, trace = self.run_triplet("cargo", CARGO_TARGET_DIR="custom target")
+        self.assertEqual(result.returncode, 17, result.stdout + result.stderr)
+        self.assertNotIn("STALE-RUST-METRICS", result.stdout)
+        self.assertNotIn("run workloads", trace)
+        self.assertNotIn("hyb check load", trace)
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_rust_runtime_failure_stops_before_hybrid(self):
+        self.seed_stale_rust()
+        result, trace = self.run_triplet(CARGO_TARGET_DIR="custom target", RUST_EXIT="19")
+        self.assertEqual(result.returncode, 19, result.stdout + result.stderr)
+        self.assertNotIn("STALE-RUST-METRICS", result.stdout)
+        self.assertNotIn("hyb check load", trace)
+        self.assertEqual(list(self.scratch.iterdir()), [])
 
     def test_success_runs_both_hybrid_workloads(self):
         result, trace = self.run_triplet()
