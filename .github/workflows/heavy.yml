@@ -77,7 +77,7 @@ jobs:
           retention-days: 1
 
   reduce:
-    needs: [shard]
+    needs: [gen, shard]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -87,9 +87,12 @@ jobs:
         with:
           path: shards
       - name: Merge into fleet summary
+        if: always()
+        env:
+          EXPECTED_SHARDS_JSON: ${{ needs.gen.outputs.matrix }}
         run: |
           python3 - <<'EOF'
-          import glob, json, datetime
+          import glob, json, datetime, os, sys
           merged = {
             "schema": "go-hybrid-fleet-summary/1",
             "job": "${{ github.event.inputs.job }}",
@@ -98,23 +101,51 @@ jobs:
             "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "shards": [],
           }
-          ok = True
+          errors = []
+          try:
+              matrix = json.loads(os.environ["EXPECTED_SHARDS_JSON"])
+              if (not isinstance(matrix, list) or not matrix
+                  or any(type(i) is not int or i < 0 for i in matrix)
+                  or len(set(matrix)) != len(matrix)):
+                  raise ValueError("expected a nonempty matrix of distinct nonnegative shard IDs")
+              expected = {str(i) for i in matrix}
+          except (KeyError, ValueError, TypeError) as error:
+              expected = set()
+              errors.append("invalid expected shard matrix: {}".format(error))
+          seen, duplicates = set(), set()
+          ok = bool(expected)
           for p in sorted(glob.glob("shards/*/shard-*-summary.json")):
-              s = json.load(open(p))
-              merged["shards"].append({
-                  "shard": p.split("shard-")[-1].split("-summary")[0],
-                  "ok": s.get("ok"),
-                  "wall_clock_s": s.get("wall_clock_s"),
-                  "hardware": {"nproc": s.get("hardware", {}).get("nproc"), "mem": s.get("hardware", {}).get("mem")},
-                  "steps": [{"name": x["name"], "exit": x["exit"], "dur_s": x["dur_s"]} for x in s.get("steps", [])],
-              })
-              ok = ok and bool(s.get("ok"))
-          merged["ok"] = ok
+              shard = os.path.basename(p)[len("shard-"):-len("-summary.json")]
+              if shard in seen:
+                  duplicates.add(shard)
+              seen.add(shard)
+              try:
+                  with open(p, encoding="utf-8") as f:
+                      s = json.load(f)
+                  if not isinstance(s, dict) or type(s.get("ok")) is not bool:
+                      raise ValueError("summary must contain a boolean ok verdict")
+                  merged["shards"].append({
+                      "shard": shard,
+                      "ok": s["ok"],
+                      "wall_clock_s": s.get("wall_clock_s"),
+                      "hardware": {"nproc": s.get("hardware", {}).get("nproc"), "mem": s.get("hardware", {}).get("mem")},
+                      "steps": [{"name": x["name"], "exit": x["exit"], "dur_s": x["dur_s"]} for x in s.get("steps", [])],
+                  })
+                  ok = ok and s["ok"]
+              except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+                  errors.append("{}: {}".format(p, error))
+          merged["missing_shards"] = sorted(expected - seen)
+          merged["unexpected_shards"] = sorted(seen - expected)
+          merged["duplicate_shards"] = sorted(duplicates)
+          merged["errors"] = errors
+          merged["ok"] = ok and seen == expected and not duplicates and not errors
           merged["shard_count"] = len(merged["shards"])
           json.dump(merged, open("fleet-summary.json", "w"), indent=2)
           print(json.dumps(merged, indent=2)[:4000])
+          sys.exit(0 if merged["ok"] else 1)
           EOF
       - name: Upload fleet summary (3-day retention)
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: fleet-summary
