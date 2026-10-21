@@ -227,6 +227,13 @@ def cmd_rebase(args):
                 tb.log("  #%d skipped: branch moved under us (CAS mismatch)" % n)
                 continue
             tb.log("  #%d FAILED: %s" % (n, msg))
+            # Authorization and exhausted transient HTTP failures do not prove
+            # a merge conflict. Keep the failure visible without exempting the
+            # PR from every later rebase attempt (#986).
+            prefix = "PUT /repos/%s/pulls/%d/update-branch -> " % (gh.repo, n)
+            status = msg[len(prefix):].split(" ", 1)[0] if msg.startswith(prefix) else ""
+            if status in {"403", "429", "502", "503", "504"}:
+                continue
             try:
                 st, labels = gh.req("GET", "/repos/%s/issues/%d/labels?per_page=100"
                                     % (gh.repo, n))
