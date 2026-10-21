@@ -263,6 +263,12 @@ fn valid_parallel_forms_stay_legal() {
     assert_ok(
         "fn main() {\\n    var x int\\n    var y int\\n    x, y = 1, 2\\n    _ = x\\n    _ = y\\n}\\n",
     );
+    // `f()?` on a (T1, T2, error) call yields two values after the unwrap —
+    // stays legal (the 10-a5-http-handler-capture corpus class); the Try
+    // source is fail-open for the count guards.
+    assert_ok(
+        "fn main() {\\n    code, body := http.get(\\"/x\\")?\\n    fmt.println(code, body)\\n}\\n",
+    );
 }
 '''
 )
@@ -520,8 +526,12 @@ fn is_definitely_single_value(e: &Expr) -> bool {
         | Expr::StructLit { .. }
         | Expr::SliceLit { .. }
         | Expr::MapLit { .. }
-        | Expr::FnLit { .. }
-        | Expr::Try { .. } => true,
+        | Expr::FnLit { .. } => true,
+        // NOTE: `Expr::Try` is deliberately NOT here — `f()?` on a
+        // (T1, T2, error) call yields TWO values after the unwrap (the
+        // accept-corpus program 10-a5-http-handler-capture pins
+        // `code, body := httptest.get(...)?` as legal), so a Try is a
+        // source-count question, not a provably-single value.
         Expr::Move { operand, .. } => is_definitely_single_value(operand),
         _ => false,
     }
