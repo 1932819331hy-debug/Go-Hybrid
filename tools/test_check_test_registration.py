@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location(
     "check_test_registration", Path(__file__).with_name("check_test_registration.py"))
@@ -312,6 +313,62 @@ class GuardMisuseTests(unittest.TestCase):
         self.assertEqual(
             self.run_main("python3 -m unittest discover -s tools/fuzz -p 'test_*.py'\n",
                           ["tools/fuzz/test_control.py", "tools/test_orphan.py"]), 1)
+
+
+class ScanFailureTests(unittest.TestCase):
+    """An incomplete test inventory must never be reported as registered."""
+
+    def test_walk_permission_error_does_not_hide_unscanned_tests(self):
+        with tempfile.TemporaryDirectory() as td:
+            tools_dir = Path(td) / "tools"
+            tools_dir.mkdir()
+            hidden = tools_dir / "hidden"
+
+            def unreadable_walk(root, onerror=None):
+                yield str(tools_dir), [], ["test_visible.py"]
+                self.assertIsNotNone(onerror)
+                onerror(PermissionError(13, "permission denied", str(hidden)))
+
+            with patch.object(guard.os, "walk", unreadable_walk):
+                with self.assertRaisesRegex(PermissionError, "permission denied"):
+                    guard.find_test_files(td, "tools")
+
+    def run_main_with_finder(self, finder):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "tools").mkdir()
+            (root / "tools/test_visible.py").write_text("# test\n", encoding="utf-8")
+            workflow = root / "ci.yml"
+            workflow.write_text(
+                "python3 -m unittest discover -s tools -p test_visible.py\n",
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+            with patch.object(guard, "find_test_files", side_effect=finder), \
+                    patch.object(guard.sys, "argv", [
+                        "check_test_registration.py", "--workflow", str(workflow),
+                        "--root", str(root),
+                    ]), contextlib.redirect_stderr(stderr), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = guard.main()
+            return code, stderr.getvalue()
+
+    def test_initial_inventory_failure_exits_two(self):
+        code, stderr = self.run_main_with_finder(
+            PermissionError(13, "permission denied", "tools/hidden"))
+        self.assertEqual(code, 2)
+        self.assertIn("REGISTRATION CHECK ERROR", stderr)
+        self.assertIn("permission denied", stderr)
+
+    def test_second_inventory_failure_exits_two(self):
+        # First scan has one registered test; recheck encounters an unreadable
+        # nested directory. Both passes must reject incomplete inventory.
+        code, stderr = self.run_main_with_finder([
+            ["tools/test_visible.py"], [], PermissionError("hidden test directory")
+        ])
+        self.assertEqual(code, 2)
+        self.assertIn("REGISTRATION CHECK ERROR", stderr)
+        self.assertIn("hidden test directory", stderr)
 
 
 if __name__ == "__main__":
