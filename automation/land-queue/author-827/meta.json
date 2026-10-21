@@ -1,0 +1,15 @@
+{
+  "issue": 827,
+  "expected_code": "HYB-E2009",
+  "basis": "author-stage v0 brain=specialized rounds=1",
+  "status": "ready",
+  "gates": {
+    "baseline": "ACCEPT",
+    "patched": "REJECT HYB-E2009",
+    "acceptControls": [
+      "tests/checker-corpus/control-uint8-max.hy",
+      "tests/checker-corpus/control-composite-literal-in-range.hy"
+    ],
+    "rounds": 1
+  }
+}
