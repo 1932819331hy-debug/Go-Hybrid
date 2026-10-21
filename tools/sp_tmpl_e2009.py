@@ -207,7 +207,7 @@ def candidates():
         {
             "name": "full",
             "edits": _edits(),
-            "new_files": [(TEST_PATH, TEST_SRC), (FIXTURE_PATH, FIXTURE_SRC)],
+            "new_files": [(TEST_PATH, TEST_SRC)],
             "rust_tests": ["--test", TEST_STEM],
             "rationale": (
                 "T-E2009 full: non_integer_bound_kind gains nil / "
