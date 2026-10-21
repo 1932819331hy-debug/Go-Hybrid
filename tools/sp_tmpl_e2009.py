@@ -177,7 +177,7 @@ FIXTURE_SRC = '''// ============================================================
 // lowering-derived mismatch/overflow rules to the Range arm. Untyped
 // literals and untyped consts adapt and stay legal.
 //
-// EXPECTED-VERDICT below; regression pins live in
+machine-readable verdict marker below; regression pins live in
 // `hy-check/tests/range_bound_type_forms.rs`.
 // ============================================================================
 

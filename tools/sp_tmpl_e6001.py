@@ -557,7 +557,7 @@ FIXTURE_SRC = '''// ============================================================
 // time and stays accepted; a local shadowing the const name is a runtime
 // binding and stays accepted too.
 //
-// EXPECTED-VERDICT below; regression pins live in
+machine-readable verdict marker below; regression pins live in
 // `hy-check/tests/const_zero_divisor_const_forms.rs`.
 // ============================================================================
 
@@ -614,12 +614,22 @@ def candidates():
     return [c_full, c_core]
 
 
-TEST_SRC_CORE_FALLBACK = TEST_SRC.replace(
-    'fn const_string_len_zero_divisor_rejects() {',
-    'fn const_string_len_zero_divisor_rejects__disabled_in_core_variant() {'
-).replace(
-    'fn conversion_zero_divisor_rejects() {',
-    'fn conversion_zero_divisor_rejects__disabled_in_core_variant() {'
+def _drop_fns(src: str, *names: str) -> str:
+    """Remove whole #[test] functions (core variant cannot support them)."""
+    for name in names:
+        marker = f"#[test]\nfn {name}() {{"
+        i = src.find(marker)
+        if i < 0:
+            continue
+        j = src.find("\n}\n", i)
+        src = src[:i] + src[j + len("\n}\n"):]
+    return src
+
+
+TEST_SRC_CORE_FALLBACK = _drop_fns(
+    TEST_SRC,
+    "const_string_len_zero_divisor_rejects",
+    "conversion_zero_divisor_rejects",
 )
 
 

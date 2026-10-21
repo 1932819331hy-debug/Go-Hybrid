@@ -187,10 +187,12 @@ def smoke(repro_rel: str, expected: str, rust_tests: list[str]) -> tuple[bool, s
             return False, "emitted Rust tests failed:\n" + (t.stdout or "")[-1500:]
     c2 = sh(["python3", "tools/corpus_harness.py", "--bin", str(HYB)], timeout=1800)
     if c2.returncode != 0:
-        return False, "corpus harness failed:\n" + (c2.stdout or "")[-1200:]
+        return False, ("corpus harness failed (exit %d):\n" % c2.returncode)
+                       + ((c2.stdout or "") + (c2.stderr or ""))[-1200:]
     c3 = sh(["python3", "tools/check_corpus_census.py"], timeout=900)
     if c3.returncode != 0:
-        return False, "census check failed:\n" + (c3.stdout or "")[-900:]
+        return False, ("census check failed (exit %d):\n" % c3.returncode)
+                       + ((c3.stdout or "") + (c3.stderr or ""))[-900:]
     return True, ""
 
 
