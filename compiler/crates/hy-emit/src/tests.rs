@@ -2908,3 +2908,36 @@ fn m4_initialism_mapping_for_foreign_go_names_issue_658() {
     assert!(go.contains("strings.ToValidUTF8(\"a\", \"b\")"), "expected strings.ToValidUTF8, got:\n{}", go);
 }
 
+
+#[test]
+fn parenthesized_callee_evaluates_before_try_argument() {
+    // E3b: grouping the method value must not move receiver evaluation
+    // after an argument's hoisted try, including its early error return.
+    for callee in ["first().consume", "(first().consume)", "((first().consume))"] {
+        let src = format!(r#"
+struct sink {{ value int }}
+fn first() sink {{
+    fmt.println("first")
+    return sink{{value: 1}}
+}}
+fn (s sink) consume(x int) {{
+    fmt.println(x)
+}}
+fn second() (int, error) {{
+    fmt.println("second")
+    return 2, nil
+}}
+fn main() {{
+    {callee}(second()?)
+}}
+"#);
+        let go = emit(&src);
+        let main = &go[go.find("func main()").unwrap()..];
+        assert!(
+            main.find("first()").unwrap() < main.find("second()").unwrap(),
+            "callee must run before its argument or error propagation: {main}"
+        );
+        assert_eq!(main.matches("first()").count(), 1, "{main}");
+        assert_eq!(main.matches("second()").count(), 1, "{main}");
+    }
+}
