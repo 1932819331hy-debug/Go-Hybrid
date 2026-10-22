@@ -176,31 +176,82 @@ def complete_patch(file):
     """
     patch = file.get("patch")
     if (file.get("status") not in {"added", "modified", "removed"}
-            or not isinstance(patch, str) or not patch):
+            or not isinstance(patch, str) or not patch
+            or any(type(file.get(k)) is not int or file[k] < 0
+                   for k in ("additions", "deletions", "changes"))):
         return False
     old_left = new_left = None
+    old_end = new_end = 0
+    old_eof = new_eof = False
+    last_kind = None
     additions = deletions = 0
     for line in patch.rstrip("\n").split("\n"):
         if line.startswith("@@"):
-            if old_left not in (None, 0) or new_left not in (None, 0):
+            if (old_left not in (None, 0) or new_left not in (None, 0)
+                    or old_eof or new_eof):
                 return False
-            match = re.fullmatch(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@.*", line)
+            match = re.fullmatch(
+                r"@@ -([0-9]+)(?:,([0-9]+))? \+([0-9]+)(?:,([0-9]+))? @@(?: .*)?", line)
             if not match:
                 return False
-            old_left, new_left = (int(n) if n is not None else 1 for n in match.groups())
+            try:
+                old_start, old_count, new_start, new_count = (
+                    int(n) if n is not None else 1 for n in match.groups())
+            except ValueError:
+                # Keep Python's integer conversion safety limit in force.
+                return False
+            if ((old_count and old_start == 0) or (new_count and new_start == 0)
+                    or old_count + new_count == 0):
+                return False
+            if file["status"] == "added" and (old_start != 0 or old_count != 0 or new_start != 1):
+                return False
+            if file["status"] == "removed" and (new_start != 0 or new_count != 0 or old_start != 1):
+                return False
+            # Empty ranges name an insertion boundary; nonempty ranges are
+            # 1-based. Gaps between hunks must describe the same unchanged text.
+            old_begin = old_start - bool(old_count)
+            new_begin = new_start - bool(new_count)
+            if (old_begin < old_end or new_begin < new_end
+                    or old_begin - old_end != new_begin - new_end):
+                return False
+            old_end, new_end = old_begin + old_count, new_begin + new_count
+            old_left, new_left = old_count, new_count
+            last_kind = None
         elif old_left is None:
             return False
         elif line == "\\ No newline at end of file":
+            # A marker belongs immediately after a body line and terminates
+            # that side of the file, not merely this hunk's context.
+            if last_kind not in (" ", "-", "+"):
+                return False
+            if last_kind in (" ", "-"):
+                if old_left != 0:
+                    return False
+                old_eof = True
+            if last_kind in (" ", "+"):
+                if new_left != 0:
+                    return False
+                new_eof = True
+            last_kind = None
             continue
         elif line.startswith(" "):
+            if old_eof or new_eof:
+                return False
             old_left -= 1
             new_left -= 1
+            last_kind = " "
         elif line.startswith("-"):
+            if old_eof:
+                return False
             old_left -= 1
             deletions += 1
+            last_kind = "-"
         elif line.startswith("+"):
+            if new_eof:
+                return False
             new_left -= 1
             additions += 1
+            last_kind = "+"
         else:
             return False
         if old_left < 0 or new_left < 0:
@@ -230,6 +281,8 @@ def duplicate_evidence(gh, pr, full, files, main_sha, comparison):
     is_sha = lambda value: isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value)
     if not is_sha(head) or not is_sha(base) or head != pr["head"]["sha"]:
         return unknown("missing or changed PR refs")
+    if any(type(n) is not int or n < 0 for n in (count, additions, deletions)):
+        return unknown("invalid PR file totals")
     paths = [f.get("filename") for f in files]
     if (not files or count != len(files)
             or not all(isinstance(p, str) and p for p in paths)
@@ -246,8 +299,10 @@ def duplicate_evidence(gh, pr, full, files, main_sha, comparison):
         merge_base = (comparison.get("merge_base_commit") or {}).get("sha")
         if not is_sha(merge_base) or (comparison.get("base_commit") or {}).get("sha") != base:
             return unknown("unverified merge base")
-        commit = gh.get("/repos/%s/git/commits/%s" % (gh.repo, head)) or {}
-        tree = (commit.get("tree") or {}).get("sha")
+        commit = gh.get("/repos/%s/git/commits/%s" % (gh.repo, head))
+        if not isinstance(commit, dict) or not isinstance(commit.get("tree"), dict):
+            return unknown("unavailable head tree")
+        tree = commit["tree"].get("sha")
         if commit.get("sha") != head or not is_sha(tree):
             return unknown("unavailable head tree")
         after = gh.get("/repos/%s/pulls/%d" % (gh.repo, pr["number"]))

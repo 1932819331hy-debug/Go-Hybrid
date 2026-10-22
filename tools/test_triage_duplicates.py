@@ -171,6 +171,80 @@ class DuplicatePipelineTests(unittest.TestCase):
                 self.assert_unproven(items, clusters)
                 self.assertTrue(all(i["duplicate_evidence"]["state"] == "unknown" for i in items))
 
+    def test_malformed_hunk_ranges_remain_unknown(self):
+        patches = [
+            ("@@ -0 +0 @@\n-old\n+new", 1),
+            ("@@ -1 +1 @@\n-old\n+new\n@@ -1 +1 @@\n-old\n+new", 2),
+            ("@@ -10 +10 @@\n-old\n+new\n@@ -1 +1 @@\n-old\n+new", 2),
+            ("@@ -1 +1 @@\n-old\n+new\n@@ -10 +11 @@\n-old\n+new", 2),
+            ("@@ -1 +1 @@junk\n-old\n+new", 1),
+        ]
+        for raw, count in patches:
+            with self.subTest(patch=raw):
+                file = dict(text_file(), patch=raw, additions=count, deletions=count, changes=count * 2)
+                self.assert_unproven(*self.scan([pull(1, [file]), pull(2, [file])]))
+
+    def test_misplaced_no_newline_markers_remain_unknown(self):
+        patches = [
+            "@@ -1 +1 @@\n\\ No newline at end of file\n-old\n+new",
+            "@@ -1 +1 @@\n-old\n+new\n\\ No newline at end of file\n\\ No newline at end of file",
+            "@@ -1,2 +1,2 @@\n-old\n\\ No newline at end of file\n+new\n context",
+            "@@ -1 +1 @@\n-old\n+new\n\\ No newline at end of file\n@@ -10 +10 @@\n-old\n+new",
+        ]
+        for raw in patches:
+            with self.subTest(patch=raw):
+                count = raw.count("-old")
+                file = dict(text_file(), patch=raw, additions=count, deletions=count, changes=count * 2)
+                self.assert_unproven(*self.scan([pull(1, [file]), pull(2, [file])]))
+
+    def test_file_status_must_agree_with_added_or_removed_content(self):
+        files = [dict(text_file(), status="added"), dict(text_file(), status="removed"),
+                 dict(text_file(), status="added", deletions=0, changes=1,
+                      patch="@@ -2,0 +3 @@\n+new"),
+                 dict(text_file(), status="removed", additions=0, changes=1,
+                      patch="@@ -3 +2,0 @@\n-old")]
+        for file in files:
+            with self.subTest(file=file):
+                self.assert_unproven(*self.scan([pull(1, [file]), pull(2, [file])]))
+
+    def test_non_integer_file_and_pr_totals_remain_unknown(self):
+        for value in [1.0, True]:
+            for field in ["additions", "deletions", "changes"]:
+                with self.subTest(value=value, field=field):
+                    file = dict(text_file(), **{field: value if field != "changes" else 2.0})
+                    self.assert_unproven(*self.scan([pull(1, [file]), pull(2, [file])]))
+            for field in ["changed_files", "additions", "deletions"]:
+                with self.subTest(value=value, field=field):
+                    self.assert_unproven(*self.scan([dict(pull(1), **{field: value}),
+                                                    dict(pull(2), **{field: value})]))
+
+    def test_oversized_hunk_numbers_are_unknown_without_disabling_int_limits(self):
+        for raw in ["@@ -1," + "9" * 5000 + " +1 @@\n-old\n+new",
+                    "@@ -" + "9" * 5000 + " +1 @@\n-old\n+new"]:
+            with self.subTest(length=len(raw)):
+                file = dict(text_file(), patch=raw)
+                self.assert_unproven(*self.scan([pull(1, [file]), pull(2, [file])]))
+
+    def test_malformed_commit_tree_objects_remain_unknown(self):
+        original = FakeGitHub.get
+        for tree in [["unexpected"], "unexpected", 1, {"sha": []}]:
+            def malformed_tree(gh, path):
+                value = original(gh, path)
+                if "/git/commits/" in path:
+                    value["tree"] = tree
+                return value
+            with self.subTest(tree=tree), patch.object(FakeGitHub, "get", malformed_tree):
+                self.assert_unproven(*self.scan([pull(1), pull(2)]))
+
+    def test_valid_ordered_hunks_and_zero_count_insertion_remain_duplicates(self):
+        for raw, adds, dels in [
+                ("@@ -1 +1 @@\n-old\n+new\n@@ -10 +10 @@\n-before\n+after", 2, 2),
+                ("@@ -0,0 +1 @@\n+new\n@@ -10 +11 @@\n-old\n+replacement", 2, 1),
+                ("@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file", 1, 1)]:
+            with self.subTest(patch=raw):
+                file = dict(text_file(), patch=raw, additions=adds, deletions=dels, changes=adds + dels)
+                self.assertEqual(self.scan([pull(1, [file]), pull(2, [file])])[1], [[1, 2]])
+
     def test_complete_hunk_but_missing_later_hunk_is_unknown(self):
         truncated = dict(text_file(), additions=2, deletions=2, changes=4)
         self.assert_unproven(*self.scan([pull(1, [truncated]), pull(2, [truncated])]))
