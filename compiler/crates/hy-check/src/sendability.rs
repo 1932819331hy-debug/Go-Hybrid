@@ -337,7 +337,8 @@ impl<'a> Checker<'a> {
         let mut results = self.call_result_tys(st, callee)?;
         // `?` consumes the trailing error, never another returned value.
         if is_try
-            && matches!(results.last(), Some(TypeExpr::Named { name, .. }) if name == "error")
+            && matches!(results.last(), Some(ty @ TypeExpr::Named { name, .. })
+                if name == "error" && !self.forwarded_type_is_generic(ty))
         {
             results.pop();
         }
@@ -345,7 +346,7 @@ impl<'a> Checker<'a> {
             return None; // Preserve the existing single-value classification.
         }
         for (index, ty) in results.iter().enumerate() {
-            let outcome = self.outcome_for_shape(&self.shape_of_type(ty), &expr.render());
+            let outcome = self.outcome_for_shape(&self.forwarded_result_shape(ty), &expr.render());
             match outcome {
                 Outcome::Ok => {}
                 Outcome::Rejected(mut info) => {
@@ -364,6 +365,48 @@ impl<'a> Checker<'a> {
             }
         }
         Some(Outcome::Ok)
+    }
+
+    fn forwarded_result_shape(&self, ty: &TypeExpr) -> TypeShape {
+        // Options inherit their payload's proof; pointers can inherit the
+        // scalar-atomic proof. Neither may resolve a generic binder as an
+        // unrelated package/predeclared type. There is no instantiation proof
+        // here, so fail closed rather than guessing the actual type argument.
+        let mut proof_ty = ty;
+        while let TypeExpr::Option { elem: inner, .. } | TypeExpr::Pointer { to: inner, .. } =
+            proof_ty
+        {
+            proof_ty = inner;
+        }
+        if self.forwarded_type_is_generic(proof_ty) {
+            return TypeShape::Unknown;
+        }
+        // Channels remain sendable regardless of their element type. Other
+        // containers/functions already fail the existing by-type proof.
+        self.shape_of_type(ty)
+    }
+
+    fn forwarded_type_is_generic(&self, ty: &TypeExpr) -> bool {
+        // Cloned result types retain their declaration spans, including in
+        // function-value bindings. Use that lexical scope, not the call site.
+        let TypeExpr::Named { name, span } = ty else {
+            return false;
+        };
+        self.file.fns().any(|f| {
+            let inside = (f.span.start.line, f.span.start.col) <= (span.start.line, span.start.col)
+                && (span.end.line, span.end.col) <= (f.span.end.line, f.span.end.col);
+            inside
+                && (f.type_params.iter().any(|p| p.name == *name)
+                    || f.receiver.as_ref().is_some_and(|r| {
+                        // A generic receiver declares its own type binders,
+                        // including when their names differ from the struct's.
+                        let receiver = r.ty.render();
+                        receiver
+                            .split_once('[')
+                            .and_then(|(_, rest)| rest.strip_suffix(']'))
+                            .is_some_and(|args| args.split(',').any(|p| p.trim() == name))
+                    }))
+        })
     }
 
     fn classify_ident(&self, st: &FnState, name: &str) -> Outcome {

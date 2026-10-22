@@ -164,3 +164,60 @@ fn managed_safe_results_do_not_add_a_bypass() {
     assert_eq!(r.managed.sites_via_managed, 0);
     assert!(!r.diagnostics.iter().any(|d| d.code == "HYB-E8001"));
 }
+
+#[test]
+fn generic_binders_cannot_borrow_sendability_from_primitive_or_package_names() {
+    for (prefix, binder) in [("", "int"), ("type t = int\n", "t")] {
+        for call in ["pair[[]int](v)", "(pair[[]int])(v)", "(pair[[]int](v))"] {
+            rejected(&format!("{prefix}fn pair[{binder} any](v {binder}) (bool, {binder}) {{ return true, v }}\nfn worker(b bool, v []int) {{ v[0] = 1 }}\nfn main() {{ v := []int{{0}}\ntask worker({call})\nv[0] = 2 }}\n"), "HYB-E3005");
+        }
+    }
+}
+
+#[test]
+fn generic_concrete_results_and_channel_results_stay_sendable() {
+    accepted("type t = int\nfn pair[t any](v t) (int, bool) { return 1, true }\nfn worker(n int, b bool) {}\nfn main() { task worker(pair[[]int]([]int{0})) }\n");
+    accepted("type t = int\nfn pair[t any](ch chan t) (bool, chan t) { return true, ch }\nfn worker(b bool, ch chan []int) {}\nfn launch(ch chan []int) { task worker(pair[[]int](ch)) }\n");
+    accepted("type count = int\nfn pair() (bool, count) { return true, 1 }\nfn worker(b bool, v count) {}\nfn main() { task worker(pair()) }\n");
+}
+
+#[test]
+fn generic_binder_unknown_remains_an_audited_managed_escape() {
+    let r = check("type t = int\nfn pair[t any](v t) (bool, t) { return true, v }\nfn worker(b bool, v []int) {}\nfn main() { v := []int{0}\nmanaged(\"external synchronization\", \"mutex\") { task worker(pair[[]int](v)) } }\n");
+    assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E8001"));
+    assert_eq!(r.managed.sites_via_managed, 1);
+}
+
+#[test]
+fn generic_context_survives_function_bindings_and_inline_result_types() {
+    rejected("fn pair[int any](v int) (bool, int) { return true, v }\nfn worker(b bool, v []int) {}\nfn main() { v := []int{0}\nf := pair[[]int]\ntask worker(f(v)) }\n", "HYB-E3005");
+    rejected("type t = int\nfn worker(b bool, v any) {}\nfn launch[t any](v t) { task worker((fn(v t) (bool, t) { return true, v })(v)) }\n", "HYB-E3005");
+    rejected("type t = int\nfn worker(b bool, v any) {}\nfn launch[t any](f fn(v t) bool t, v t) { task worker(f(v)) }\n", "HYB-E3005");
+}
+
+#[test]
+fn generic_receiver_binders_shadow_package_aliases() {
+    for recv in ["box[t]", "*box[t]"] {
+        rejected(&format!("type t = int\nstruct box[k any] {{ v k }}\nfn (b {recv}) pair() (bool, t) {{ return true, b.v }}\nfn worker(b bool, v []int) {{}}\nfn main() {{ b := box[[]int]{{v: []int{{0}}}}\ntask worker(b.pair()) }}\n"), "HYB-E3005");
+    }
+    accepted("type t = int\nstruct box[k any] { ch chan k }\nfn (b box[t]) pair() (bool, chan t) { return true, b.ch }\nfn worker(b bool, ch chan []int) {}\nfn launch(ch chan []int) { b := box[[]int]{ch: ch}\ntask worker(b.pair()) }\n");
+}
+
+#[test]
+fn generic_option_and_atomic_pointer_names_do_not_inherit_package_proofs() {
+    rejected("type t = int\nfn pair[t any](v option[t]) (bool, option[t]) { return true, v }\nfn worker(b bool, v option[[]int]) {}\nfn launch(v option[[]int]) { task worker(pair[[]int](v)) }\n", "HYB-E3005");
+    rejected("import \"sync/atomic\"\ntype t = atomic.int64\nfn pair[t any](v *t) (bool, *t) { return true, v }\nfn worker(b bool, v *int) {}\nfn launch(v *int) { task worker(pair[int](v)) }\n", "HYB-E3005");
+}
+
+#[test]
+fn generic_callers_do_not_change_package_declaration_context() {
+    accepted("type t = int\nfn pair() (bool, t) { return true, 1 }\nfn worker(b bool, v t) {}\nfn launch[t any]() { task worker(pair()) }\n");
+    accepted("type t = int\ntype callback = fn() bool t\nconst anchor = 0\nfn worker(b bool, v t) {}\nfn launch[t any](f callback) { task worker(f()) }\n");
+    accepted("type t = int\nfn pair[t any](ch chan t) (bool, option[chan t]) { return true, some(ch) }\nfn worker(b bool, ch option[chan []int]) {}\nfn launch(ch chan []int) { task worker(pair[[]int](ch)) }\n");
+}
+
+#[test]
+fn generic_error_binder_is_not_the_trailing_error_type() {
+    rejected("fn pair[error any](v error) (bool, error) { return true, v }\nfn worker(b bool, v []int) {}\nfn launch(v []int) { task worker(pair[[]int](v)?) }\n", "HYB-E3005");
+}
