@@ -183,6 +183,10 @@ impl Parser {
 
     fn err<T>(&mut self, msg: impl Into<String>) -> PResult<T> {
         let span = Span::point(self.toks[self.pos].span.start);
+        self.err_at(span, msg)
+    }
+
+    fn err_at<T>(&mut self, span: Span, msg: impl Into<String>) -> PResult<T> {
         self.diags.push(Diagnostic::error(
             PARSE_ERR_CODE,
             self.path.clone(),
@@ -1589,7 +1593,7 @@ impl Parser {
                     span,
                 })
             }
-            _ => self.err(format!("`{}` is not assignable", e.render())),
+            _ => self.err_at(span, format!("`{}` is not assignable", e.render())),
         }
     }
 
