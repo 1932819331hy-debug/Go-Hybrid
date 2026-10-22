@@ -39,6 +39,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_differential_loop.py -v
           python3 -m unittest discover -s tools -p test_differential_output.py -v
           python3 -m unittest discover -s tools -p test_run_examples.py -v
+          python3 -m unittest discover -s tools -p test_row13_ci.py -v
           python3 -m unittest discover -s tools -p test_workload_shape.py -v
           python3 -m unittest discover -s tools -p test_workload_run.py -v
           python3 -m unittest discover -s tools -p test_empty_corpus.py -v
@@ -164,7 +165,11 @@ jobs:
           HYB=../../compiler/target/release/hyb
           $HYB vendor-runtime .
           $HYB generate .
-          go build ./... && go vet ./... && go test ./... && go run .
+          # Keep checks separate: set -e ignores failures before the last &&.
+          go build ./...
+          go vet ./...
+          go test ./...
+          go run .
           $HYB generate --check .
           # semantic drift must FAIL the check (staleness = build failure)
           cp calc.hy /tmp/calc.bak
