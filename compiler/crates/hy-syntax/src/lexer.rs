@@ -512,6 +512,22 @@ impl<'a> Lexer<'a> {
                     ),
                 );
             }
+            // LX6 prefixed forms are integers only. An adjacent fractional
+            // dot must not become a second expression (or a field selector).
+            // Leave `..`, `..=`, and `...` to the punctuation scanner.
+            if self.at(0) == Some('.') && self.at(1) != Some('.') {
+                self.bump();
+                while self.at(0).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    self.bump();
+                }
+                // Recovery stops at operators: `0x1.8+0b1.0` contains two
+                // malformed literals, not one long fractional suffix.
+                self.escape_diag(
+                    start,
+                    false,
+                    "prefixed integer literals cannot have a fractional part",
+                );
+            }
             return self.tok(start, Tok::Int(s));
         }
 
