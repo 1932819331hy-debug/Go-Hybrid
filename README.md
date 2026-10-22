@@ -132,6 +132,10 @@ hyb build examples/01-hello/program.hy -o hello && ./hello
 hyb build --package mypkg --out-dir out --binding-prefix example.com/mypkg
 ```
 
+`hyb build` honors caller `GOFLAGS` for native Go builds. Its explicit
+`-p=2` resource cap takes precedence over any `-p` in `GOFLAGS`; invalid
+flags are reported by the Go toolchain.
+
 The ten examples are the acceptance suite: worker pools with backpressure,
 JSON transforms through serde_json, net/http servers, an LRU with generics,
 graph ownership moves, a Rust-crate digest service, and a Hybrid package

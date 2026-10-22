@@ -28,6 +28,14 @@ fn go_bin() -> &'static str {
     option_env!("HYB_GO_BIN").unwrap_or("go")
 }
 
+/// Keep the resource governor explicit so Go can still interpret caller
+/// GOFLAGS. Command-line flags take precedence over GOFLAGS (including -p).
+fn go_build_command(go_bin: &str) -> Command {
+    let mut command = Command::new(go_bin);
+    command.args(["build", "-p=2"]);
+    command
+}
+
 /// The cargo binary for the bridge's hyrt build: HYB_CARGO_BIN override,
 /// else PATH. (No absolute fallback: the rustless install contract — the
 /// release smoke strips cargo from PATH — would be silently defeated by a
@@ -878,9 +886,8 @@ fn cmd_build(args: &[String]) -> ExitCode {
     // the single-file build.
     let go_bin = go_bin();
     if bindings.is_empty() {
-        let build = Command::new(go_bin)
-            .args(["build", "-o", &out_path, &go_path])
-            .env("GOFLAGS", "-p=2")
+        let build = go_build_command(go_bin)
+            .args(["-o", &out_path, &go_path])
             .output();
         match build {
             Ok(out) if out.status.success() => {
@@ -1452,10 +1459,9 @@ fn build_with_bridge(
     }
 
     // 3. go build inside the module.
-    let mut gb = Command::new(go_bin);
-    gb.args(["build", "-o", &out_path, "."])
+    let mut gb = go_build_command(go_bin);
+    gb.args(["-o", &out_path, "."])
         .current_dir(&ws)
-        .env("GOFLAGS", "-p=2")
         .env("CGO_ENABLED", "1");
     let out = gb
         .output()
@@ -1929,6 +1935,14 @@ mod staticlib_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn go_build_keeps_resource_cap_without_replacing_environment() {
+        let command = go_build_command("go");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["build", "-p=2"]);
+        assert_eq!(command.get_envs().count(), 0);
+    }
 
     /// lib_arch_matches must accept a matching-arch ELF and reject a
     /// foreign-arch one, garbage, and short files (row 16: the bridge smoke
