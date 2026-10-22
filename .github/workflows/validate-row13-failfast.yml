@@ -1,24 +1,50 @@
+# Isolated harness only. Publish a tree containing the single validation workflow.
+# The checked-out candidate retains its unmodified .github/workflows/ci.yml.
+# Every original quick/compiler run step is copied verbatim below.
 # CI (quick, on push) — SPEC.md §2: small CI workflow on push.
 # Runs: tool syntax checks, runner self-test, job.json validity, doc sanity.
 # Deliberately tiny now; grows with the compiler (cargo check, unit tests, compile-fail suite).
-name: ci
+name: exact-candidate-row13-failfast
 
 on:
   push:
     branches:
-      - main
-  pull_request:
+      - ci/exact-row13-failfast-20261022
 
 permissions:
   contents: read
 
 jobs:
   quick:
+    if: github.repository == '1932819331hy-debug/Go-Hybrid' && github.repository_id == '1421338510' && github.repository_owner_id == '343001481'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout (pinned v4)
+      - name: Checkout exact row13-failfast candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: 1932819331hy-debug/Go-Hybrid
+          ref: 35c78a9f2a2443a574d62e71006de7c86a4cf58d
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify exact candidate and original CI identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_sha='35c78a9f2a2443a574d62e71006de7c86a4cf58d'
+          expected_tree='1152d61063b376356bdcec2c750b550d1224d450'
+          expected_ci_blob='01c9041375782b42afc9ad03777de3f0e943aae7'
+          expected_ci_sha256='84c2b54bd45318e69c7b2f7cd53ccba732f46d6fc1867e02ce614433c133a0a8'
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git rev-parse 'HEAD^{tree}')"
+          actual_ci_blob="$(git rev-parse 'HEAD:.github/workflows/ci.yml')"
+          printf 'Harness commit: %s\nCandidate commit: %s\nCandidate tree: %s\nCandidate ci.yml blob: %s\n' "$GITHUB_SHA" "$actual_sha" "$actual_tree" "$actual_ci_blob"
+          test "$actual_sha" = "$expected_sha"
+          test "$actual_tree" = "$expected_tree"
+          test "$actual_ci_blob" = "$expected_ci_blob"
+          printf '%s  .github/workflows/ci.yml\n' "$expected_ci_sha256" | sha256sum --check --strict
+          git diff --exit-code HEAD --
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Python syntax + self-tests
         run: |
           set -e
@@ -122,11 +148,38 @@ jobs:
   # The compiler (lands with MVP-0): pinned toolchains, full test suite,
   # corpus verdict agreement, and the walking-skeleton examples end-to-end.
   compiler:
+    if: github.repository == '1932819331hy-debug/Go-Hybrid' && github.repository_id == '1421338510' && github.repository_owner_id == '343001481'
+    concurrency:
+      group: exact-row13-failfast-compiler-20261022
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout (pinned v4)
+      - name: Checkout exact row13-failfast candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: 1932819331hy-debug/Go-Hybrid
+          ref: 35c78a9f2a2443a574d62e71006de7c86a4cf58d
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify exact candidate and original CI identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_sha='35c78a9f2a2443a574d62e71006de7c86a4cf58d'
+          expected_tree='1152d61063b376356bdcec2c750b550d1224d450'
+          expected_ci_blob='01c9041375782b42afc9ad03777de3f0e943aae7'
+          expected_ci_sha256='84c2b54bd45318e69c7b2f7cd53ccba732f46d6fc1867e02ce614433c133a0a8'
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git rev-parse 'HEAD^{tree}')"
+          actual_ci_blob="$(git rev-parse 'HEAD:.github/workflows/ci.yml')"
+          printf 'Harness commit: %s\nCandidate commit: %s\nCandidate tree: %s\nCandidate ci.yml blob: %s\n' "$GITHUB_SHA" "$actual_sha" "$actual_tree" "$actual_ci_blob"
+          test "$actual_sha" = "$expected_sha"
+          test "$actual_tree" = "$expected_tree"
+          test "$actual_ci_blob" = "$expected_ci_blob"
+          printf '%s  .github/workflows/ci.yml\n' "$expected_ci_sha256" | sha256sum --check --strict
+          git diff --exit-code HEAD --
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Install pinned toolchains (same URLs as tools/env.sh discipline)
         run: |
           set -e
