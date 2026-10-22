@@ -483,7 +483,9 @@ def cmd_approve(args):
             log("  DRY would approve: #%d %s (%d)" % (n, name, run_id))
             continue
         try:
-            gh.req("POST", "/repos/%s/actions/runs/%d/approve" % (gh.repo, run_id))
+            status, _ = gh.req("POST", "/repos/%s/actions/runs/%d/approve" % (gh.repo, run_id))
+            if not 200 <= status < 300:
+                raise RuntimeError("approval request returned HTTP %d" % status)
             ok += 1
             log("  approved: #%d %s" % (n, name))
         except (RuntimeError, RateGuard) as e:
