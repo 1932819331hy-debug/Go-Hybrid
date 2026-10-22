@@ -315,10 +315,55 @@ impl<'a> Checker<'a> {
             // everything else (calls, receives, arithmetic, try, paren):
             // classify the result shape
             _ => {
+                // A lone call can forward several arguments into a task.
+                // The ordinary expression shape describes only result 1.
+                if let Some(outcome) = self.classify_forwarded_results(st, expr) {
+                    return outcome;
+                }
                 let shape = self.shape_of_expr(st, expr);
                 self.outcome_for_shape(&shape, &expr.render())
             }
         }
+    }
+
+    fn classify_forwarded_results(&self, st: &FnState, expr: &Expr) -> Option<Outcome> {
+        let (call, is_try) = match unwrap_parens(expr) {
+            Expr::Try { operand, .. } => (unwrap_parens(operand), true),
+            other => (other, false),
+        };
+        let Expr::Call { callee, .. } = call else {
+            return None;
+        };
+        let mut results = self.call_result_tys(st, callee)?;
+        // `?` consumes the trailing error, never another returned value.
+        if is_try
+            && matches!(results.last(), Some(TypeExpr::Named { name, .. }) if name == "error")
+        {
+            results.pop();
+        }
+        if results.len() < 2 {
+            return None; // Preserve the existing single-value classification.
+        }
+        for (index, ty) in results.iter().enumerate() {
+            let outcome = self.outcome_for_shape(&self.shape_of_type(ty), &expr.render());
+            match outcome {
+                Outcome::Ok => {}
+                Outcome::Rejected(mut info) => {
+                    info.notes.push(format!(
+                        "forwarded result {} of {} must also be sendable",
+                        index + 1,
+                        results.len()
+                    ));
+                    return Some(Outcome::Rejected(info));
+                }
+                Outcome::Unproven(mut info) => {
+                    info.reason = format!("forwarded result {}: {}", index + 1, info.reason);
+                    return Some(Outcome::Unproven(info));
+                }
+                other => return Some(other),
+            }
+        }
+        Some(Outcome::Ok)
     }
 
     fn classify_ident(&self, st: &FnState, name: &str) -> Outcome {
