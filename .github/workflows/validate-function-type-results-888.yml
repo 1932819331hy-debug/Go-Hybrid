@@ -1,24 +1,48 @@
+# Workflow-only harness; tests check out the exact reviewed candidate.
 # CI (quick, on push) — SPEC.md §2: small CI workflow on push.
 # Runs: tool syntax checks, runner self-test, job.json validity, doc sanity.
 # Deliberately tiny now; grows with the compiler (cargo check, unit tests, compile-fail suite).
-name: ci
+name: exact-candidate-function-type-results-888
 
 on:
   push:
     branches:
-      - main
-  pull_request:
+      - ci/exact-function-type-results-888-20261022
 
 permissions:
   contents: read
 
 jobs:
   quick:
+    if: github.repository == '1932819331hy-debug/Go-Hybrid' && github.repository_id == '1421338510' && github.repository_owner_id == '343001481'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout (pinned v4)
+      - name: Checkout exact function-type candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: 1932819331hy-debug/Go-Hybrid
+          ref: d6eefb8502ac3d5c0b0be03f2db98b284c2594e6
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify exact candidate and original CI identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_sha='d6eefb8502ac3d5c0b0be03f2db98b284c2594e6'
+          expected_tree='61f6839a7cfa72c23f980564e325a15d0879f144'
+          expected_ci_blob='ce9df96250379993538c368c12bf18385a9b8f18'
+          expected_ci_sha256='077250e1996970999cf9c66f5656a8b1cbcc74c63f375f9c6704e53a2758d540'
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git rev-parse 'HEAD^{tree}')"
+          actual_ci_blob="$(git rev-parse 'HEAD:.github/workflows/ci.yml')"
+          printf 'Harness commit: %s\nCandidate commit: %s\nCandidate tree: %s\nCandidate ci.yml blob: %s\n' "$GITHUB_SHA" "$actual_sha" "$actual_tree" "$actual_ci_blob"
+          test "$actual_sha" = "$expected_sha"
+          test "$actual_tree" = "$expected_tree"
+          test "$actual_ci_blob" = "$expected_ci_blob"
+          printf '%s  .github/workflows/ci.yml\n' "$expected_ci_sha256" | sha256sum --check --strict
+          git diff --exit-code HEAD --
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Python syntax + self-tests
         run: |
           set -e
@@ -121,11 +145,38 @@ jobs:
   # The compiler (lands with MVP-0): pinned toolchains, full test suite,
   # corpus verdict agreement, and the walking-skeleton examples end-to-end.
   compiler:
+    if: github.repository == '1932819331hy-debug/Go-Hybrid' && github.repository_id == '1421338510' && github.repository_owner_id == '343001481'
+    concurrency:
+      group: exact-function-type-results-888-compiler-20261022
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout (pinned v4)
+      - name: Checkout exact function-type candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: 1932819331hy-debug/Go-Hybrid
+          ref: d6eefb8502ac3d5c0b0be03f2db98b284c2594e6
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify exact candidate and original CI identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_sha='d6eefb8502ac3d5c0b0be03f2db98b284c2594e6'
+          expected_tree='61f6839a7cfa72c23f980564e325a15d0879f144'
+          expected_ci_blob='ce9df96250379993538c368c12bf18385a9b8f18'
+          expected_ci_sha256='077250e1996970999cf9c66f5656a8b1cbcc74c63f375f9c6704e53a2758d540'
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git rev-parse 'HEAD^{tree}')"
+          actual_ci_blob="$(git rev-parse 'HEAD:.github/workflows/ci.yml')"
+          printf 'Harness commit: %s\nCandidate commit: %s\nCandidate tree: %s\nCandidate ci.yml blob: %s\n' "$GITHUB_SHA" "$actual_sha" "$actual_tree" "$actual_ci_blob"
+          test "$actual_sha" = "$expected_sha"
+          test "$actual_tree" = "$expected_tree"
+          test "$actual_ci_blob" = "$expected_ci_blob"
+          printf '%s  .github/workflows/ci.yml\n' "$expected_ci_sha256" | sha256sum --check --strict
+          git diff --exit-code HEAD --
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Install pinned toolchains (same URLs as tools/env.sh discipline)
         run: |
           set -e
@@ -230,3 +281,14 @@ jobs:
         run: |
           set -e
           CARGO_TARGET_DIR="$PWD/compiler/target" bash tools/run_examples.sh
+      - name: Function-type regression runtime (Go required; no skips)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(go env GOVERSION)" = 'go1.26.9'
+          cd compiler
+          cargo test -p hy-emit --test function_type_results -- --nocapture 2>&1 | tee "$RUNNER_TEMP/function-type-results.log"
+          if grep -F 'skipping Go compilation' "$RUNNER_TEMP/function-type-results.log"; then
+            echo 'Function-type regression skipped Go compilation' >&2
+            exit 1
+          fi
