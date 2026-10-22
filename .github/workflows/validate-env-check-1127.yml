@@ -1,24 +1,40 @@
 # CI (quick, on push) — SPEC.md §2: small CI workflow on push.
 # Runs: tool syntax checks, runner self-test, job.json validity, doc sanity.
 # Deliberately tiny now; grows with the compiler (cargo check, unit tests, compile-fail suite).
-name: ci
+name: exact-candidate-env-check-1127
 
 on:
   push:
     branches:
-      - main
-  pull_request:
+      - ci/exact-env-check-1127-20261022
 
 permissions:
   contents: read
 
 jobs:
   quick:
+    if: github.repository == '1932819331hy-debug/Go-Hybrid' && github.repository_id == '1421338510' && github.repository_owner_id == '343001481'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout (pinned v4)
+      - name: Checkout exact env-check-1127 candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: 1932819331hy-debug/Go-Hybrid
+          ref: d823f3381b7b529c914537a90cfc6bb88a106e72
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify exact candidate and original CI identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'Harness commit: %s\nCandidate commit: %s\nCandidate tree: %s\n' "$GITHUB_SHA" "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')"
+          test "$(git rev-parse HEAD)" = 'd823f3381b7b529c914537a90cfc6bb88a106e72'
+          test "$(git rev-parse 'HEAD^{tree}')" = '362d0a51a74f705381f40fba2bc98138a06b7206'
+          test "$(git rev-parse HEAD:.github/workflows/ci.yml)" = 'df25b712830aa30cdbeee40e868bae32fc1d951e'
+          printf '0af509444a6e49e5a008ffaf327da756a4e16834d85cc26a96f7373100a9ddd9  .github/workflows/ci.yml\n' | sha256sum --check --strict
+          git diff --exit-code HEAD --
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Python syntax + self-tests
         run: |
           set -e
@@ -122,11 +138,31 @@ jobs:
   # The compiler (lands with MVP-0): pinned toolchains, full test suite,
   # corpus verdict agreement, and the walking-skeleton examples end-to-end.
   compiler:
+    if: github.repository == '1932819331hy-debug/Go-Hybrid' && github.repository_id == '1421338510' && github.repository_owner_id == '343001481'
+    concurrency:
+      group: exact-env-check-1127-compiler-20261022
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout (pinned v4)
+      - name: Checkout exact env-check-1127 candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: 1932819331hy-debug/Go-Hybrid
+          ref: d823f3381b7b529c914537a90cfc6bb88a106e72
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify exact candidate and original CI identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'Harness commit: %s\nCandidate commit: %s\nCandidate tree: %s\n' "$GITHUB_SHA" "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')"
+          test "$(git rev-parse HEAD)" = 'd823f3381b7b529c914537a90cfc6bb88a106e72'
+          test "$(git rev-parse 'HEAD^{tree}')" = '362d0a51a74f705381f40fba2bc98138a06b7206'
+          test "$(git rev-parse HEAD:.github/workflows/ci.yml)" = 'df25b712830aa30cdbeee40e868bae32fc1d951e'
+          printf '0af509444a6e49e5a008ffaf327da756a4e16834d85cc26a96f7373100a9ddd9  .github/workflows/ci.yml\n' | sha256sum --check --strict
+          git diff --exit-code HEAD --
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Install pinned toolchains (same URLs as tools/env.sh discipline)
         run: |
           set -e
@@ -134,6 +170,16 @@ jobs:
           sudo tar -C /usr/local -xzf /tmp/go.tgz
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.0
           echo "/usr/local/go/bin:$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Genuine pinned env check
+        shell: bash
+        run: |
+          set -euo pipefail
+          source tools/env.sh
+          export CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" RUSTUP_TOOLCHAIN=1.99.0
+          export PATH="/usr/local/go/bin:$CARGO_HOME/bin:$PATH"
+          go version
+          rustc --version
+          check
       - name: Version pins agree (env.sh ↔ README ↔ hyb ↔ PLAN)
         run: |
           set -e
