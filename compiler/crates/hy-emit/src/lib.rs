@@ -1223,7 +1223,18 @@ impl Emitter {
         self.local_vars.clear();
         // A type parameter named `default` shadows the exported function
         // too: a call in its body may be a conversion, not `Default(...)`.
-        if f.type_params.iter().any(|p| p.name == "default") {
+        // Generic receivers declare their own parameters in the receiver
+        // type's argument list, independently of the struct's spellings.
+        let receiver_default = f
+            .receiver
+            .as_ref()
+            .and_then(|recv| base_ty_name(&recv.ty))
+            .is_some_and(|name| {
+                name.split_once('[')
+                    .and_then(|(_, args)| args.strip_suffix(']'))
+                    .is_some_and(|args| Self::split_top_level_type_args(args).contains(&"default"))
+            });
+        if f.type_params.iter().any(|p| p.name == "default") || receiver_default {
             self.local_vars.insert("default".to_string());
         }
         self.temp_n = 0;

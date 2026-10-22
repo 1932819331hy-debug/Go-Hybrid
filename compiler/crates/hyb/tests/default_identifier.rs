@@ -616,3 +616,180 @@ func TestAPI(t *testing.T) {
 "#,
     );
 }
+
+fn receiver_package(name: &str, receiver: &str, instantiate: &str) {
+    let source = format!(
+        "pub fn default(x int) int {{ return x + 10 }}\n{receiver}\n\
+         pub fn check() int {{ {instantiate}\nreturn b.read(3) }}\n\
+         pub fn ordinary(x int) int {{ return default(x) }}\n"
+    );
+    package(
+        name,
+        &source,
+        r#"package fixture
+import "testing"
+func TestReceiverScope(t *testing.T) {
+    if Check() != 3 || Default(3) != 13 || Ordinary(3) != 13 {
+        t.Fatal("receiver type parameter or file-scope function resolved incorrectly")
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn package_generic_receiver_value_shadows_default() {
+    receiver_package(
+        "receiver-value",
+        r#"
+struct box[default] { value default }
+fn (b box[default]) read(x default) default { return default(x) }
+"#,
+        "b := box[int]{value: 1}",
+    );
+}
+
+#[test]
+fn package_generic_receiver_pointer_shadows_default() {
+    receiver_package(
+        "receiver-pointer",
+        r#"
+struct box[default] { value default }
+fn (b *box[default]) read(x default) default { return default(x) }
+"#,
+        "b := box[int]{value: 1}",
+    );
+}
+
+#[test]
+fn package_generic_receiver_first_parameter_shadows_default() {
+    receiver_package(
+        "receiver-first",
+        r#"
+struct pair[default, item] { left default
+right item }
+fn (b pair[default, item]) read(x default) default { return default(x) }
+"#,
+        "b := pair[int, string]{left: 1, right: \"ok\"}",
+    );
+}
+
+#[test]
+fn package_generic_receiver_last_parameter_shadows_default() {
+    receiver_package(
+        "receiver-last",
+        r#"
+struct pair[item, default] { left item
+right default }
+fn (b *pair[item, default]) read(x default) default { return default(x) }
+"#,
+        "b := pair[string, int]{left: \"ok\", right: 1}",
+    );
+}
+
+#[test]
+fn package_generic_receiver_renamed_parameter_shadows_default() {
+    receiver_package(
+        "receiver-renamed",
+        r#"
+struct box[item] { value item }
+fn (b box[default]) read(x default) default { return default(x) }
+"#,
+        "b := box[int]{value: 1}",
+    );
+}
+
+#[test]
+fn package_generic_receiver_nonkeyword_control() {
+    package(
+        "receiver-nonkeyword",
+        r#"
+pub fn default(x int) int { return x + 10 }
+struct box[item] { value item }
+fn (b box[item]) read(x item) item { return item(x) }
+pub fn check() int { b := box[int]{value: 1}
+return b.read(3) }
+"#,
+        r#"package fixture
+import "testing"
+func TestNonkeyword(t *testing.T) {
+    if Check() != 3 || Default(3) != 13 { t.Fatal("non-keyword control changed") }
+}
+"#,
+    );
+}
+
+#[test]
+fn package_generic_receiver_unrelated_export_control() {
+    package(
+        "receiver-unrelated-export",
+        r#"
+pub fn other(x int) int { return x + 10 }
+struct box[default] { value default }
+fn (b box[default]) read(x default) default { return default(x) }
+pub fn check() int { b := box[int]{value: 1}
+return b.read(3) }
+"#,
+        r#"package fixture
+import "testing"
+func TestUnrelatedExport(t *testing.T) {
+    if Check() != 3 || Other(3) != 13 { t.Fatal("unrelated-export control changed") }
+}
+"#,
+    );
+}
+
+#[test]
+fn package_nongeneric_receiver_calls_exported_default() {
+    package(
+        "receiver-nongeneric",
+        r#"
+pub fn default(x int) int { return x + 10 }
+struct box { value int }
+fn (b box) read(x int) int { return default(x) }
+pub fn check() int { b := box{value: 1}
+return b.read(3) }
+"#,
+        r#"package fixture
+import "testing"
+func TestNongeneric(t *testing.T) {
+    if Check() != 13 { t.Fatal("non-generic receiver must call Default") }
+}
+"#,
+    );
+}
+
+#[test]
+fn package_generic_receiver_closure_keeps_type_parameter_scope() {
+    receiver_package(
+        "receiver-closure",
+        r#"
+struct box[default] { value default }
+fn (b box[default]) read(x default) default {
+    convert := fn(y default) default { return default(y) }
+    return convert(x)
+}
+"#,
+        "b := box[int]{value: 1}",
+    );
+}
+
+#[test]
+fn package_generic_receiver_uses_its_names_not_struct_names() {
+    package(
+        "receiver-own-names",
+        r#"
+pub fn default(x int) int { return x + 10 }
+struct box[default] { value default }
+fn (b box[item]) read(x int) int { return default(x) }
+pub fn check() int { b := box[int]{value: 1}
+return b.read(3) }
+"#,
+        r#"package fixture
+import "testing"
+func TestReceiverOwnNames(t *testing.T) {
+    if Check() != 13 { t.Fatal("struct declaration must not shadow the method body") }
+}
+"#,
+    );
+}
