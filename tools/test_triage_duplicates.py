@@ -236,6 +236,53 @@ class DuplicatePipelineTests(unittest.TestCase):
             with self.subTest(tree=tree), patch.object(FakeGitHub, "get", malformed_tree):
                 self.assert_unproven(*self.scan([pull(1), pull(2)]))
 
+    def test_malformed_final_snapshot_shapes_remain_unknown(self):
+        original = FakeGitHub.get
+        bad_values = [None, [], ["unexpected"], "unexpected", 1,
+                      {"head": ["unexpected"]}, {"base": ["unexpected"]},
+                      dict(pull(1), head={"sha": []}), dict(pull(1), base={"sha": []})]
+        for bad in bad_values:
+            def malformed_after(gh, path):
+                value = original(gh, path)
+                match = re.search(r"/pulls/(\d+)$", path)
+                return bad if match and gh.reads[int(match[1])] > 1 else value
+            with self.subTest(response=bad), patch.object(FakeGitHub, "get", malformed_after):
+                self.assert_unproven(*self.scan([pull(1), pull(2)]))
+
+    def test_non_main_comparison_response_shapes_remain_unknown(self):
+        original = FakeGitHub.get
+        bad_values = [None, [], ["unexpected"], "unexpected", 1,
+                      {"merge_base_commit": ["unexpected"]}, {"base_commit": ["unexpected"]},
+                      {"merge_base_commit": {"sha": []}}, {"base_commit": {"sha": []}}]
+        for bad in bad_values:
+            def malformed_comparison(gh, path):
+                value = original(gh, path)
+                return bad if "/compare/" + "e" * 40 + "..." in path else value
+            prs = [dict(pull(n), base={"sha": "e" * 40}) for n in (1, 2)]
+            with self.subTest(response=bad), patch.object(FakeGitHub, "get", malformed_comparison):
+                self.assert_unproven(*self.scan(prs))
+
+    def test_final_snapshot_totals_require_integers_before_equality(self):
+        for field in ("changed_files", "additions", "deletions"):
+            for value in (True, 1.0):
+                with self.subTest(field=field, value=value):
+                    self.assert_unproven(*self.scan([
+                        dict(pull(n), after={field: value}) for n in (1, 2)]))
+
+    def test_rate_guard_propagates_from_every_new_evidence_read(self):
+        original = FakeGitHub.get
+        for target in ("after", "compare", "tree"):
+            def rate_guard(gh, path):
+                if ((target == "after" and re.search(r"/pulls/\d+$", path)
+                     and gh.reads.get(int(path.rsplit("/", 1)[-1]), 0) > 0)
+                        or (target == "compare" and "/compare/" + "e" * 40 + "..." in path)
+                        or (target == "tree" and "/git/commits/" in path)):
+                    raise bot.RateGuard("quota")
+                return original(gh, path)
+            with self.subTest(target=target), patch.object(FakeGitHub, "get", rate_guard):
+                with self.assertRaises(bot.RateGuard):
+                    self.scan([dict(pull(1), base={"sha": "e" * 40})])
+
     def test_valid_ordered_hunks_and_zero_count_insertion_remain_duplicates(self):
         for raw, adds, dels in [
                 ("@@ -1 +1 @@\n-old\n+new\n@@ -10 +10 @@\n-before\n+after", 2, 2),

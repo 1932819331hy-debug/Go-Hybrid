@@ -272,17 +272,24 @@ def duplicate_evidence(gh, pr, full, files, main_sha, comparison):
     def unknown(reason):
         return {"state": "unknown", "reason": reason}
 
-    def snapshot(p):
-        p = p or {}
-        return ((p.get("head") or {}).get("sha"), (p.get("base") or {}).get("sha"),
-                p.get("changed_files"), p.get("additions"), p.get("deletions"))
+    def field(obj, key):
+        return obj.get(key) if isinstance(obj, dict) else None
 
-    head, base, count, additions, deletions = snapshot(full)
-    is_sha = lambda value: isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value)
-    if not is_sha(head) or not is_sha(base) or head != pr["head"]["sha"]:
-        return unknown("missing or changed PR refs")
-    if any(type(n) is not int or n < 0 for n in (count, additions, deletions)):
-        return unknown("invalid PR file totals")
+    def sha(obj):
+        value = field(obj, "sha")
+        return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) else None
+
+    def snapshot(p):
+        head, base = sha(field(p, "head")), sha(field(p, "base"))
+        totals = tuple(field(p, k) for k in ("changed_files", "additions", "deletions"))
+        if head is None or base is None or any(type(n) is not int or n < 0 for n in totals):
+            return None
+        return (head, base, *totals)
+
+    before = snapshot(full)
+    if before is None or before[0] != sha(field(pr, "head")):
+        return unknown("invalid or changed PR snapshot")
+    head, base, count, additions, deletions = before
     paths = [f.get("filename") for f in files]
     if (not files or count != len(files)
             or not all(isinstance(p, str) and p for p in paths)
@@ -295,18 +302,15 @@ def duplicate_evidence(gh, pr, full, files, main_sha, comparison):
     try:
         if base != main_sha:
             comparison = gh.get("/repos/%s/compare/%s...%s" % (gh.repo, base, head))
-        comparison = comparison or {}
-        merge_base = (comparison.get("merge_base_commit") or {}).get("sha")
-        if not is_sha(merge_base) or (comparison.get("base_commit") or {}).get("sha") != base:
+        merge_base = sha(field(comparison, "merge_base_commit"))
+        if merge_base is None or sha(field(comparison, "base_commit")) != base:
             return unknown("unverified merge base")
         commit = gh.get("/repos/%s/git/commits/%s" % (gh.repo, head))
-        if not isinstance(commit, dict) or not isinstance(commit.get("tree"), dict):
+        tree = sha(field(commit, "tree"))
+        if sha(commit) != head or tree is None:
             return unknown("unavailable head tree")
-        tree = commit["tree"].get("sha")
-        if commit.get("sha") != head or not is_sha(tree):
-            return unknown("unavailable head tree")
-        after = gh.get("/repos/%s/pulls/%d" % (gh.repo, pr["number"]))
-        if snapshot(after) != snapshot(full):
+        after = snapshot(gh.get("/repos/%s/pulls/%d" % (gh.repo, pr["number"])))
+        if after is None or after != before:
             return unknown("PR changed during collection")
     except (RuntimeError, OSError, ValueError):
         return unknown("duplicate evidence lookup failed")
