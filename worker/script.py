@@ -23,6 +23,12 @@ JOB_JSON = None  # INJECTED_BY_tools/job.py
 # ---------------------------------------------------------------------------------------
 
 WORK = "/kaggle/working" if os.path.isdir("/kaggle/working") else os.path.abspath("./work")
+UPSTREAM_REPOS = (
+    "https://github.com/limitlessprojects/Go-Hybrid.git",
+    "https://github.com/limitlessprojects/Go-Hybrid",
+    "git@github.com:limitlessprojects/Go-Hybrid.git",
+    "ssh://git@github.com/limitlessprojects/Go-Hybrid.git",
+)
 
 
 def sh(cmd, timeout=600, cwd=None):
@@ -64,12 +70,17 @@ def main():
         json.dump(job, f, indent=2)
 
     # 2. clone the public repo at the pinned SHA
-    repo = job.get("repo", "https://github.com/limitlessprojects/Go-Hybrid.git")
+    repo = job.get("repo", UPSTREAM_REPOS[0])
     sha = job.get("sha", "HEAD")
     rc, _ = sh("git clone --quiet -- {} repo".format(shlex.quote(repo)), 300)
     if rc == 0:
         rc, _ = sh("git checkout --quiet --detach --end-of-options {}".format(shlex.quote(sha)), 60, cwd="repo")
     if rc != 0:
+        # The fixed codeload URL is only a fallback for this same repository.
+        # Never replace a failed custom source with unrelated upstream code.
+        if repo not in UPSTREAM_REPOS:
+            print("FATAL: Git preparation failed (exit {}); no archive fallback for this repository".format(rc), flush=True)
+            sys.exit(rc)
         # fall back to codeload tarball (sometimes git is restricted but https works)
         print("Git preparation failed (exit {}); trying codeload archive".format(rc), flush=True)
         rc, _ = sh("rm -rf repo && mkdir repo", 30)

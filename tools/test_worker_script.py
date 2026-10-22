@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "worker" / "script.py"
 GIT = shutil.which("git")
 TAR = shutil.which("tar")
+UPSTREAM = "https://github.com/limitlessprojects/Go-Hybrid.git"
+OMIT = object()
 RUNNER = '''import argparse, json, os
 from pathlib import Path
 p = argparse.ArgumentParser()
@@ -107,9 +109,37 @@ raise SystemExit(int(os.environ.get("TAR_EXIT", str(rc))))
                               check=True, capture_output=True, text=True,
                               timeout=10).stdout
 
-    def run_worker(self, repo=None, sha=None, **env):
+    def canonical_repo(self, url=UPSTREAM, source=None):
+        # Redirect only the test's canonical Git URL to a real local repository
+        # (or missing path). Git still performs cloning/checking and returns its
+        # own status; GIT_ALLOW_PROTOCOL=file prevents any network access.
+        target = self.root / "missing" if source is None else source
+        self.env.update(GIT_CONFIG_COUNT="1",
+                        GIT_CONFIG_KEY_0="url.{}.insteadOf".format(target),
+                        GIT_CONFIG_VALUE_0=url)
+        return url
+
+    def actual_job(self):
+        payload = self.root / "archive-payload"
+        (payload / "tools" / "runner" / "runner.py").write_bytes(
+            (ROOT / "tools" / "runner" / "runner.py").read_bytes())
+        with tarfile.open(self.archive, "w:gz") as archive:
+            archive.add(payload, arcname="snapshot")
+        self.actual_marker = self.root / (self.work.name + "-actual-job.txt")
+        record_source = ("from pathlib import Path; Path({!r}).write_text("
+                         "Path('revision.txt').read_text())").format(str(self.actual_marker))
+        return {"env_report": False, "setup": [], "expected_results": [],
+                "commands": [{"name": "record-source", "cwd": "repo", "timeout": 5,
+                              "run": [sys.executable, "-c", record_source]}]}
+
+    def run_worker(self, repo=None, sha=None, job_fields=None, **env):
         job = {"repo": str(self.source) if repo is None else str(repo),
                "sha": self.sha if sha is None else sha, "job": "offline-preparation"}
+        if repo is OMIT:
+            job.pop("repo")
+        if sha is OMIT:
+            job.pop("sha")
+        job.update(job_fields or {})
         launch = '''import importlib.util, sys
 spec = importlib.util.spec_from_file_location("worker", sys.argv[1])
 worker = importlib.util.module_from_spec(spec)
@@ -147,55 +177,56 @@ worker.main()
         self.assertEqual(self.calls(), [])
 
     def test_clone_failure_uses_archive(self):
-        result = self.run_worker(repo=self.root / "missing")
+        result = self.run_worker(repo=self.canonical_repo())
         self.assert_runner(result, "archive")
         self.assertEqual([c["tool"] for c in self.calls()], ["curl", "tar"])
-        self.assertIn("does not exist", result.stdout)
+        self.assertIn("Git preparation failed (exit 128)", result.stdout)
 
     def test_checkout_failure_replaces_checkout_with_archive(self):
-        result = self.run_worker(sha="missing-ref")
+        result = self.run_worker(repo=self.canonical_repo(source=self.source), sha="missing-ref")
         self.assert_runner(result, "archive")
         self.assertFalse((self.work / "repo" / ".git").exists())
         self.assertIn("missing-ref", result.stdout)
         self.assertEqual([c["tool"] for c in self.calls()], ["curl", "tar"])
 
     def test_option_like_ref_cannot_skip_checkout(self):
-        result = self.run_worker(sha="--help")
+        result = self.run_worker(repo=self.canonical_repo(source=self.source), sha="--help")
         self.assert_runner(result, "archive")
         self.assertEqual([c["tool"] for c in self.calls()], ["curl", "tar"])
 
     def test_tracked_filename_is_not_a_successful_revision_checkout(self):
-        result = self.run_worker(sha="revision.txt")
+        result = self.run_worker(repo=self.canonical_repo(source=self.source), sha="revision.txt")
         self.assert_runner(result, "archive")
         self.assertEqual([c["tool"] for c in self.calls()], ["curl", "tar"])
 
     def test_failed_download_with_valid_archive_never_runs(self):
-        result = self.run_worker(repo=self.root / "missing", CURL_EXIT="22")
+        result = self.run_worker(repo=self.canonical_repo(), CURL_EXIT="22")
         self.assertEqual(result.returncode, 22, result.stdout + result.stderr)
         self.assertFalse(self.marker.exists())
         self.assertEqual([c["tool"] for c in self.calls()], ["curl"])
 
     def test_failed_checkout_then_download_cannot_run_stale_checkout(self):
-        result = self.run_worker(sha="missing-ref", CURL_EXIT="7")
+        result = self.run_worker(repo=self.canonical_repo(source=self.source),
+                                 sha="missing-ref", CURL_EXIT="7")
         self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
         self.assertFalse(self.marker.exists())
         self.assertEqual([c["tool"] for c in self.calls()], ["curl"])
 
     def test_http_error_is_a_failed_download(self):
-        result = self.run_worker(repo=self.root / "missing", HTTP_ERROR="1")
+        result = self.run_worker(repo=self.canonical_repo(), HTTP_ERROR="1")
         self.assertEqual(result.returncode, 22, result.stdout + result.stderr)
         self.assertFalse(self.marker.exists())
         self.assertEqual([c["tool"] for c in self.calls()], ["curl"])
 
     def test_failed_extraction_cannot_run_extracted_runner(self):
-        result = self.run_worker(repo=self.root / "missing", TAR_EXIT="9")
+        result = self.run_worker(repo=self.canonical_repo(), TAR_EXIT="9")
         self.assertEqual(result.returncode, 9, result.stdout + result.stderr)
         self.assertFalse(self.marker.exists())
         self.assertTrue((self.work / "repo" / "tools" / "runner" / "runner.py").exists())
         self.assertEqual([c["tool"] for c in self.calls()], ["curl", "tar"])
 
     def test_fallback_preserves_runner_exit(self):
-        result = self.run_worker(repo=self.root / "missing", RUNNER_EXIT="29")
+        result = self.run_worker(repo=self.canonical_repo(), RUNNER_EXIT="29")
         self.assert_runner(result, "archive", 29)
 
     def test_git_paths_and_ref_with_spaces_or_quotes_are_literal(self):
@@ -212,11 +243,88 @@ worker.main()
     def test_archive_url_and_runner_paths_are_quoted(self):
         self.work = self.root / "working owner's directory"
         ref = "release'candidate"
-        result = self.run_worker(repo=self.root / "missing", sha=ref)
+        result = self.run_worker(repo=self.canonical_repo(), sha=ref)
         self.assert_runner(result, "archive")
         curl = self.calls()[0]
         url = "https://codeload.github.com/limitlessprojects/Go-Hybrid/tar.gz/" + ref
         self.assertIn(url, curl["args"])
+
+
+    def test_failed_custom_clone_never_runs_unrelated_archive(self):
+        # The actual runner permits HEAD/omitted pins. It must not get an
+        # unrelated upstream archive when the requested repository fails.
+        for name, sha in (("head", "HEAD"), ("default", OMIT)):
+            with self.subTest(sha=name):
+                self.work = self.root / ("custom-" + name)
+                result = self.run_worker(repo=self.root / "missing-custom", sha=sha,
+                                         job_fields=self.actual_job())
+                self.assertEqual(result.returncode, 128, result.stdout + result.stderr)
+                self.assertFalse(self.actual_marker.exists())
+                self.assertFalse((self.work / "results" / "summary.json").exists())
+                self.assertEqual(self.calls(), [])
+
+    def test_failed_custom_checkout_never_runs_unrelated_archive(self):
+        # Cloning an empty repository succeeds, but checking out HEAD fails.
+        self.source = self.root / "empty-custom-repo"
+        self.source.mkdir()
+        self.git("init", "--quiet")
+        result = self.run_worker(sha="HEAD", job_fields=self.actual_job())
+        self.assertEqual(result.returncode, 128, result.stdout + result.stderr)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.actual_marker.exists())
+        self.assertEqual(self.calls(), [])
+
+    def test_canonical_url_spellings_keep_fallback(self):
+        urls = (UPSTREAM, "https://github.com/limitlessprojects/Go-Hybrid",
+                "git@github.com:limitlessprojects/Go-Hybrid.git",
+                "ssh://git@github.com/limitlessprojects/Go-Hybrid.git")
+        for index, url in enumerate(urls):
+            with self.subTest(repo=url):
+                self.work = self.root / ("canonical-" + str(index))
+                result = self.run_worker(repo=self.canonical_repo(url))
+                self.assert_runner(result, "archive")
+
+    def test_similar_but_noncanonical_urls_cannot_use_fallback(self):
+        urls = ("https://github.com/other/Go-Hybrid.git",
+                UPSTREAM + "/extra", UPSTREAM + "?ref=HEAD",
+                "https://github.com.example.invalid/limitlessprojects/Go-Hybrid.git")
+        for index, url in enumerate(urls):
+            with self.subTest(repo=url):
+                self.work = self.root / ("other-" + str(index))
+                result = self.run_worker(repo=url, sha="HEAD")
+                self.assertEqual(result.returncode, 128, result.stdout + result.stderr)
+                self.assertFalse(self.marker.exists())
+                self.assertEqual(self.calls(), [])
+
+    def test_default_repo_fallback_runs_actual_runner(self):
+        self.canonical_repo()
+        result = self.run_worker(repo=OMIT, sha=OMIT, job_fields=self.actual_job())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.actual_marker.read_text(), "archive")
+        summary = json.loads((self.work / "results" / "summary.json").read_text())
+        self.assertTrue(summary["ok"])
+
+    def test_successful_custom_clone_runs_actual_runner(self):
+        job = self.actual_job()
+        (self.source / "tools" / "runner" / "runner.py").write_bytes(
+            (ROOT / "tools" / "runner" / "runner.py").read_bytes())
+        self.git("-c", "user.name=Worker Test", "-c", "user.email=worker@example.invalid",
+                 "commit", "--quiet", "-am", "use actual runner")
+        self.sha = self.git("rev-parse", "HEAD").strip()
+        result = self.run_worker(job_fields=job)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.actual_marker.read_text(), "head")
+        self.assertEqual(self.calls(), [])
+        summary = json.loads((self.work / "results" / "summary.json").read_text())
+        self.assertTrue(summary["ok"])
+
+    def test_archive_does_not_bypass_actual_runner_sha_check(self):
+        result = self.run_worker(repo=self.canonical_repo(), job_fields=self.actual_job())
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertFalse(self.actual_marker.exists())
+        summary = json.loads((self.work / "results" / "summary.json").read_text())
+        self.assertFalse(summary["ok"])
+        self.assertEqual(summary["steps"][0]["name"], "sha-check")
 
 
 if __name__ == "__main__":
