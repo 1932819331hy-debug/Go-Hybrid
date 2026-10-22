@@ -323,6 +323,26 @@ pub(crate) fn to_go_name(name: &str) -> String {
         .collect()
 }
 
+/// The only Go keyword that LX14 also permits as a Hybrid identifier.
+/// LX2 rejects uppercase letters anywhere in source identifiers, so this
+/// private spelling cannot collide with a user name. It is also disjoint
+/// from the emitter's generated temp stems. Apply only at emission sites:
+/// symbol/shape/loan tables must retain the original Hybrid spelling.
+pub(crate) fn go_ident(name: &str) -> &str {
+    match name {
+        "default" => "hyKeywordDefault",
+        _ => name,
+    }
+}
+
+pub(crate) fn go_names(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|name| go_ident(name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The base NAMED type of a TypeExpr, if any (`*atomic.int64` →
 /// "atomic.int64", `env` → "env", `map[string]int` → None). Batch I's
 /// receiver tables key on this.
@@ -492,6 +512,9 @@ pub struct Emitter {
     package_name: String,
     binding_prefix: String,
     export_pub: bool,
+    /// A package-exported `pub fn default` keeps the external Go name
+    /// `Default`; local shadowing still uses the private keyword spelling.
+    exported_default: bool,
     /// The current (non-main) fn's per-result RETURN texts when its results
     /// end in `error` — E3 propagates via `return <zeros…, err>`.
     cur_fn_error_returns: Option<Vec<String>>,
@@ -558,6 +581,7 @@ impl Emitter {
             package_name: "main".to_string(),
             binding_prefix: "hybrid.program".to_string(),
             export_pub: false,
+            exported_default: false,
             cur_fn_error_returns: None,
             fn_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
@@ -569,6 +593,14 @@ impl Emitter {
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn value_ident<'a>(&self, name: &'a str) -> &'a str {
+        if name == "default" && self.exported_default && !self.local_vars.contains(name) {
+            "Default"
+        } else {
+            go_ident(name)
         }
     }
 
@@ -636,6 +668,10 @@ impl Emitter {
     // -----------------------------------------------------------------------
 
     fn emit_file(&mut self, file: &File) -> Result<String, EmitError> {
+        self.exported_default = self.export_pub
+            && file
+                .fns()
+                .any(|f| f.is_pub && f.receiver.is_none() && f.name == "default");
         // Associated-fn registry (call sites mangle `pkg.name[...]` to
         // `pkg_name[...]` — Go has no dotted identifiers).
         self.assoc_fns = file
@@ -723,6 +759,9 @@ impl Emitter {
         // (gofmt style) — cheap here, before the header is assembled.
         let mut first_decl = true;
         for decl in &file.decls {
+            // Function-local shadows must not affect subsequent file-scope
+            // references to an exported `default` function.
+            self.local_vars.remove("default");
             if first_decl {
                 first_decl = false;
             } else if !self.body.is_empty() && !self.body.ends_with("\n\n") {
@@ -773,7 +812,7 @@ impl Emitter {
                 }
                 Decl::TypeAlias(t) => {
                     let ty = self.type_text(&t.ty);
-                    self.push(&format!("type {} = {}", t.name, ty));
+                    self.push(&format!("type {} = {}", go_ident(&t.name), ty));
                 }
                 Decl::Fn(f) => self.emit_fn(f)?,
             }
@@ -859,9 +898,9 @@ impl Emitter {
         match &c.ty {
             Some(t) => {
                 let ty = self.type_text(t);
-                self.push(&format!("{} {} {} = {}", kw, c.name, ty, value));
+                self.push(&format!("{} {} {} = {}", kw, go_ident(&c.name), ty, value));
             }
-            None => self.push(&format!("{} {} = {}", kw, c.name, value)),
+            None => self.push(&format!("{} {} = {}", kw, go_ident(&c.name), value)),
         }
         Ok(())
     }
@@ -879,9 +918,9 @@ impl Emitter {
                 Self::collect_comparable_in_ty(&f.ty, &param_names, &mut comparable_params);
             }
             let params = self.format_type_params(&s.type_params, &comparable_params);
-            self.push(&format!("type {}[{}] struct {{", s.name, params));
+            self.push(&format!("type {}[{}] struct {{", go_ident(&s.name), params));
         } else {
-            self.push(&format!("type {} struct {{", s.name));
+            self.push(&format!("type {} struct {{", go_ident(&s.name)));
         }
         self.indent += 1;
         // gofmt aligns consecutive field declarations: names padded to the
@@ -889,10 +928,10 @@ impl Emitter {
         // gofmt-canonical without a post-pass.
         let width = s.fields.iter().map(|f| f.name.len()).max().unwrap_or(0);
         for f in &s.fields {
-            // Our own struct fields stay snake_case (M4 normalizes FOREIGN
-            // names, never ours).
+            // Our own fields only escape Go keywords; M4 export-name
+            // normalization applies to FOREIGN members, never ours.
             let ty = self.type_text(&f.ty);
-            self.push(&format!("{:<width$} {}", f.name, ty, width = width));
+            self.push(&format!("{:<width$} {}", go_ident(&f.name), ty, width = width));
         }
         self.indent -= 1;
         self.push("}");
@@ -901,7 +940,7 @@ impl Emitter {
 
     fn constraint_text(&self, c: &str) -> String {
         // `comparable` / `any` are Go's spellings already.
-        c.to_string()
+        go_ident(c).to_string()
     }
 
     /// Format a type parameter list for Go emission, supplying a constraint
@@ -932,7 +971,7 @@ impl Emitter {
                         }
                     }
                 };
-                format!("{} {}", p.name, constraint)
+                format!("{} {}", go_ident(&p.name), constraint)
             })
             .collect::<Vec<_>>()
             .join(", ")
@@ -1182,6 +1221,11 @@ impl Emitter {
         self.var_ty.clear();
         self.pointer_vars.clear();
         self.local_vars.clear();
+        // A type parameter named `default` shadows the exported function
+        // too: a call in its body may be a conversion, not `Default(...)`.
+        if f.type_params.iter().any(|p| p.name == "default") {
+            self.local_vars.insert("default".to_string());
+        }
         self.temp_n = 0;
         self.try_temps.clear();
         self.loop_labels.clear();
@@ -1196,7 +1240,7 @@ impl Emitter {
             if self.export_pub && f.is_pub && f.receiver.is_none() && !f.name.contains('.') {
                 to_go_name(&f.name)
             } else {
-                f.name.replace('.', "_")
+                go_ident(&f.name).replace('.', "_")
             };
         let is_main = f.name == "main" && f.receiver.is_none();
         // E4/E6: main's `?` sites trigger the exit contract. If main declares
@@ -1281,7 +1325,7 @@ impl Emitter {
             let star = if recv.is_pointer { "*" } else { "" };
             self.push_raw(&format!(
                 "func ({} {}{}) {}(",
-                recv.name, star, recv_ty, go_name
+                go_ident(&recv.name), star, recv_ty, go_name
             ));
         } else {
             // Generic fn: `func lru_cache_new[k comparable, v any](...)`.
@@ -1366,7 +1410,7 @@ impl Emitter {
                 let r = &f.results[0];
                 let ty = self.type_text(&r.ty);
                 match &r.name {
-                    Some(n) => self.push_raw(&format!(" ({} {}) {{\n", n, ty)),
+                    Some(n) => self.push_raw(&format!(" ({} {}) {{\n", go_ident(n), ty)),
                     None => self.push_raw(&format!(" {} {{\n", ty)),
                 }
             }
@@ -1375,7 +1419,7 @@ impl Emitter {
                 for r in &f.results {
                     let ty = self.type_text(&r.ty);
                     match &r.name {
-                        Some(n) => parts.push(format!("{} {}", n, ty)),
+                        Some(n) => parts.push(format!("{} {}", go_ident(n), ty)),
                         None => parts.push(ty),
                     }
                 }
@@ -1410,7 +1454,13 @@ impl Emitter {
                 .results
                 .iter()
                 .enumerate()
-                .map(|(i, r)| r.name.clone().unwrap_or_else(|| format!("hyR{}", i)))
+                .map(|(i, r)| {
+                    r.name
+                        .as_deref()
+                        .map(go_ident)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("hyR{}", i))
+                })
                 .collect();
             names.join(", ") + ", hyErr"
         }
@@ -1421,7 +1471,12 @@ impl Emitter {
     fn main_closure_sig(&mut self, f: &FnDecl) -> String {
         let mut parts: Vec<String> = Vec::new();
         for (i, r) in f.results.iter().enumerate() {
-            let n = r.name.clone().unwrap_or_else(|| format!("hyR{}", i));
+            let n = r
+                .name
+                .as_deref()
+                .map(go_ident)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("hyR{}", i));
             let ty = self.type_text(&r.ty);
             parts.push(format!("{} {}", n, ty));
         }
@@ -1436,7 +1491,7 @@ impl Emitter {
                 rendered.push_str(", ");
             }
             let ty = self.type_text(&p.ty);
-            rendered.push_str(&format!("{} {}", p.name, ty));
+            rendered.push_str(&format!("{} {}", go_ident(&p.name), ty));
         }
         self.push_raw(&rendered);
     }
@@ -1689,7 +1744,7 @@ impl Emitter {
             } => {
                 let ps = params
                     .iter()
-                    .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
+                    .map(|p| format!("{} {}", go_ident(&p.name), self.type_text(&p.ty)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let rs = results
@@ -1771,7 +1826,7 @@ impl Emitter {
             // (`u16` -> `uint16`); anything else stays verbatim. Issue #147.
             match shapes::go_primitive_name(name) {
                 Some(go) => go.to_string(),
-                None => name.to_string(),
+                None => go_ident(name).to_string(),
             }
         }
     }
@@ -1841,7 +1896,7 @@ impl Emitter {
         match t {
             TypeExpr::Named { name, .. } if !name.contains('.') && !name.contains('[') => {
                 if self.struct_fields.contains_key(name.as_str()) {
-                    return format!("*new({})", name);
+                    return format!("*new({})", go_ident(name));
                 }
                 match name.as_str() {
                     "bool" => "false".into(),
@@ -1854,7 +1909,7 @@ impl Emitter {
                     | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32"
                     | "float64" | "complex64" | "complex128" => "0".into(),
                     "error" | "any" => "nil".into(),
-                    _ => format!("*new({})", name),
+                    _ => format!("*new({})", go_ident(name)),
                 }
             }
             TypeExpr::Slice { .. }

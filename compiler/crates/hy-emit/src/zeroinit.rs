@@ -86,7 +86,7 @@ impl Emitter {
                 continue;
             }
             if let Some(init) = self.n5_zero_init_at(&f.ty, depth) {
-                out.push(format!("{}: {}", f.name, init));
+                out.push(format!("{}: {}", super::go_ident(&f.name), init));
             }
         }
         out
