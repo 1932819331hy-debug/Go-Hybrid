@@ -33,8 +33,19 @@ pre-classified so recon is only needed where the bot says `RECON`.
 
 ## Patches welcome, verdicts human
 
-The bot classifies with cheap signals (API mergeability, commit distance,
-file-set overlap). It cannot detect silent hunk deletion, semantic breakage
+The bot classifies with cheap signals (API mergeability and commit distance).
+`DUP` requires complete textual patches for every changed file, identical
+patches and result trees, and the same verified merge base. It is an exact
+net-change check, not semantic similarity detection. Missing/truncated/binary
+patches, unsupported changes, unstable PR snapshots, and different merge bases
+leave duplicate status **unproven** without a duplicate score penalty. A
+nonmatch does not establish novelty or disprove subsumption. The 12-path sample
+is display-only; all files participate in the evidence. Complete-patch PRs
+need at most two additional reads (head tree and final PR snapshot), plus a
+comparison for a non-main base; existing rate guards and page limits apply.
+Primary selection is unchanged and does not determine payout attribution.
+
+The bot cannot detect silent hunk deletion, semantic breakage
 after clean API merges, or subsumption — those stay on the verify protocol.
 Treat every bot verdict as a *prior*, not a decision.
 

@@ -22,8 +22,10 @@ Stdlib only. Token: --token-file, $GITHUB_TOKEN, or /home/z/my-project/.gh_token
 """
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -165,6 +167,101 @@ def age_days(iso, now):
     return round((now - datetime.fromisoformat(iso.replace("Z", "+00:00"))).total_seconds() / 86400, 1)
 
 
+def complete_patch(file):
+    """Require a complete nonempty text patch, including every hunk's context.
+
+    Context counts only toward validating hunk lengths, never as evidence of
+    changed-line overlap. API totals catch truncation at a hunk boundary too.
+    Binary, mode-only, rename and unsupported file changes remain unproven.
+    """
+    patch = file.get("patch")
+    if (file.get("status") not in {"added", "modified", "removed"}
+            or not isinstance(patch, str) or not patch):
+        return False
+    old_left = new_left = None
+    additions = deletions = 0
+    for line in patch.rstrip("\n").split("\n"):
+        if line.startswith("@@"):
+            if old_left not in (None, 0) or new_left not in (None, 0):
+                return False
+            match = re.fullmatch(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@.*", line)
+            if not match:
+                return False
+            old_left, new_left = (int(n) if n is not None else 1 for n in match.groups())
+        elif old_left is None:
+            return False
+        elif line == "\\ No newline at end of file":
+            continue
+        elif line.startswith(" "):
+            old_left -= 1
+            new_left -= 1
+        elif line.startswith("-"):
+            old_left -= 1
+            deletions += 1
+        elif line.startswith("+"):
+            new_left -= 1
+            additions += 1
+        else:
+            return False
+        if old_left < 0 or new_left < 0:
+            return False
+    return (old_left == new_left == 0 and additions + deletions > 0
+            and additions == file.get("additions") and deletions == file.get("deletions")
+            and additions + deletions == file.get("changes"))
+
+
+def duplicate_evidence(gh, pr, full, files, main_sha, comparison):
+    """Collect bounded exact-net-change evidence; never infer semantic novelty.
+
+    All file patches must be complete, and the effective merge base and final
+    repository tree must match. The tree guard covers changes absent from patch
+    text (e.g. executable modes). One immutable commit lookup and one final PR
+    snapshot are needed; a non-main base also needs its own comparison.
+    """
+    def unknown(reason):
+        return {"state": "unknown", "reason": reason}
+
+    def snapshot(p):
+        p = p or {}
+        return ((p.get("head") or {}).get("sha"), (p.get("base") or {}).get("sha"),
+                p.get("changed_files"), p.get("additions"), p.get("deletions"))
+
+    head, base, count, additions, deletions = snapshot(full)
+    is_sha = lambda value: isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value)
+    if not is_sha(head) or not is_sha(base) or head != pr["head"]["sha"]:
+        return unknown("missing or changed PR refs")
+    paths = [f.get("filename") for f in files]
+    if (not files or count != len(files)
+            or not all(isinstance(p, str) and p for p in paths)
+            or len(set(paths)) != len(files)
+            or additions != sum(f.get("additions", 0) or 0 for f in files)
+            or deletions != sum(f.get("deletions", 0) or 0 for f in files)):
+        return unknown("incomplete file list or totals")
+    if not all(complete_patch(f) for f in files):
+        return unknown("missing, incomplete or unsupported text patch")
+    try:
+        if base != main_sha:
+            comparison = gh.get("/repos/%s/compare/%s...%s" % (gh.repo, base, head))
+        comparison = comparison or {}
+        merge_base = (comparison.get("merge_base_commit") or {}).get("sha")
+        if not is_sha(merge_base) or (comparison.get("base_commit") or {}).get("sha") != base:
+            return unknown("unverified merge base")
+        commit = gh.get("/repos/%s/git/commits/%s" % (gh.repo, head)) or {}
+        tree = (commit.get("tree") or {}).get("sha")
+        if commit.get("sha") != head or not is_sha(tree):
+            return unknown("unavailable head tree")
+        after = gh.get("/repos/%s/pulls/%d" % (gh.repo, pr["number"]))
+        if snapshot(after) != snapshot(full):
+            return unknown("PR changed during collection")
+    except (RuntimeError, OSError, ValueError):
+        return unknown("duplicate evidence lookup failed")
+    # Keep the JSON snapshot compact. All paths participate, not paths_sample.
+    changes = [[f["filename"], f["status"], f["patch"]] for f in files]
+    digest = hashlib.sha256(json.dumps(sorted(changes), ensure_ascii=True).encode()).hexdigest()
+    return {"state": "complete", "merge_base": merge_base, "tree": tree,
+            "patch_sha256": digest}
+
+
 # ---------------------------------------------------------------- scan
 
 def collect(cfg, gh, args):
@@ -211,6 +308,7 @@ def collect(cfg, gh, args):
             "head_sha": pr["head"]["sha"][:12],
             "files": len(paths),
             "paths_sample": sorted(paths)[:12],
+            "duplicate_evidence": duplicate_evidence(gh, pr, full, files, main_sha, cmp1),
             "additions": adds,
             "deletions": dels,
             "behind_by": behind_by,
@@ -244,32 +342,26 @@ def classify(cfg, items):
     W = set(cfg["wildcard_holds"])
     D = set(cfg["drafts_parked"])
 
-    # duplicate clusters: union-find over file-set Jaccard
-    parent = list(range(len(items)))
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    sets = [set(i["paths_sample"]) for i in items]  # sample keeps it cheap; sample=12 paths
-    for a in range(len(items)):
-        for b in range(a + 1, len(items)):
-            if not sets[a] or not sets[b]:
-                continue
-            inter = len(sets[a] & sets[b])
-            union = len(sets[a] | sets[b])
-            if union and inter / union >= cfg["dup_jaccard"]:
-                parent[find(a)] = find(b)
+    # Exact equality is transitive; path/hunk similarity is not. DUP means the
+    # same complete textual change-set and result tree on the same merge base.
+    # Different bases, unavailable evidence and non-identical takes are unproven,
+    # not declarations of novelty. Primary selection remains a review preference.
     clusters = {}
-    for i, it in enumerate(items):
-        clusters.setdefault(find(i), []).append(it)
+    for it in items:
+        it.pop("dup_of", None)
+        it.pop("dup_members", None)
+        it["duplicate_status"] = "unproven"
+        evidence = it.get("duplicate_evidence") or {}
+        fields = [evidence.get(k) for k in ("merge_base", "tree", "patch_sha256")]
+        if evidence.get("state") == "complete" and all(fields):
+            clusters.setdefault(tuple(fields), []).append(it)
     for members in clusters.values():
         if len(members) < 2:
             continue
         members.sort(key=lambda x: (-x["additions"], x["number"]))
         primary = members[0]
+        for member in members:
+            member["duplicate_status"] = "exact-match"
         for m in members[1:]:
             m["dup_of"] = primary["number"]
             primary.setdefault("dup_members", []).append(m["number"])
@@ -341,6 +433,8 @@ def classify(cfg, items):
             it["action"] = "Verify (merge gate -> repro -> corpus -> differential) then land"
         else:
             it["action"] = "Recon: read diff, check for subsumption/real content"
+        if it["duplicate_status"] == "unproven":
+            it["action"] += "; duplicate status unproven (recon required)"
     return items, [sorted(m["number"] for m in v) for v in clusters.values() if len(v) > 1]
 
 

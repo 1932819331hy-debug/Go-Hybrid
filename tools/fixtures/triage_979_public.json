@@ -1,0 +1,106 @@
+{
+  "retrieved_at": "2026-10-22T03:24:50Z",
+  "repository": "limitlessprojects/Go-Hybrid",
+  "current_main": "9f61f54f196877189814e791ce4f5d5c8a8c1e81",
+  "scope": "Public PR metadata and complete files API payloads for the #979 false-duplicate regression.",
+  "sources": [
+    {
+      "number": 608,
+      "url": "https://github.com/limitlessprojects/Go-Hybrid/pull/608",
+      "id": 4907934606,
+      "title": "fix(hy-emit): register a struct binding's type through redundant parens (fixes #607)",
+      "created_at": "2026-10-18T09:24:09Z",
+      "updated_at": "2026-10-22T02:08:12Z",
+      "state": "open",
+      "merged": false,
+      "user": {
+        "login": "Leimiu-G",
+        "id": 334198511
+      },
+      "head": {
+        "sha": "e1ac6b1da28e4b89e4f62adec328fabe2dc4c6b2",
+        "ref": "fix/emit-binding-kind-parens"
+      },
+      "base": {
+        "sha": "1571342f007c38d1c6e0eb5b20480de2f3513a2a",
+        "ref": "main"
+      },
+      "files_url": "https://api.github.com/repos/limitlessprojects/Go-Hybrid/pulls/608/files?per_page=100",
+      "files": [
+        {
+          "sha": "0b908cc3c6f3618cfe8f1df5abf7e0865b2c0519",
+          "filename": "compiler/crates/hy-emit/src/stmt.rs",
+          "status": "modified",
+          "additions": 8,
+          "deletions": 1,
+          "changes": 9,
+          "blob_url": "https://github.com/limitlessprojects/Go-Hybrid/blob/e1ac6b1da28e4b89e4f62adec328fabe2dc4c6b2/compiler%2Fcrates%2Fhy-emit%2Fsrc%2Fstmt.rs",
+          "raw_url": "https://github.com/limitlessprojects/Go-Hybrid/raw/e1ac6b1da28e4b89e4f62adec328fabe2dc4c6b2/compiler%2Fcrates%2Fhy-emit%2Fsrc%2Fstmt.rs",
+          "contents_url": "https://api.github.com/repos/limitlessprojects/Go-Hybrid/contents/compiler%2Fcrates%2Fhy-emit%2Fsrc%2Fstmt.rs?ref=e1ac6b1da28e4b89e4f62adec328fabe2dc4c6b2",
+          "patch": "@@ -1034,7 +1034,14 @@ impl Emitter {\n             if kind != BindingKind::Plain {\n                 self.bindings.insert(names[0].clone(), kind);\n             }\n-            if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {\n+            // `Parenthesised` is semantically transparent, so `x := (T{…})`\n+            // registers exactly the type `x := T{…}` registers. Without the\n+            // peel the struct type never reaches `var_struct`, `stats.mu`\n+            // then has no shape, and the field call emits Go's lowercase\n+            // spelling (`stats.mu.lock()`) — accepted by `hyb check`, refused\n+            // by `go build` (rule BUILDABLE).\n+            if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first().map(Self::peel_parens)\n+            {\n                 self.register_var_ty(&names[0], t);\n             }\n         }"
+        },
+        {
+          "sha": "4de1dacfd3d6eded5803a1084aac1f434c7fc02c",
+          "filename": "compiler/crates/hy-emit/src/tests.rs",
+          "status": "modified",
+          "additions": 52,
+          "deletions": 0,
+          "changes": 52,
+          "blob_url": "https://github.com/limitlessprojects/Go-Hybrid/blob/e1ac6b1da28e4b89e4f62adec328fabe2dc4c6b2/compiler%2Fcrates%2Fhy-emit%2Fsrc%2Ftests.rs",
+          "raw_url": "https://github.com/limitlessprojects/Go-Hybrid/raw/e1ac6b1da28e4b89e4f62adec328fabe2dc4c6b2/compiler%2Fcrates%2Fhy-emit%2Fsrc%2Ftests.rs",
+          "contents_url": "https://api.github.com/repos/limitlessprojects/Go-Hybrid/contents/compiler%2Fcrates%2Fhy-emit%2Fsrc%2Ftests.rs?ref=e1ac6b1da28e4b89e4f62adec328fabe2dc4c6b2",
+          "patch": "@@ -1023,6 +1023,58 @@ fn assign_slot_loan_copies_and_stores_back() {\n     );\n }\n \n+#[test]\n+fn struct_binding_type_registers_through_redundant_parentheses() {\n+    // #607: `stats := (pool_stats{hits: 1})` is the same binding as\n+    // `stats := pool_stats{hits: 1}`. The struct type is what lets the shape\n+    // table resolve `stats.mu` to `sync.mutex` and emit `stats.mu.Lock()`;\n+    // when the parens stopped `register_var_ty`, `mu` had no shape and the\n+    // field call emitted Go's lowercase spelling (`stats.mu.lock()`) — an\n+    // accepted program that `go build` rejects (rule BUILDABLE).\n+    for init in [\"pool_stats{hits: 1}\", \"(pool_stats{hits: 1})\"] {\n+        let go = emit(&format!(\n+            \"import \\\"sync\\\"\\n\\nstruct pool_stats {{\\n    mu   sync.mutex\\n    hits int\\n}}\\n\\nfn main() {{\\n    stats := {}\\n    stats.mu.lock()\\n    stats.hits = 2\\n    stats.mu.unlock()\\n    fmt.println(\\\"hits: {{stats.hits}}\\\")\\n}}\\n\",\n+            init\n+        ));\n+        assert!(\n+            go.contains(\"stats.mu.Lock()\") && go.contains(\"stats.mu.Unlock()\"),\n+            \"`stats := {}` must still map the field call to Go's exported name:\\n{}\",\n+            init,\n+            go\n+        );\n+        assert!(\n+            !go.contains(\".lock()\") && !go.contains(\".unlock()\"),\n+            \"`stats := {}` must not emit an unexported Go method:\\n{}\",\n+            init,\n+            go\n+        );\n+    }\n+}\n+\n+#[test]\n+fn foreign_binding_kind_survives_redundant_parentheses() {\n+    // #607 reproducer 1 — already green on main once `binding_kind_of` peeled\n+    // at entry; pinned here so the two legs of the same rule stay covered.\n+    for init in [\"http.new_serve_mux()\", \"(http.new_serve_mux())\"] {\n+        let go = emit(&format!(\n+            \"import \\\"net/http\\\"\\n\\nfn main() {{\\n    mux := {}\\n    mux.handle(\\\"/ping\\\", http.handler(fn(w http.response_writer, r *http.request) {{\\n        fmt.fprintln(w, \\\"pong\\\")\\n    }}))\\n}}\\n\",\n+            init\n+        ));\n+        assert!(\n+            go.contains(\"mux.Handle(\"),\n+            \"`mux := {}` must still map `handle` -> `Handle`:\\n{}\",\n+            init,\n+            go\n+        );\n+        assert!(\n+            !go.contains(\".handle(\"),\n+            \"`mux := {}` must not emit an unexported Go method:\\n{}\",\n+            init,\n+            go\n+        );\n+    }\n+}\n+\n #[test]\n fn assign_slot_loan_into_pointer_var_points_at_copy() {\n     // A pointer-typed target cannot hold the copied element itself"
+        }
+      ]
+    },
+    {
+      "number": 786,
+      "url": "https://github.com/limitlessprojects/Go-Hybrid/pull/786",
+      "id": 4915859204,
+      "title": "fix(hy-emit): pre-evaluate shadowed and non-idempotent exclusive range upper bounds (fixes #730)",
+      "created_at": "2026-10-19T04:32:02Z",
+      "updated_at": "2026-10-21T22:15:52Z",
+      "state": "open",
+      "merged": false,
+      "user": {
+        "login": "ocakciomursel-pixel",
+        "id": 276599321
+      },
+      "head": {
+        "sha": "63a2e8e27d496ee6d1ec711290e01c7485434ccb",
+        "ref": "fix/range-bound-eval-once-730"
+      },
+      "base": {
+        "sha": "aa4a9d91b5edecd2bff37eba23fdd7befe60bd56",
+        "ref": "main"
+      },
+      "files_url": "https://api.github.com/repos/limitlessprojects/Go-Hybrid/pulls/786/files?per_page=100",
+      "files": [
+        {
+          "sha": "deef7eef711aa4bdfb6009940dc5a3d56a89cc86",
+          "filename": "compiler/crates/hy-emit/src/stmt.rs",
+          "status": "modified",
+          "additions": 5,
+          "deletions": 1,
+          "changes": 6,
+          "blob_url": "https://github.com/limitlessprojects/Go-Hybrid/blob/63a2e8e27d496ee6d1ec711290e01c7485434ccb/compiler%2Fcrates%2Fhy-emit%2Fsrc%2Fstmt.rs",
+          "raw_url": "https://github.com/limitlessprojects/Go-Hybrid/raw/63a2e8e27d496ee6d1ec711290e01c7485434ccb/compiler%2Fcrates%2Fhy-emit%2Fsrc%2Fstmt.rs",
+          "contents_url": "https://api.github.com/repos/limitlessprojects/Go-Hybrid/contents/compiler%2Fcrates%2Fhy-emit%2Fsrc%2Fstmt.rs?ref=63a2e8e27d496ee6d1ec711290e01c7485434ccb",
+          "patch": "@@ -1773,8 +1773,12 @@ impl Emitter {\n                         \"for {}, {} := {}, {} <= {}; {}; {}++ {{\",\n                         v, cont, lo_once, lo_once, hi_once, cont, v\n                     )\n-                } else {\n+                } else if !Self::expr_mentions_ident(hi, &v) && !Self::expr_has_call_or_recv(hi) {\n                     format!(\"for {} := {}; {} < {}; {}++ {{\", v, lo_t, v, hi_t, v)\n+                } else {\n+                    let hi_once = self.next_temp(\"hyHi\");\n+                    self.push(&format!(\"{} := {}\", hi_once, hi_t));\n+                    format!(\"for {} := {}; {} < {}; {}++ {{\", v, lo_t, v, hi_once, v)\n                 }\n             }\n             ForKind::Iterate { vars, expr } => {"
+        },
+        {
+          "sha": "ca90a218e2cced996fb0d671c80eb996f27065ff",
+          "filename": "compiler/crates/hy-emit/src/tests.rs",
+          "status": "modified",
+          "additions": 42,
+          "deletions": 0,
+          "changes": 42,
+          "blob_url": "https://github.com/limitlessprojects/Go-Hybrid/blob/63a2e8e27d496ee6d1ec711290e01c7485434ccb/compiler%2Fcrates%2Fhy-emit%2Fsrc%2Ftests.rs",
+          "raw_url": "https://github.com/limitlessprojects/Go-Hybrid/raw/63a2e8e27d496ee6d1ec711290e01c7485434ccb/compiler%2Fcrates%2Fhy-emit%2Fsrc%2Ftests.rs",
+          "contents_url": "https://api.github.com/repos/limitlessprojects/Go-Hybrid/contents/compiler%2Fcrates%2Fhy-emit%2Fsrc%2Ftests.rs?ref=63a2e8e27d496ee6d1ec711290e01c7485434ccb",
+          "patch": "@@ -2908,3 +2908,45 @@ fn m4_initialism_mapping_for_foreign_go_names_issue_658() {\n     assert!(go.contains(\"strings.ToValidUTF8(\\\"a\\\", \\\"b\\\")\"), \"expected strings.ToValidUTF8, got:\\n{}\", go);\n }\n \n+#[test]\n+fn range_bound_eval_once_issue_730() {\n+    let go = emit(\n+        r#\"package main\n+\n+fn bound() int {\n+    return 2\n+}\n+\n+fn main() {\n+    n := 3\n+    for i in 0..n {\n+        fmt.println(\"exclusive {i}\")\n+    }\n+    for n in 0..n {\n+        fmt.println(\"grow {n}\")\n+    }\n+    for i in 0..bound() {\n+        fmt.println(\"call {i}\")\n+    }\n+}\n+\"#,\n+    );\n+    assert!(\n+        go.contains(\"for i := 0; i < n; i++\"),\n+        \"unshadowed ident upper bound stays direct:\\n{}\",\n+        go\n+    );\n+    assert!(\n+        go.contains(\"hyHi0 := n\") && go.contains(\"for n := 0; n < hyHi0; n++\"),\n+        \"shadowed loop var must compare against pre-evaluated bound:\\n{}\",\n+        go\n+    );\n+    assert!(\n+        go.contains(\"hyHi1 := bound()\") && go.contains(\"for i := 0; i < hyHi1; i++\"),\n+        \"call bound must evaluate once before loop:\\n{}\",\n+        go\n+    );\n+}\n+\n+\n+"
+        }
+      ]
+    }
+  ]
+}
