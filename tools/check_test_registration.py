@@ -128,9 +128,10 @@ def is_registered_discover(name, patterns):
 
 def is_reached_discover(root, relpath, start, pattern):
     """Mirror discovery's directory boundary without importing test code."""
-    target = (Path(root) / relpath).resolve()
-    start_dir = (Path(root) / start).resolve()
-    if not start_dir.is_dir() or not target.is_relative_to(start_dir):
+    root_dir = Path(root).resolve()
+    target = (root_dir / relpath).resolve()
+    start_dir = (root_dir / start).resolve()
+    if not start_dir.is_dir() or not start_dir.is_relative_to(root_dir) or not target.is_relative_to(start_dir):
         return False
     if not is_registered_discover(target.name, [pattern]):
         return False
@@ -161,16 +162,20 @@ def find_test_files(root, directory):
         os.lstat(base_dir)
     except FileNotFoundError:
         return []
-    # Without onerror, os.walk silently skips unreadable subdirectories.
-    # That turns an incomplete suite inventory into a false green CI gate.
-    def fail_on_walk_error(error):
-        raise error
-
-    for base, _dirs, files in os.walk(base_dir, onerror=fail_on_walk_error):
-        for filename in files:
-            if filename.startswith("test_") and filename.endswith(".py"):
-                rel = os.path.relpath(os.path.join(base, filename), root)
-                found.append(rel.replace(os.sep, "/"))
+    # os.walk suppresses entry-classification errors even with onerror.
+    # Scan explicitly so an unreadable subtree cannot produce a false green.
+    pending = [base_dir]
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    # Match os.walk's default: scan a symlinked root, but do
+                    # not follow nested directory symlinks (including cycles).
+                    if not entry.is_symlink():
+                        pending.append(entry.path)
+                elif entry.name.startswith("test_") and entry.name.endswith(".py"):
+                    rel = os.path.relpath(entry.path, root)
+                    found.append(rel.replace(os.sep, "/"))
     return sorted(found)
 
 
