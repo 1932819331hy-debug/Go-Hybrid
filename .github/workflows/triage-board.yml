@@ -21,17 +21,19 @@ jobs:
     steps:
       - name: Checkout (pinned v4)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: Approve pending first-time-contributor CI runs (daily quota)
-        # Unblocks the per-PR workflows (ci / shepherd-board / shepherd-preflight)
-        # that GitHub holds in action_required for new contributors. Quota-guarded
-        # by --max; best-effort so the board below always posts.
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python3 tools/triage_bot.py --token-env GITHUB_TOKEN approve --max 60
       - name: Refresh triage board issue
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 tools/triage_bot.py --token-env GITHUB_TOKEN board --post
+      - name: Approve pending first-time-contributor CI runs (daily quota)
+        # Unblocks the per-PR workflows (ci / shepherd-board / shepherd-preflight)
+        # that GitHub holds in action_required for new contributors. Runs AFTER the
+        # board so the scan gets the fresh per-hour GITHUB_TOKEN budget (the
+        # approve POSTs drain the shared per-repo pool; RateGuard aborts the scan
+        # otherwise — seen in run 39896821866). Quota-guarded; best-effort.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 tools/triage_bot.py --token-env GITHUB_TOKEN approve --max 60
