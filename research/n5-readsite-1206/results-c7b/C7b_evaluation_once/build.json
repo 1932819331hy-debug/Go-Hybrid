@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "/workspace/gh-pr-worktrees/n5-readsite-1206/compiler/target/debug/hyb",
+    "build",
+    "/tmp/n5-readsite-qu4hta6i/C7b_evaluation_once/main.hy",
+    "-o",
+    "/tmp/n5-readsite-qu4hta6i/C7b_evaluation_once/prog"
+  ],
+  "rc": 1,
+  "stdout": "{\n  \"diagnostics\": [\n    {\n      \"code\": \"HYB-E0002\",\n      \"name\": \"parse-error\",\n      \"severity\": \"error\",\n      \"file\": \"/tmp/n5-readsite-qu4hta6i/C7b_evaluation_once/main.hy\",\n      \"span\": {\n        \"start\": {\n          \"line\": 3,\n          \"col\": 50\n        },\n        \"end\": {\n          \"line\": 3,\n          \"col\": 50\n        }\n      },\n      \"message\": \"parse error: expected expression, found `;` (at 3:50)\",\n      \"fixits\": [\n        {\n          \"description\": \"read the pointed-to site \u2014 the unexpected token is named in the message\"\n        },\n        {\n          \"description\": \"check the line above: unterminated braces, strings, or missing separators surface on the following line\"\n        }\n      ]\n    },\n    {\n      \"code\": \"HYB-E0002\",\n      \"name\": \"parse-error\",\n      \"severity\": \"error\",\n      \"file\": \"/tmp/n5-readsite-qu4hta6i/C7b_evaluation_once/main.hy\",\n      \"span\": {\n        \"start\": {\n          \"line\": 4,\n          \"col\": 55\n        },\n        \"end\": {\n          \"line\": 4,\n          \"col\": 55\n        }\n      },\n      \"message\": \"parse error: expected expression, found `;` (at 4:55)\",\n      \"fixits\": [\n        {\n          \"description\": \"read the pointed-to site \u2014 the unexpected token is named in the message\"\n        },\n        {\n          \"description\": \"check the line above: unterminated braces, strings, or missing separators surface on the following line\"\n        }\n      ]\n    }\n  ],\n  \"summary\": {\n    \"file\": \"/tmp/n5-readsite-qu4hta6i/C7b_evaluation_once/main.hy\",\n    \"verdict\": \"reject\",\n    \"errors\": 2,\n    \"warnings\": 0\n  },\n  \"version\": 1\n}\nerror[HYB-E0002]: parse error: expected expression, found `;` (at 3:50)\n  --> /tmp/n5-readsite-qu4hta6i/C7b_evaluation_once/main.hy:3:50\nerror[HYB-E0002]: parse error: expected expression, found `;` (at 4:55)\n  --> /tmp/n5-readsite-qu4hta6i/C7b_evaluation_once/main.hy:4:55\n",
+  "stderr": "",
+  "seconds": 0.015
+}

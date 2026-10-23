@@ -67,3 +67,10 @@ its original predicted output `1 1 5` is unchanged. The harness now accepts
 `--case` and a separate `--output` directory to preserve initial evidence.
 Publish this amendment before the one-case C7b build/run; no compiler rebuild
 is necessary because compiler source and the binary are unchanged.
+
+C7b also failed parsing: explicit semicolons inside its helper functions are
+not accepted by this parser. That raw run remains in `results-c7b/`. C7c uses
+ordinary multiline function bodies, retaining the same operations and expected
+`1 1 5` output. A lightweight `hyb check` accepted C7c with zero diagnostics
+before committing it; publish before its focused build/run. No compiler change
+or relaxed result expectation is involved.
