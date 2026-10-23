@@ -12,6 +12,7 @@ import threading
 import unittest
 from unittest import mock
 import urllib.response
+import zipfile
 
 
 spec = importlib.util.spec_from_file_location("download_job", Path(__file__).with_name("job.py"))
@@ -293,6 +294,108 @@ class DownloadIntegrityTests(unittest.TestCase):
                 self.assertEqual(job.actions_fetch(123, tmp), 0)
             self.assertEqual((Path(tmp) / "result/first.zip").read_bytes(), b"A")
             self.assertEqual((Path(tmp) / "result/second.zip").read_bytes(), b"B")
+
+    def test_later_staging_write_failure_preserves_all_archives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = root / "result"
+            result.mkdir()
+            for name in ("first", "second"):
+                (result / (name + ".zip")).write_bytes(b"reviewed " + name.encode())
+            artifacts = [
+                {"name": name, "archive_download_url": "https://example.invalid/" + name,
+                 "size_in_bytes": 1}
+                for name in ("first", "second")
+            ]
+            real_open = open
+
+            def fail_second_staged_write(path, *args, **kwargs):
+                if Path(path).name == "1.zip":
+                    raise OSError("fixture staging disk full")
+                return real_open(path, *args, **kwargs)
+
+            with mock.patch.object(job, "gh_api", return_value={"artifacts": artifacts}), \
+                 mock.patch.object(job, "gh_token", return_value="fixture"), \
+                 mock.patch.object(job.urllib.request, "urlopen",
+                                   side_effect=[io.BytesIO(b"A"), io.BytesIO(b"B")]), \
+                 mock.patch("builtins.open", side_effect=fail_second_staged_write), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(OSError, "staging disk full"):
+                    job.actions_fetch(123, tmp)
+            for name in ("first", "second"):
+                self.assertEqual((result / (name + ".zip")).read_bytes(),
+                                 b"reviewed " + name.encode())
+            self.assertEqual(sorted(p.name for p in result.iterdir()),
+                             ["first.zip", "second.zip"])
+
+    def test_interrupt_cleans_staging_and_preserves_reviewed_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = Path(tmp) / "result"
+            result.mkdir()
+            dest = result / "results.zip"
+            dest.write_bytes(b"reviewed")
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.read.side_effect = KeyboardInterrupt
+            with self.assertRaises(KeyboardInterrupt):
+                self.fetch(Path(tmp), response)
+            self.assertEqual(dest.read_bytes(), b"reviewed")
+            self.assertEqual([p.name for p in result.iterdir()], ["results.zip"])
+
+    def test_later_publication_failure_is_not_a_batch_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = Path(tmp) / "result"
+            result.mkdir()
+            artifacts = [
+                {"name": name, "archive_download_url": "https://example.invalid/" + name,
+                 "size_in_bytes": 1}
+                for name in ("first", "second")
+            ]
+            for name in ("first", "second"):
+                (result / (name + ".zip")).write_bytes(b"reviewed")
+            real_replace = job.os.replace
+
+            def fail_second_publication(source, dest):
+                if Path(dest).name == "second.zip":
+                    raise OSError("fixture publish failure")
+                return real_replace(source, dest)
+
+            with mock.patch.object(job, "gh_api", return_value={"artifacts": artifacts}), \
+                 mock.patch.object(job, "gh_token", return_value="fixture"), \
+                 mock.patch.object(job.urllib.request, "urlopen",
+                                   side_effect=[io.BytesIO(b"A"), io.BytesIO(b"B")]), \
+                 mock.patch.object(job.os, "replace", side_effect=fail_second_publication), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(OSError, "fixture publish failure"):
+                    job.actions_fetch(123, tmp)
+            self.assertEqual((result / "first.zip").read_bytes(), b"A")
+            self.assertEqual((result / "second.zip").read_bytes(), b"reviewed")
+            self.assertEqual(sorted(p.name for p in result.iterdir()),
+                             ["first.zip", "second.zip"])
+
+    def test_zip_members_are_stored_without_extraction(self):
+        body = io.BytesIO()
+        with zipfile.ZipFile(body, "w") as archive:
+            archive.writestr("../outside.txt", "dummy archive member")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.fetch(Path(tmp), io.BytesIO(body.getvalue()))
+            self.assertEqual((Path(tmp) / "result/results.zip").read_bytes(), body.getvalue())
+            self.assertFalse((Path(tmp) / "outside.txt").exists())
+            self.assertEqual([p.name for p in (Path(tmp) / "result").iterdir()], ["results.zip"])
+
+    def test_publication_replaces_leaf_symlink_without_following_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = root / "result"
+            result.mkdir()
+            reviewed = root / "reviewed.zip"
+            reviewed.write_bytes(b"reviewed dummy")
+            dest = result / "results.zip"
+            dest.symlink_to(reviewed)
+            self.fetch(root, io.BytesIO(b"new archive"))
+            self.assertEqual(reviewed.read_bytes(), b"reviewed dummy")
+            self.assertFalse(dest.is_symlink())
+            self.assertEqual(dest.read_bytes(), b"new archive")
 
     def test_success_creates_new_archive(self):
         with tempfile.TemporaryDirectory() as tmp:
