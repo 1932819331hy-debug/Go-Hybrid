@@ -11,7 +11,7 @@
 use hy_syntax::*;
 
 use super::{
-    go_quote, special_member, to_go_name, BindingKind, EmitError, Emitter, MemberSpecial,
+    go_ident, go_quote, special_member, to_go_name, BindingKind, EmitError, Emitter, MemberSpecial,
 };
 
 use super::shapes::{
@@ -129,9 +129,9 @@ impl Emitter {
                 let (head, type_args) = split_type_args(name);
                 if let Some(ta) = type_args {
                     let translated = self.translate_type_args_suffix(ta);
-                    return Ok(format!("{}{}", head, translated));
+                    return Ok(format!("{}{}", self.value_ident(head), translated));
                 }
-                Ok(name.clone())
+                Ok(self.value_ident(name).to_string())
             }
 
             Expr::Lit { kind, .. } => Ok(self.lit_text(kind)),
@@ -329,7 +329,7 @@ impl Emitter {
                     };
                 let rendered_params = params
                     .iter()
-                    .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
+                    .map(|p| format!("{} {}", go_ident(&p.name), self.type_text(&p.ty)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 // Hints from closure param types (example-06's w, r) —
@@ -378,7 +378,7 @@ impl Emitter {
                     // (falls back to the descriptor's conventional one).
                     let name = params
                         .first()
-                        .map(|p| p.name.clone())
+                        .map(|p| go_ident(&p.name).to_string())
                         .unwrap_or_else(|| w.to_string());
                     self.handler_writer = Some(name);
                 }
@@ -399,7 +399,7 @@ impl Emitter {
                     let rs = results
                         .iter()
                         .map(|r| match &r.name {
-                            Some(n) => format!("{} {}", n, self.type_text(&r.ty)),
+                            Some(n) => format!("{} {}", go_ident(n), self.type_text(&r.ty)),
                             None => self.type_text(&r.ty),
                         })
                         .collect::<Vec<_>>()
@@ -519,7 +519,7 @@ impl Emitter {
         let mut parts = Vec::new();
         for f in fields {
             let v = self.emit_expr(&f.value, 0)?;
-            parts.push(format!("{}: {}", f.name, v));
+            parts.push(format!("{}: {}", go_ident(&f.name), v));
         }
         Ok(parts.join(", "))
     }
@@ -938,7 +938,7 @@ impl Emitter {
             } if entries.is_empty() => {
                 format!("map[{}]{}", self.type_text(key), self.type_text(value))
             }
-            Expr::Ident { name, .. } => name.clone(),
+            Expr::Ident { name, .. } => go_ident(name).to_string(),
             other => {
                 return Err(EmitError::unsupported(format!(
                     "`make` first argument must be a type; got value `{}`",
@@ -976,7 +976,7 @@ impl Emitter {
                 ..
             } if entries.is_empty() => format!("map[{}]{}", self.type_text(key), self.type_text(value)),
             Expr::Ident { name, .. } => super::shapes::go_primitive_name(name)
-                .unwrap_or(name.as_str())
+                .unwrap_or(go_ident(name))
                 .to_string(),
             other => self.emit_expr(other, 0)?,
         };

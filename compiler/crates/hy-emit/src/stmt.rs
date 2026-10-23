@@ -2,7 +2,7 @@
 
 use hy_syntax::*;
 
-use super::{to_go_name, BindingKind, EmitError, Emitter};
+use super::{go_ident, go_names, to_go_name, BindingKind, EmitError, Emitter};
 
 use super::expr::ATOM;
 use super::shapes::lookup_conversion;
@@ -203,7 +203,7 @@ impl Emitter {
                                     let read = names[0] != "_"
                                         && crate::rangebind::body_reads(&arm.body, &names[0]);
                                     if read {
-                                        format!("case {} := <-{}:", names[0], c)
+                                        format!("case {} := <-{}:", go_ident(&names[0]), c)
                                     } else {
                                         format!("case <-{}:", c)
                                     }
@@ -220,13 +220,13 @@ impl Emitter {
                                         && crate::rangebind::body_reads(&arm.body, &names[1]);
                                     match (a_read, b_read) {
                                         (true, true) => {
-                                            format!("case {}, {} := <-{}:", names[0], names[1], c)
+                                            format!("case {}, {} := <-{}:", go_ident(&names[0]), go_ident(&names[1]), c)
                                         }
                                         (true, false) => {
-                                            format!("case {}, _ := <-{}:", names[0], c)
+                                            format!("case {}, _ := <-{}:", go_ident(&names[0]), c)
                                         }
                                         (false, true) => {
-                                            format!("case _, {} := <-{}:", names[1], c)
+                                            format!("case _, {} := <-{}:", go_ident(&names[1]), c)
                                         }
                                         (false, false) => format!("case <-{}:", c),
                                     }
@@ -278,19 +278,19 @@ impl Emitter {
                     (Some(t), None) => match l.ty.as_ref().and_then(|ty| self.n5_zero_init(ty)) {
                         Some(init) => {
                             let inits = vec![init; l.names.len()].join(", ");
-                            self.push(&format!("var {} {} = {}", l.names.join(", "), t, inits))
+                            self.push(&format!("var {} {} = {}", go_names(&l.names), t, inits))
                         }
-                        None => self.push(&format!("var {} {}", l.names.join(", "), t)),
+                        None => self.push(&format!("var {} {}", go_names(&l.names), t)),
                     },
                     (Some(t), Some(v)) => {
                         self.hoist_tries_expr(v)?;
                         let e = self.emit_expr(v, 0)?;
-                        self.push(&format!("var {} {} = {}", l.names.join(", "), t, e));
+                        self.push(&format!("var {} {} = {}", go_names(&l.names), t, e));
                     }
                     (None, Some(v)) => {
                         self.hoist_tries_expr(v)?;
                         let e = self.emit_expr(v, 0)?;
-                        self.push(&format!("var {} = {}", l.names.join(", "), e));
+                        self.push(&format!("var {} = {}", go_names(&l.names), e));
                     }
                     (None, None) => {
                         return Err(EmitError::unsupported(
@@ -333,7 +333,7 @@ impl Emitter {
                     Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
                 );
                 let kw = if composite { "var" } else { "const" };
-                let names = l.names.join(", ");
+                let names = go_names(&l.names);
                 match &l.ty {
                     Some(t) => {
                         let ty = self.type_text(t);
@@ -393,7 +393,7 @@ impl Emitter {
                         self.emit_slot_loan_place(operand, name, rest)?;
                     val_texts.push(read_place);
                     if name != "_" {
-                        new_loans.push((name.clone(), format!("{} = {}", write_place, name)));
+                        new_loans.push((name.clone(), format!("{} = {}", write_place, go_ident(name))));
                     }
                 } else {
                     val_texts.push(self.emit_expr(v, 0)?);
@@ -406,7 +406,7 @@ impl Emitter {
             }
             self.push(&format!(
                 "{} := {}",
-                l.names.join(", "),
+                go_names(&l.names),
                 val_texts.join(", ")
             ));
             if let Some(frame) = self.loan_frames.last_mut() {
@@ -425,7 +425,7 @@ impl Emitter {
                 self.flush_loan_for_name(name);
             }
         }
-        let names = l.names.join(", ");
+        let names = go_names(&l.names);
         self.push(&format!("{} := {}", names, values.join(", ")));
         // A struct-literal define carries the receiver's struct name
         // (Batch I): `stats := pool_stats{}` — field chains type through
@@ -917,7 +917,7 @@ impl Emitter {
             let call_text = self.emit_expr(call, 0)?;
             let mut names = l.names.clone();
             names.push(temp.clone());
-            self.push(&format!("{} := {}", names.join(", "), call_text));
+            self.push(&format!("{} := {}", go_names(&names), call_text));
             self.push(&format!("if {} != nil {{", temp));
             self.indent += 1;
             self.use_package("http");
@@ -942,7 +942,7 @@ impl Emitter {
         let call_text = self.emit_expr(call, 0)?;
         let mut names = l.names.clone();
         names.push(temp.clone());
-        self.push(&format!("{} := {}", names.join(", "), call_text));
+        self.push(&format!("{} := {}", go_names(&names), call_text));
         self.push(&format!("if {} != nil {{", temp));
         self.indent += 1;
         self.propagate_error(&temp)?;
@@ -1008,7 +1008,7 @@ impl Emitter {
         self.use_package("strings");
         self.push(&format!(
             "{} := {}.Code, strings.TrimSuffix({}.Body.String(), \"\\n\")",
-            l.names.join(", "),
+            go_names(&l.names),
             rec,
             rec
         ));
@@ -1245,18 +1245,18 @@ impl Emitter {
                         let copy = self.next_temp("hyLoan");
                         self.push(&format!("{} := {}", copy, read_place));
                         rhs_texts.push(format!("&{}", copy));
-                        new_loans.push((name.clone(), format!("{} = *{}", write_place, name)));
+                        new_loans.push((name.clone(), format!("{} = *{}", write_place, go_ident(name))));
                     } else {
                         rhs_texts.push(read_place);
                         if name != "_" {
-                            new_loans.push((name.clone(), format!("{} = {}", write_place, name)));
+                            new_loans.push((name.clone(), format!("{} = {}", write_place, go_ident(name))));
                         }
                     }
                 } else {
                     rhs_texts.push(self.emit_expr(v, 0)?);
                 }
             }
-            self.push(&format!("{} = {}", names.join(", "), rhs_texts.join(", ")));
+            self.push(&format!("{} = {}", go_names(&names), rhs_texts.join(", ")));
             if let Some(frame) = self.loan_frames.last_mut() {
                 frame.extend(new_loans);
             }
@@ -1330,7 +1330,7 @@ impl Emitter {
     /// (M4); our own struct members stay verbatim.
     pub fn emit_place(&mut self, p: &Place) -> Result<String, EmitError> {
         match &p.kind {
-            PlaceKind::Ident(n) => Ok(n.clone()),
+            PlaceKind::Ident(n) => Ok(self.value_ident(n).to_string()),
             PlaceKind::Index { base, index } => {
                 let b = self.emit_place(base)?;
                 let i = self.emit_expr(index, 0)?;
@@ -1360,7 +1360,7 @@ impl Emitter {
         {
             return super::to_go_name(name);
         }
-        name.to_string()
+        go_ident(name).to_string()
     }
 
     /// Member-name normalization decision for a field/method access whose
@@ -1379,7 +1379,7 @@ impl Emitter {
                 return to_go_name(name);
             }
         }
-        name.to_string()
+        go_ident(name).to_string()
     }
 
     // -----------------------------------------------------------------------
@@ -1562,7 +1562,7 @@ impl Emitter {
                         self.register_var_ty(&l.names[0], t);
                     }
                 }
-                let names = l.names.join(", ");
+                let names = go_names(&l.names);
                 Ok(match (&l.ty, values.len()) {
                     (Some(t), 1) => format!("{} := {} {}", names, self.type_text(t), values[0]),
                     _ => format!("{} := {}", names, values.join(", ")),
@@ -1753,7 +1753,7 @@ impl Emitter {
                     self.next_temp("hyBlank")
                 } else {
                     self.shadow_local_name(var);
-                    var.clone()
+                    go_ident(var).to_string()
                 };
                 if *inclusive {
                     // Issue #322: `for v := lo; v <= hi; v++` wraps past the
@@ -1798,7 +1798,7 @@ impl Emitter {
                             if !read {
                                 format!("for range {}.m {{", e)
                             } else {
-                                format!("for {} := range {}.m {{", vars[0], e)
+                                format!("for {} := range {}.m {{", go_ident(&vars[0]), e)
                             }
                         } else if !read {
                             self.shadow_local_names(vars);
@@ -1811,7 +1811,7 @@ impl Emitter {
                             let over_chan = self.is_channel_expr(expr);
                             if over_chan {
                                 self.shadow_local_names(vars);
-                                format!("for {} := range {} {{", vars[0], e)
+                                format!("for {} := range {} {{", go_ident(&vars[0]), e)
                             } else {
                                 // A rust-handle slice (ForeignTy binding)
                                 // ranges value-elements of that handle type
@@ -1832,7 +1832,7 @@ impl Emitter {
                                     self.bindings
                                         .insert(vars[0].clone(), BindingKind::ForeignTy(t));
                                 }
-                                format!("for _, {} := range {} {{", vars[0], e)
+                                format!("for _, {} := range {} {{", go_ident(&vars[0]), e)
                             }
                         }
                     }
@@ -1856,12 +1856,12 @@ impl Emitter {
                         // Same lowering the one-variable form already uses.
                         // Issue #139.
                         let a = if crate::rangebind::body_reads(body, &vars[0]) {
-                            vars[0].clone()
+                            go_ident(&vars[0]).to_string()
                         } else {
                             "_".to_string()
                         };
                         let c = if crate::rangebind::body_reads(body, &vars[1]) {
-                            vars[1].clone()
+                            go_ident(&vars[1]).to_string()
                         } else {
                             "_".to_string()
                         };
@@ -2185,7 +2185,7 @@ impl Emitter {
                         .as_ref()
                         .is_some_and(|g| crate::rangebind::expr_reads(g, b0))
                 {
-                    self.push(&format!("{} := {}.val", b0, temp));
+                    self.push(&format!("{} := {}.val", go_ident(b0), temp));
                     prebound_guard_var = Some((*b0).clone());
                 }
             }
@@ -2204,7 +2204,7 @@ impl Emitter {
                                 && prebound_guard_var.as_deref() != Some(binding.as_str())
                                 && crate::rangebind::body_reads(&arm.body, binding)
                             {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", go_ident(binding), temp));
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             self.indent -= 1;
@@ -2220,7 +2220,7 @@ impl Emitter {
                                 && prebound_guard_var.as_deref() != Some(binding.as_str())
                                 && crate::rangebind::body_reads(&arm.body, binding)
                             {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", go_ident(binding), temp));
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             if chain_opened {
@@ -2276,7 +2276,7 @@ impl Emitter {
                             let guard_reads =
                                 *binding != "_" && crate::rangebind::expr_reads(g, binding);
                             if guard_reads {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", go_ident(binding), temp));
                             }
                             self.hoist_tries_expr(g)?;
                             let gt = self.emit_expr(g, 0)?;
@@ -2287,7 +2287,7 @@ impl Emitter {
                                 && !guard_reads
                                 && crate::rangebind::body_reads(&arm.body, binding)
                             {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", go_ident(binding), temp));
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             self.indent -= 1;
@@ -2295,7 +2295,7 @@ impl Emitter {
                         }
                         None => {
                             if *binding != "_" && crate::rangebind::body_reads(&arm.body, binding) {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", go_ident(binding), temp));
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                         }
@@ -2348,7 +2348,7 @@ impl Emitter {
                     let guard_reads =
                         *binding != "_" && crate::rangebind::expr_reads(g, binding);
                     if guard_reads {
-                        self.push(&format!("{} := {}.val", binding, temp));
+                        self.push(&format!("{} := {}.val", go_ident(binding), temp));
                     }
                     self.hoist_tries_expr(g)?;
                     let gt = self.emit_expr(g, 0)?;
@@ -2359,7 +2359,7 @@ impl Emitter {
                         && !guard_reads
                         && crate::rangebind::body_reads(&arm.body, binding)
                     {
-                        self.push(&format!("{} := {}.val", binding, temp));
+                        self.push(&format!("{} := {}.val", go_ident(binding), temp));
                     }
                     self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                     self.indent -= 1;
