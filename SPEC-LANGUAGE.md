@@ -175,6 +175,12 @@ separators (`1_000_000`). Float: `1.5`, `2.`, `.5`, `1e9`. Rune: `'a'`,
 `'\n'`, `'\u{1F600}'` (type `rune` = i32 code point). Boolean: `true`,
 `false`. Untyped constants follow Go's rules (default type on first use).
 
+The `0x`/`0o`/`0b` forms are integer-only. An adjacent fractional dot
+(`0x1.8`, `0o7.5`, `0b1.0`) is a `HYB-E0002` parse error (rule `LX6`),
+not the start of a separate expression. Hexadecimal floats are not part
+of this literal grammar. Range operators (`0x1..0x3`, `0x1..=0x3`) remain
+separate tokens.
+
 **LX7 — String literals.** Interpreted `"…"`: Go escape set **plus**
 interpolation `{expr}` (T4); `{{` and `}}` escape literal braces. Raw
 `` `…` ``: no escapes, **no interpolation**. Strings are always UTF-8 (T3).

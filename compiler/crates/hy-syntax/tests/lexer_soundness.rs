@@ -166,3 +166,82 @@ fn empty_and_multichar_char_literals_fail_closed_without_quote_desync() {
         "multi-char rune literal must recover at closing quote on the same line: {multi_errs:?}"
     );
 }
+
+#[test]
+fn prefixed_fraction_is_one_lx6_error_before_parsing() {
+    for literal in [
+        "0x1.8",
+        "0o7.5",
+        "0b1.0",
+        "0X1.8",
+        "0O7.5",
+        "0B1.0",
+        "0x1_0.8_0",
+        "0x1.f",
+        "0xDEAD.BEEF",
+        "0x1.",
+        "0o7.",
+        "0b1.",
+        "0x1.8p+2",
+        "0x1.fp-2",
+    ] {
+        let src = format!("fn main() {{\n    n := {literal}\n    fmt.println(n)\n}}\n");
+        let errors = parse_file("fraction.hy", &src).expect_err(literal);
+        assert_eq!(errors.len(), 1, "{literal}: {errors:?}");
+        let error = &errors[0];
+        assert_eq!(error.code, "HYB-E0002", "{literal}: {error:?}");
+        assert_eq!(
+            error.tier0_rule.as_deref(),
+            Some("LX6"),
+            "{literal}: {error:?}"
+        );
+        assert!(error.message.contains("fractional"), "{literal}: {error:?}");
+        assert_eq!((error.span.start.line, error.span.start.col), (2, 10));
+    }
+}
+
+#[test]
+fn prefixed_fraction_recovery_stops_at_arithmetic_operators() {
+    let errors = lex_errs("0x1.8+0o7.5-0b1.0");
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    let columns: Vec<_> = errors
+        .iter()
+        .map(|d| (d.span.start.col, d.span.end.col))
+        .collect();
+    assert_eq!(columns, [(1, 6), (7, 12), (13, 18)]);
+}
+
+#[test]
+fn prefixed_integer_ranges_and_decimal_floats_keep_their_tokens() {
+    for (literal, normalized) in [
+        ("0x1_F", "0x1F"),
+        ("0X1_F", "0x1F"),
+        ("0o1_7", "0o17"),
+        ("0O1_7", "0o17"),
+        ("0b1_01", "0b101"),
+        ("0B1_01", "0b101"),
+    ] {
+        for operator in ["..", "..=", "..."] {
+            let src = format!("{literal}{operator}end");
+            let tokens: Vec<_> = lex("range.hy", &src)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.tok)
+                .collect();
+            assert_eq!(
+                tokens,
+                [
+                    Tok::Int(normalized.into()),
+                    Tok::Punct(operator),
+                    Tok::Ident("end".into()),
+                    Tok::Eof
+                ]
+            );
+        }
+    }
+    for literal in ["1.5", "2.", ".5", "1e9", "2.e+3", "08.5"] {
+        let tokens = lex("float.hy", literal).unwrap();
+        assert_eq!(tokens[0].tok, Tok::Float(literal.into()));
+        assert_eq!(tokens[1].tok, Tok::Eof);
+    }
+}

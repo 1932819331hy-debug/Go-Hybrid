@@ -1,5 +1,6 @@
 # Hybrid Language: Development Plan
 
+- Contributor validation (2026-10-22, #1168): reject fractional suffixes on prefixed integers with HYB-E0002/LX6 before parsing, preserving ranges and decimal floats. Exact-main CLI repro: check exits 0, Go build exits 1; five regression/control tests cover syntax and real CLI behavior. Rust 1.99.0 / Go 1.26.9: workspace 1775/1775 and corpus 126/126 pass; original differential exits 1 (38/40 accept builds, 86/86 rejects), with two generated-module VCS-metadata failures. Disabling Go VCS stamping produces 40/40 + 86/86 as diagnostic evidence only, not a passed required gate. No existing corpus verdict changed; independent review and original-command upstream CI remain required.
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
@@ -263,3 +264,5 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 ## Contributor validation: submit revision lookup (2026-10-16)
 - Base 00610f7: resolve_head ignores failed git rev-parse, allowing an invalid revision/error message into a Kaggle upload and submitted.json. Abort before touching worker files or invoking Kaggle when HEAD lookup fails.
 - Three new offline tests: original two failures/one pass; patched all 11 job-test methods pass. Real temporary Git repositories cover unborn and committed HEAD; a mocked upload boundary verifies no push, payload mutation or submission record after lookup failure. git diff --check passes. No real Kaggle submission or compiler/Rust/Go suite run; maintainer CI remains required, including repair of existing workflow conflict markers (#339).
+
+- 2026-10-23 PR #1176 maintenance: merge current main 7d63d5fc preserving source changes and both histories; see final STATUS entry for local validation and pending hosted gates.
