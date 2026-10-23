@@ -68,7 +68,7 @@ class SummaryIdentityTests(unittest.TestCase):
                 self.fetch(payload, valid=False)
 
     def test_invalid_submission_record_does_not_disable_identity_check(self):
-        for submitted in ({}, [], {"job": "wanted-job"}, dict(PIN, sha=None)):
+        for submitted in (None, {}, [], {"job": "wanted-job"}, dict(PIN, sha=None)):
             with self.subTest(submitted=submitted):
                 self.fetch(json.dumps(dict(PIN, ok=True)), submitted=submitted, valid=False)
 

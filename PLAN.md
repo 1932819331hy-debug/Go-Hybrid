@@ -263,3 +263,11 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 ## Contributor validation: submit revision lookup (2026-10-16)
 - Base 00610f7: resolve_head ignores failed git rev-parse, allowing an invalid revision/error message into a Kaggle upload and submitted.json. Abort before touching worker files or invoking Kaggle when HEAD lookup fails.
 - Three new offline tests: original two failures/one pass; patched all 11 job-test methods pass. Real temporary Git repositories cover unborn and committed HEAD; a mocked upload boundary verifies no push, payload mutation or submission record after lookup failure. git diff --check passes. No real Kaggle submission or compiler/Rust/Go suite run; maintainer CI remains required, including repair of existing workflow conflict markers (#339).
+
+
+## PR #1109 delivery validation (2026-10-23)
+- Contract: select exactly one fresh report matching submitted job+SHA; refuse multiple matches, even with identical identity. External-slug fetch still accepts one valid report when submitted.json is absent. Preserve #397 identity verification (bastiansteffens-gif) and #494 fresh-download provenance work (Leimiu-G).
+- Original 24db8ee: CLI 39 pass/1 error from legacy lexical-selection expectation. Added null-submission negative subcase reproduces bypass (8 methods pass, one subcase fails); validate every present submission record before matching.
+- Updated ambiguity regression checks refusal, reviewed summary bytes, and both raw downloaded reports with/without local metadata. Unique-match, mismatched identity, malformed reports, missing metadata and failed-result controls remain.
+- Merged main 7d63d5fc preserving both histories and all main STATUS bytes. Offline Python validation: tools 389/389, runner 29/29, fuzz 21/21, installer 23/23. Unchanged localhost redirect tests require network sandbox permission; no real Kaggle/GitHub requests.
+- Compiler/tests/runtime Git trees equal main; Rust/compiler/runtime gates delegated to root delivery coordinator. Local evidence and exact tested head: /workspace/go-hybrid-bounty-batch/pr-1109/report.md.

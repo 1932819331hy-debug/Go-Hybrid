@@ -490,30 +490,36 @@ class KaggleFetchFreshnessTests(unittest.TestCase):
             raw = root / "result" / "raw"
             self.assertEqual(captured[0].resolve().parent, raw.resolve())
 
-    def test_multiple_fresh_summaries_keep_lexical_selection(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root, _ = self.make_job(tmp)
-            first = dict(self.IDENTITY, ok=False, note="first")
-            last = dict(self.IDENTITY, ok=False, note="last")
+    def test_multiple_fresh_summaries_refuse_ambiguous_selection(self):
+        for has_submission in (False, True):
+            with self.subTest(has_submission=has_submission), tempfile.TemporaryDirectory() as tmp:
+                root, _ = self.make_job(tmp)
+                if has_submission:
+                    (root / "submitted.json").write_text(
+                        json.dumps(self.IDENTITY), encoding="utf-8")
+                dest = root / "result" / "summary.json"
+                reviewed = b'{"previous": "reviewed result"}\n'
+                dest.write_bytes(reviewed)
+                first = dict(self.IDENTITY, ok=False, note="first")
+                last = dict(self.IDENTITY, ok=False, note="last")
 
-            def download(staging):
-                for name, payload in [("aaa", first), ("bbb", last)]:
-                    (staging / name).mkdir()
-                    (staging / name / "summary.json").write_text(
-                        json.dumps(payload), encoding="utf-8")
+                def download(staging):
+                    for name, payload in [("aaa", first), ("bbb", last)]:
+                        (staging / name).mkdir()
+                        (staging / name / "summary.json").write_text(
+                            json.dumps(payload), encoding="utf-8")
 
-            self.run_fetch(root, download=download)
-            promoted = json.loads(
-                (root / "result" / "summary.json").read_text(encoding="utf-8"))
-            self.assertEqual(promoted, last)
-            # The cache keeps the nested fresh artifacts too.
-            raw = root / "result" / "raw"
-            self.assertEqual(
-                json.loads((raw / "aaa" / "summary.json").read_text(
-                    encoding="utf-8")), first)
-            self.assertEqual(
-                json.loads((raw / "bbb" / "summary.json").read_text(
-                    encoding="utf-8")), last)
+                with self.assertRaisesRegex(SystemExit, "2 matching reports among 2 candidates"):
+                    self.run_fetch(root, download=download)
+                self.assertEqual(dest.read_bytes(), reviewed)
+                # The cache keeps the nested fresh artifacts too.
+                raw = root / "result" / "raw"
+                self.assertEqual(
+                    (raw / "aaa" / "summary.json").read_bytes(),
+                    json.dumps(first).encode("utf-8"))
+                self.assertEqual(
+                    (raw / "bbb" / "summary.json").read_bytes(),
+                    json.dumps(last).encode("utf-8"))
 
     def test_missing_summary_warns_without_traceback(self):
         with tempfile.TemporaryDirectory() as tmp:

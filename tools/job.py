@@ -196,6 +196,10 @@ def kaggle_fetch(jobdir, slug=None):
     files are dereferenced into the cache; symlinked directories are not
     descended. Staging beside the cache avoids a cross-device copy and a
     system tmp that may be too small for the kernel output.
+    A local submitted.json must identify the job and revision; promote
+    exactly one matching report. Without that file (external slug),
+    exactly one valid object report is required. Multiple matching reports
+    are ambiguous even when they have the same identity.
     Returns 0 on success, 1 when nothing was promoted (the documented
     exit-code contract; the raw CLI status is reported in the message).
     """
@@ -255,13 +259,11 @@ def kaggle_fetch(jobdir, slug=None):
             submitted = None  # Support fetching jobs submitted elsewhere.
         except (OSError, ValueError) as error:
             sys.exit("REFUSING to promote fetched summary: {}".format(error))
-        if submitted is not None and (
-            not isinstance(submitted, dict) or any(
-                not isinstance(submitted.get(key), str) or not submitted[key]
-                for key in ("job", "sha")
-            )
-        ):
-            sys.exit("REFUSING to promote fetched summary: submitted.json must identify the job and revision")
+        else:
+            if not isinstance(submitted, dict) or any(
+                    not isinstance(submitted.get(key), str) or not submitted[key]
+                    for key in ("job", "sha")):
+                sys.exit("REFUSING to promote fetched summary: submitted.json must identify the job and revision")
 
         matches = []
         for source in found:
