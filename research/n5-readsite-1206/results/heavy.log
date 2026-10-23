@@ -1,0 +1,77 @@
+               total        used        free      shared  buff/cache   available
+Mem:           18007        1076       10930         103        6477       16930
+Swap:              0           0           0
+cgroup memory limit/current: 17179869184 6830092288
+go version go1.26.9 linux/amd64
+rustc 1.99.0 (b940084d7 2026-09-28)
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling serde_core v1.0.229
+   Compiling zmij v1.0.23
+   Compiling syn v3.0.9
+   Compiling serde_json v1.0.154
+   Compiling serde v1.0.229
+   Compiling memchr v2.8.3
+   Compiling serde_derive v1.0.229
+   Compiling itoa v1.0.18
+   Compiling hyb v0.0.1 (/workspace/gh-pr-worktrees/n5-readsite-1206/compiler/crates/hyb)
+   Compiling hy-diag v0.0.1 (/workspace/gh-pr-worktrees/n5-readsite-1206/compiler/crates/hy-diag)
+   Compiling hy-syntax v0.0.1 (/workspace/gh-pr-worktrees/n5-readsite-1206/compiler/crates/hy-syntax)
+   Compiling hy-check v0.0.1 (/workspace/gh-pr-worktrees/n5-readsite-1206/compiler/crates/hy-check)
+warning: unused import: `crate::buildable::OpKind`
+  --> crates/hy-check/src/tuple.rs:20:5
+   |
+20 | use crate::buildable::OpKind;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling hy-emit v0.0.1 (/workspace/gh-pr-worktrees/n5-readsite-1206/compiler/crates/hy-emit)
+warning: unreachable pattern
+   --> crates/hy-emit/src/shapes.rs:553:9
+    |
+547 |         "filepath" => "path/filepath".to_string(),
+    |         ---------- matches all the relevant values
+...
+553 |         "filepath" => "path/filepath".to_string(),
+    |         ^^^^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> crates/hy-emit/src/shapes.rs:555:9
+    |
+546 |         "url" => "net/url".to_string(),
+    |         ----- matches all the relevant values
+...
+555 |         "url" => "net/url".to_string(),
+    |         ^^^^^ no value can reach this
+
+warning: `hy-emit` (lib) generated 2 warnings
+warning: method `in_loop` is never used
+  --> crates/hy-check/src/walk.rs:87:19
+   |
+66 | impl<'a> FlatInfo<'a> {
+   | --------------------- method in this implementation
+...
+87 |     pub(crate) fn in_loop(&self, idx: usize) -> bool {
+   |                   ^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `hy-check` (lib) generated 2 warnings (run `cargo fix --lib -p hy-check` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized] target(s) in 9.55s
+{"name": "B1_nested_missing", "check": 0, "build": 0, "run": 2, "prediction_matched": true}
+{"name": "B2_extracted_missing", "check": 0, "build": 0, "run": 2, "prediction_matched": true}
+{"name": "B3_struct_missing", "check": 0, "build": 0, "run": 2, "prediction_matched": true}
+{"name": "B4_struct_comma_ok", "check": 0, "build": 0, "run": 2, "prediction_matched": true}
+{"name": "B5_closed_channel", "check": 0, "build": 0, "run": 2, "prediction_matched": true}
+{"name": "X1_closed_comma_ok", "check": 0, "build": 0, "run": 2, "prediction_matched": true}
+{"name": "C1_declared", "check": 0, "build": 0, "run": 0, "prediction_matched": true}
+{"name": "C2_existing_alias", "check": 0, "build": 0, "run": 0, "prediction_matched": true}
+{"name": "C3_missing_readonly", "check": 0, "build": 0, "run": 0, "prediction_matched": true}
+{"name": "C4_existing_struct", "check": 0, "build": 0, "run": 0, "prediction_matched": true}
+{"name": "C5_closed_scalar", "check": 0, "build": 0, "run": 0, "prediction_matched": true}
+{"name": "C6_closed_map_readonly", "check": 0, "build": 0, "run": 0, "prediction_matched": true}
+{"name": "C7_evaluation_once", "check": 1, "build": 1, "run": null, "prediction_matched": false}

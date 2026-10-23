@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "/tmp/n5-readsite-qe9eunai/B2_extracted_missing/prog"
+  ],
+  "rc": 2,
+  "stdout": "",
+  "stderr": "panic: assignment to entry in nil map\n\ngoroutine 1 [running]:\nmain.main()\n\t/tmp/n5-readsite-qe9eunai/B2_extracted_missing/prog.go:14 +0xc6\n",
+  "seconds": 0.003
+}

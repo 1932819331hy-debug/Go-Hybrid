@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "/workspace/gh-pr-worktrees/n5-readsite-1206/compiler/target/debug/hyb",
+    "build",
+    "/tmp/n5-readsite-qe9eunai/C4_existing_struct/main.hy",
+    "-o",
+    "/tmp/n5-readsite-qe9eunai/C4_existing_struct/prog"
+  ],
+  "rc": 0,
+  "stdout": "emitted /tmp/n5-readsite-qe9eunai/C4_existing_struct/prog.go\nbuilt /tmp/n5-readsite-qe9eunai/C4_existing_struct/prog (go go1.26.9)\n",
+  "stderr": "",
+  "seconds": 0.199
+}

@@ -1,0 +1,93 @@
+[
+  {
+    "name": "B1_nested_missing",
+    "check": 0,
+    "build": 0,
+    "run": 2,
+    "prediction_matched": true
+  },
+  {
+    "name": "B2_extracted_missing",
+    "check": 0,
+    "build": 0,
+    "run": 2,
+    "prediction_matched": true
+  },
+  {
+    "name": "B3_struct_missing",
+    "check": 0,
+    "build": 0,
+    "run": 2,
+    "prediction_matched": true
+  },
+  {
+    "name": "B4_struct_comma_ok",
+    "check": 0,
+    "build": 0,
+    "run": 2,
+    "prediction_matched": true
+  },
+  {
+    "name": "B5_closed_channel",
+    "check": 0,
+    "build": 0,
+    "run": 2,
+    "prediction_matched": true
+  },
+  {
+    "name": "X1_closed_comma_ok",
+    "check": 0,
+    "build": 0,
+    "run": 2,
+    "prediction_matched": true
+  },
+  {
+    "name": "C1_declared",
+    "check": 0,
+    "build": 0,
+    "run": 0,
+    "prediction_matched": true
+  },
+  {
+    "name": "C2_existing_alias",
+    "check": 0,
+    "build": 0,
+    "run": 0,
+    "prediction_matched": true
+  },
+  {
+    "name": "C3_missing_readonly",
+    "check": 0,
+    "build": 0,
+    "run": 0,
+    "prediction_matched": true
+  },
+  {
+    "name": "C4_existing_struct",
+    "check": 0,
+    "build": 0,
+    "run": 0,
+    "prediction_matched": true
+  },
+  {
+    "name": "C5_closed_scalar",
+    "check": 0,
+    "build": 0,
+    "run": 0,
+    "prediction_matched": true
+  },
+  {
+    "name": "C6_closed_map_readonly",
+    "check": 0,
+    "build": 0,
+    "run": 0,
+    "prediction_matched": true
+  },
+  {
+    "name": "C7_evaluation_once",
+    "check": 1,
+    "build": 1,
+    "run": null,
+    "prediction_matched": false
+  }
+]

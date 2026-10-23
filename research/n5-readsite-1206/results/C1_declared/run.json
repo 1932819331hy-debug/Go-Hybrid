@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "/tmp/n5-readsite-qe9eunai/C1_declared/prog"
+  ],
+  "rc": 0,
+  "stdout": "1 2 3\n",
+  "stderr": "",
+  "seconds": 0.001
+}
