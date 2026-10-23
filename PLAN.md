@@ -263,3 +263,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 ## Contributor validation: submit revision lookup (2026-10-16)
 - Base 00610f7: resolve_head ignores failed git rev-parse, allowing an invalid revision/error message into a Kaggle upload and submitted.json. Abort before touching worker files or invoking Kaggle when HEAD lookup fails.
 - Three new offline tests: original two failures/one pass; patched all 11 job-test methods pass. Real temporary Git repositories cover unborn and committed HEAD; a mocked upload boundary verifies no push, payload mutation or submission record after lookup failure. git diff --check passes. No real Kaggle submission or compiler/Rust/Go suite run; maintainer CI remains required, including repair of existing workflow conflict markers (#339).
+
+## Contributor validation: Actions remote credentials (2026-10-23)
+- Base `7d63d5f`: username:token Git remotes send the entire userinfo as the API token. Parse GitHub HTTPS credentials, decode the token, and preserve environment-token precedence and legacy token-only remotes. Ignore other origins and malformed credentials without printing them.
+- Seven real temporary-Git/offline-request tests: baseline 12 failing subcases; fixed 7/7. Existing job-control suite and syntax/diff checks passed; no live credentials or remote API calls were used. Broader checks and maintainer CI remain delivery gates.
