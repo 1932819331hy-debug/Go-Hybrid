@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "/workspace/gh-pr-worktrees/n5-readsite-1206/compiler/target/debug/hyb",
+    "check",
+    "/tmp/n5-readsite-9sx25my2/C7c_evaluation_once/main.hy"
+  ],
+  "rc": 0,
+  "stdout": "/tmp/n5-readsite-9sx25my2/C7c_evaluation_once/main.hy: OK (0 diagnostics)\n",
+  "stderr": "",
+  "seconds": 0.003
+}

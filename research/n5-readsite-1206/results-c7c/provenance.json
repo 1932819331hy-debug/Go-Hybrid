@@ -1,0 +1,27 @@
+{
+  "head": "89f510e4700dd681285e9c3541b617eac180465d",
+  "base": "7d63d5fc25ceb525c2d0f6ec89a4ad608a6a5011",
+  "compiler_tree": "3afc2ae23581817a37f1398014760431091fce2d",
+  "hyb": "/workspace/gh-pr-worktrees/n5-readsite-1206/compiler/target/debug/hyb",
+  "sha256": "7b804fdaee3938f653f14a56bcefca5d652b4306e1bacd7288c2ff811d7c4b4c",
+  "go": {
+    "argv": [
+      "go",
+      "version"
+    ],
+    "rc": 0,
+    "stdout": "go version go1.26.9 linux/amd64\n",
+    "stderr": "",
+    "seconds": 0.003
+  },
+  "rust": {
+    "argv": [
+      "rustc",
+      "--version"
+    ],
+    "rc": 0,
+    "stdout": "rustc 1.99.0 (b940084d7 2026-09-28)\n",
+    "stderr": "",
+    "seconds": 0.009
+  }
+}

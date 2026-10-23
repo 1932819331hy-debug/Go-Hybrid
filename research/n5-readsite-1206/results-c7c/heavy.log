@@ -1,0 +1,4 @@
+               total        used        free      shared  buff/cache   available
+Mem:           18007         994       10491         181        7075       17013
+Swap:              0           0           0
+{"name": "C7c_evaluation_once", "check": 0, "build": 0, "run": 0, "prediction_matched": true}
