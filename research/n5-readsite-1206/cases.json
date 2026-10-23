@@ -63,5 +63,10 @@
     "name": "C7_evaluation_once",
     "expected": "ok",
     "stdout": "1 1 5\n"
+  },
+  {
+    "name": "C7b_evaluation_once",
+    "expected": "ok",
+    "stdout": "1 1 5\n"
   }
 ]

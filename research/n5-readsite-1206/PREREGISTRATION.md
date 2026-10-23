@@ -56,3 +56,14 @@ and Go-owned N6 boundaries. Recommend a bounded implementation only after
 recording the identity/writeback decision needed from maintainers. D11 is open;
 this spike cannot resolve it or silently amend N3/N5. Stop after the matrix,
 source audit, and decision report, unless a harness issue blocks evidence.
+
+## Recorded amendment after initial run
+
+The initial matrix finished with exit 1: B1–B5/X1 reproduced and C1–C6 matched,
+but C7 failed parsing because the fixture used `-> string` instead of Hybrid's
+Go-style `string` result type. Original C7 source/logs and the initial matrix
+are retained unchanged. C7b changes only those two return-type separators;
+its original predicted output `1 1 5` is unchanged. The harness now accepts
+`--case` and a separate `--output` directory to preserve initial evidence.
+Publish this amendment before the one-case C7b build/run; no compiler rebuild
+is necessary because compiler source and the binary are unchanged.

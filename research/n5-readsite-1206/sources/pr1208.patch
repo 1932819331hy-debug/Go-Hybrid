@@ -1,0 +1,573 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index ce9df9625..ad833fea1 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -148,7 +148,7 @@ jobs:
+           cd compiler
+           cargo test --workspace --quiet
+ 
+-      - name: Checker corpus verdict agreement (126/122 + tripwire)
++      - name: Checker corpus verdict agreement (127/122 + tripwire)
+         run: |
+           set -e
+           cd compiler && cargo build -p hyb --quiet
+diff --git a/GUARANTEES.md b/GUARANTEES.md
+index 4de68cb03..77181ad3f 100644
+--- a/GUARANTEES.md
++++ b/GUARANTEES.md
+@@ -63,7 +63,7 @@ Everything the checker **accepts was proven** sendable; everything it
+ ## Evidence inventory (what backs the ✅ rows)
+ 
+ - **Adversarial corpus** — [tests/checker-corpus/](tests/checker-corpus/):
+-  126 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
++  127 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
+   **pre-registered before the checker existed** (the checker was built
+   against them, not adjusted after); 19–20 were added during integration
+   and 21+ after the checker landed, still hand-derived from the rule text
+diff --git a/Makefile b/Makefile
+index 80862b7b4..857348a46 100644
+--- a/Makefile
++++ b/Makefile
+@@ -23,7 +23,7 @@ help:
+ 	@echo "make test-quick       — sandbox unit tests (grows with the compiler)"
+ 	@echo "make ci               — what CI runs on push"
+ 	@echo "make examples         — the ten target programs, byte-exact acceptance"
+-	@echo "make corpus           — Tier-0 corpus verdicts (126/122)"
++	@echo "make corpus           — Tier-0 corpus verdicts (127/122)"
+ 	@echo "make census           — every stated corpus count matches the corpus"
+ 	@echo "make differential     — the differential corpus loop (accept + reject)"
+ 	@echo "make bench            — G2 call-overhead bench on the live bridge (hyb bench-overhead)"
+diff --git a/README.md b/README.md
+index a2816ba55..a1d512d6e 100644
+--- a/README.md
++++ b/README.md
+@@ -109,7 +109,7 @@ skip the cgo runtime.
+ | What does a Go→Rust call cost? | **2.8 ns** safe stack-switched trampoline vs **46.8 ns** cgo — 16.5× faster, 0 allocs | ✅ [spike 1](spikes/spike1-call-overhead/RESULTS.md) · [G2 bench: fast path 3.37 ns ≤ 5 ns on the live bridge](gates/G2.md) |
+ | Can consumers skip the toolchain? | Yes — generated Go + prebuilt artifact; a plain `go run` imports a Hybrid package | ✅ [example 09](examples/09-go-imports-hybrid/) |
+ | Can a scheduler-safe checked language work at all? | Bounded blocking pool, two-tier budgets, race-clean under `-race` | ✅ [spike 4: 100k-cell matrix](spikes/spike4-scheduling/RESULTS.md) |
+-| Ownership rules without visible lifetimes? | Tier-0 checker: 6 sendable classes, move/freeze, loans, fail-closed boundary | ✅ [checker corpus 126/122](tests/checker-corpus/) + [differential loop 40/40 + 80/80](tools/differential_loop.py) |
++| Ownership rules without visible lifetimes? | Tier-0 checker: 6 sendable classes, move/freeze, loans, fail-closed boundary | ✅ [checker corpus 127/122](tests/checker-corpus/) + [differential loop 41/41 + 86/86](tools/differential_loop.py) |
+ | Scheduling with blocking Rust calls | resolved: pool + Go-scheduler fallback, budgets pinned | ✅ spike 4 |
+ 
+ ## Quick start
+diff --git a/compiler/crates/hy-emit/src/expr.rs b/compiler/crates/hy-emit/src/expr.rs
+index 4cb049c09..223a123a1 100644
+--- a/compiler/crates/hy-emit/src/expr.rs
++++ b/compiler/crates/hy-emit/src/expr.rs
+@@ -236,12 +236,28 @@ impl Emitter {
+             }
+ 
+             Expr::SliceLit { elem, items, .. } => {
+-                if let Some((_, inner_elem, arr_ty)) = e.as_array_lit() {
++                if let Some((len, inner_elem, arr_ty)) = e.as_array_lit() {
++                    // N5: `[N]T{}` leaves every element at its zero value —
++                    // allocate them like `var a [N]T` (zeroinit.rs).
++                    if items.is_empty() {
++                        if let Some(init) = self.n5_zero_init(arr_ty) {
++                            return Ok(init);
++                        }
++                    }
+                     let head = self.type_text(arr_ty);
+                     let mut parts = Vec::new();
+                     for i in items {
+                         parts.push(self.emit_expr_exp(i, 0, Some(inner_elem))?);
+                     }
++                    // A partial literal (`[3]bag{{label: "x"}}`) leaves the
++                    // trailing elements zero: pad them when N is a literal.
++                    if let Some(n) = len.and_then(int_literal_value) {
++                        if parts.len() < n {
++                            if let Some(init) = self.n5_zero_init(inner_elem) {
++                                parts.resize(n, init);
++                            }
++                        }
++                    }
+                     return Ok(format!("{}{{{}}}", head, parts.join(", ")));
+                 }
+                 let head = match elem {
+@@ -946,10 +962,46 @@ impl Emitter {
+                 )));
+             }
+         };
+-        let mut parts = vec![ty_text];
++        let mut sizes = Vec::new();
+         for a in &args[1..] {
+-            parts.push(self.emit_call_arg(a)?);
++            sizes.push(self.emit_call_arg(a)?);
++        }
++        // N5: `make([]T, n)` elements are zero values too — allocate their
++        // maps (zeroinit.rs). Go's `make` takes any integer type for the
++        // sizes; the helper takes `int`, so non-literal sizes are converted.
++        let n5_elem = match first_val {
++            Expr::SliceLit {
++                elem: Some(t),
++                items,
++                ..
++            } if items.is_empty() && first.value.as_array_lit().is_none() => Some(t.as_ref().clone()),
++            Expr::Ident { name, span } => match self.n5_resolve_alias(&TypeExpr::Named {
++                name: name.clone(),
++                span: *span,
++            }) {
++                TypeExpr::Slice { elem, .. } => Some(*elem),
++                _ => None,
++            },
++            _ => None,
++        };
++        if let Some(elem) = n5_elem {
++            let sizes: Vec<String> = args[1..]
++                .iter()
++                .zip(&sizes)
++                .map(|(a, s)| match &a.value {
++                    Expr::Lit {
++                        kind: LitKind::Int(_),
++                        ..
++                    } => s.clone(),
++                    _ => format!("int({})", s),
++                })
++                .collect();
++            if let Some(alloc) = self.n5_make_slice(&elem, &sizes) {
++                return Ok(alloc);
++            }
+         }
++        let mut parts = vec![ty_text];
++        parts.extend(sizes);
+         Ok(format!("make({})", parts.join(", ")))
+     }
+ 
+@@ -1270,3 +1322,15 @@ impl Emitter {
+         }
+     }
+ }
++
++/// The value of a plain decimal integer literal (`3`, `1_000`); None for
++/// anything else (hex, consts, expressions).
++fn int_literal_value(e: &Expr) -> Option<usize> {
++    match e {
++        Expr::Lit {
++            kind: LitKind::Int(s),
++            ..
++        } => s.replace('_', "").parse().ok(),
++        _ => None,
++    }
++}
+diff --git a/compiler/crates/hy-emit/src/lib.rs b/compiler/crates/hy-emit/src/lib.rs
+index a982ebfc6..ab05addb7 100644
+--- a/compiler/crates/hy-emit/src/lib.rs
++++ b/compiler/crates/hy-emit/src/lib.rs
+@@ -107,6 +107,24 @@ const SET_PRELUDE: &str = concat!(
+     "}\n",
+ );
+ 
++/// N5 for `make([]T, n[, c])` (zeroinit.rs): every slot up to the capacity
++/// gets an allocated zero value, so a reslice inside the capacity meets
++/// N5 values too. `n`/`c` mirror Go's `make` arity.
++const N5_MAKE_PRELUDE: &str = concat!(
++    "// ---- Hybrid prelude: N5 slice allocation (auto-generated; do not edit) ----\n",
++    "func hy_n5_make[t any](zero func() t, n int, c ...int) []t {\n",
++    "\tcapacity := n\n",
++    "\tif len(c) > 0 {\n",
++    "\t\tcapacity = c[0]\n",
++    "\t}\n",
++    "\ts := make([]t, capacity)\n",
++    "\tfor i := range s {\n",
++    "\t\ts[i] = zero()\n",
++    "\t}\n",
++    "\treturn s[:n]\n",
++    "}\n",
++);
++
+ const POP_PRELUDE: &str = concat!(
+     "// ---- Hybrid prelude: slice pop (auto-generated; do not edit) ----\n",
+     "func hy_pop[t any](s *[]t) t {\n",
+@@ -825,7 +843,8 @@ impl Emitter {
+             || body.contains(".contains(")
+             || body.contains(".insert(");
+         let needs_pop = body.contains("hy_pop(");
+-        if needs_option || needs_set || needs_pop {
++        let needs_n5_make = body.contains("hy_n5_make(");
++        if needs_option || needs_set || needs_pop || needs_n5_make {
+             out.push('\n');
+             if needs_option {
+                 out.push_str(OPTION_PRELUDE);
+@@ -839,6 +858,10 @@ impl Emitter {
+                 out.push_str(POP_PRELUDE);
+                 out.push('\n');
+             }
++            if needs_n5_make {
++                out.push_str(N5_MAKE_PRELUDE);
++                out.push('\n');
++            }
+         }
+         out.push('\n');
+         out.push_str(&self.body);
+diff --git a/compiler/crates/hy-emit/src/zeroinit.rs b/compiler/crates/hy-emit/src/zeroinit.rs
+index 1e688d6f0..f11911252 100644
+--- a/compiler/crates/hy-emit/src/zeroinit.rs
++++ b/compiler/crates/hy-emit/src/zeroinit.rs
+@@ -18,11 +18,22 @@
+ //!     struct field)              → `var b bag = bag{counts: map[string]int{}}`
+ //!   * `bag{}` / `bag{name: "x"}` → the unkeyed map fields are added
+ //!   * `new(bag)`                 → `&bag{counts: map[string]int{}}`
++//!   * `make([]bag, n[, c])`      → `hy_n5_make(func() bag { return bag{…} }, n[, c])`
++//!     (N5_MAKE_PRELUDE: every slot up to the capacity is allocated, so a
++//!     later reslice inside the capacity still meets N5 values)
++//!   * `var a [2]bag` / `[2]bag{}` → an IIFE that fills every element:
++//!     `func() (hyArr [2]bag) { for i := range hyArr { hyArr[i] = bag{…} }; return hyArr }()`
++//!
++//! Allocation sites — `make`, arrays — are declaration sites in disguise:
++//! the element type is known structurally, so the same zero-value table
++//! applies (the gap reported with #645's follow-ups). Zero values produced
++//! by READS — a missing map element (`mm[k][k2] = v`, `b, ok := m[k]`), a
++//! receive from a closed channel — are NOT reached by this lowering: they
++//! have no allocation site, only a place, and need a write-site design.
+ //!
+ //! Generic structs (`box[t]{}`) keep Go's zero value: their field types
+ //! need the literal's type arguments substituted, which the folded
+-//! `box[int]` name does not carry structurally. Arrays of such structs and
+-//! `make([]bag, n)` elements are likewise not covered by this lowering.
++//! `box[int]` name does not carry structurally.
+ 
+ use std::collections::BTreeSet;
+ 
+@@ -47,6 +58,16 @@ impl Emitter {
+         }
+         match self.n5_resolve_alias(ty) {
+             TypeExpr::Map { .. } => Some(format!("{}{{}}", self.type_text(ty))),
++            // `[N]T` whose elements need allocation: fill every element in
++            // an IIFE so the init is one expression for any `N` (a literal
++            // or a const), usable at every site a zero array appears.
++            TypeExpr::Array { elem, .. } => {
++                let init = self.n5_zero_init_at(&elem, depth + 1)?;
++                let arr = self.type_text(ty);
++                Some(format!(
++                    "func() (hyArr {arr}) {{ for i := range hyArr {{ hyArr[i] = {init} }}; return hyArr }}()"
++                ))
++            }
+             TypeExpr::Named { name, .. } => {
+                 let fields = self.n5_structs.get(&name)?.clone();
+                 let extra = self.n5_missing_fields_at(&fields, &BTreeSet::new(), depth + 1);
+@@ -128,9 +149,20 @@ impl Emitter {
+         self.n5_zero_init(&ty).map(|init| format!("&{}", init))
+     }
+ 
++    /// `make([]T, n[, c])` where T's zero value needs N5 allocation →
++    /// `hy_n5_make(func() T { return <init> }, n[, c])` (N5_MAKE_PRELUDE).
++    /// `elem` is the slice's element type; `sizes` are make's remaining
++    /// arguments, already emitted. None when Go's `make` is already right.
++    pub(crate) fn n5_make_slice(&mut self, elem: &TypeExpr, sizes: &[String]) -> Option<String> {
++        let init = self.n5_zero_init(elem)?;
++        let mut parts = vec![format!("func() {} {{ return {} }}", self.type_text(elem), init)];
++        parts.extend(sizes.iter().cloned());
++        Some(format!("hy_n5_make({})", parts.join(", ")))
++    }
++
+     /// Follow user type aliases (`type counts = map[string]int`) to the
+     /// type they name; anything else is returned as written.
+-    fn n5_resolve_alias(&self, ty: &TypeExpr) -> TypeExpr {
++    pub(crate) fn n5_resolve_alias(&self, ty: &TypeExpr) -> TypeExpr {
+         let mut cur = ty.clone();
+         for _ in 0..MAX_DEPTH {
+             let next = match &cur {
+diff --git a/compiler/crates/hy-emit/tests/n5_zero_map_lowering.rs b/compiler/crates/hy-emit/tests/n5_zero_map_lowering.rs
+index f52c5aeb6..ee950ea74 100644
+--- a/compiler/crates/hy-emit/tests/n5_zero_map_lowering.rs
++++ b/compiler/crates/hy-emit/tests/n5_zero_map_lowering.rs
+@@ -95,3 +95,106 @@ fn main() {
+     );
+     assert!(go.contains("b := box[int]{}"), ":\n{go}");
+ }
++
++// ---------------------------------------------------------------------------
++// Allocation sites (the #645 follow-up): `make([]T, n)` elements and `[N]T`
++// arrays are zero values too — they used to keep Go's nil map.
++// ---------------------------------------------------------------------------
++
++#[test]
++fn n5_make_slice_allocates_every_element() {
++    let go = emit_src(
++        "\
++struct bag {
++    counts map[string]int
++}
++
++struct plain {
++    n int
++}
++
++type bags = []bag
++
++fn main() {
++    a := make([]bag, 2)
++    b := make([]bag, 0, 4)
++    c := make([]map[string]int, 1)
++    d := make(bags, 2)
++    var n u8 = 2
++    e := make([]bag, n)
++    f := make([]int, 3)
++    g := make([]plain, 2)
++    h := make(chan bag, 1)
++    fmt.println(len(a) + len(b) + len(c) + len(d) + len(e) + len(f) + len(g) + cap(h))
++}
++",
++    );
++    for want in [
++        "a := hy_n5_make(func() bag { return bag{counts: map[string]int{}} }, 2)",
++        // The capacity is allocated too: a reslice inside it meets N5 values.
++        "b := hy_n5_make(func() bag { return bag{counts: map[string]int{}} }, 0, 4)",
++        "c := hy_n5_make(func() map[string]int { return map[string]int{} }, 1)",
++        // A slice alias resolves to its element type.
++        "d := hy_n5_make(func() bag { return bag{counts: map[string]int{}} }, 2)",
++        // Go's make takes any integer type; the helper takes int.
++        "e := hy_n5_make(func() bag { return bag{counts: map[string]int{}} }, int(n))",
++        // Element types whose Go zero value already is Hybrid's: untouched.
++        "f := make([]int, 3)",
++        "g := make([]plain, 2)",
++        "h := make(chan bag, 1)",
++        "func hy_n5_make[t any](zero func() t, n int, c ...int) []t {",
++    ] {
++        assert!(go.contains(want), "missing {want:?} in:\n{go}");
++    }
++}
++
++#[test]
++fn n5_make_prelude_is_emitted_only_when_used() {
++    let go = emit_src("fn main() {\n    a := make([]int, 3)\n    fmt.println(len(a))\n}\n");
++    assert!(go.contains("a := make([]int, 3)"), ":\n{go}");
++    assert!(!go.contains("hy_n5_make"), "prelude leaked:\n{go}");
++}
++
++#[test]
++fn n5_arrays_allocate_every_element() {
++    let go = emit_src(
++        "\
++struct bag {
++    counts map[string]int
++}
++
++struct shelf {
++    slots [2]bag
++}
++
++const k = 3
++
++fn main() {
++    var a [2]bag
++    b := [2]bag{}
++    var c [k]bag
++    d := [3]bag{bag{}}
++    var s shelf
++    var e [2]int
++    f := [2]int{}
++    fmt.println(len(a) + len(b) + len(c) + len(d) + len(s.slots) + len(e) + len(f))
++}
++",
++    );
++    const FILL2: &str = "func() (hyArr [2]bag) { for i := range hyArr { hyArr[i] = bag{counts: map[string]int{}} }; return hyArr }()";
++    for want in [
++        &format!("var a [2]bag = {FILL2}"),
++        &format!("b := {FILL2}"),
++        // A const length is fine: the IIFE ranges over the array.
++        "var c [k]bag = func() (hyArr [k]bag) { for i := range hyArr { hyArr[i] = bag{counts: map[string]int{}} }; return hyArr }()",
++        // A partial literal pads its trailing zero elements.
++        "d := [3]bag{bag{counts: map[string]int{}}, bag{counts: map[string]int{}}, bag{counts: map[string]int{}}}",
++        // An array field of a zero struct goes through the same table.
++        &format!("var s shelf = shelf{{slots: {FILL2}}}"),
++        // Element types whose Go zero value already is Hybrid's: untouched.
++        "var e [2]int\n",
++        "f := [2]int{}",
++    ] {
++        assert!(go.contains(want), "missing {want:?} in:\n{go}");
++    }
++}
+diff --git a/compiler/crates/hy-syntax/src/ast.rs b/compiler/crates/hy-syntax/src/ast.rs
+index 6dabde8a9..03ba09bd4 100644
+--- a/compiler/crates/hy-syntax/src/ast.rs
++++ b/compiler/crates/hy-syntax/src/ast.rs
+@@ -1,7 +1,7 @@
+ //! The Hybrid AST — the cross-component contract between `hy-syntax`
+ //! (produces), `hy-check` (consumes), and the MVP-0 emitter (consumes).
+ //!
+-//! Scope: the surface exercised by tests/checker-corpus/*.hy (126 programs),
++//! Scope: the surface exercised by tests/checker-corpus/*.hy (127 programs),
+ //! examples/ (ten target programs), and spikes/spike6-ownership/work/*.hy
+ //! (ten programs). Anything outside that surface is allowed to be
+ //! unimplemented by the parser — it must produce a clean `unsupported`
+diff --git a/compiler/crates/hy-syntax/tests/parse_all.rs b/compiler/crates/hy-syntax/tests/parse_all.rs
+index 7d9214243..51f75863f 100644
+--- a/compiler/crates/hy-syntax/tests/parse_all.rs
++++ b/compiler/crates/hy-syntax/tests/parse_all.rs
+@@ -51,7 +51,7 @@ fn must_parse(path: &PathBuf) {
+ fn checker_corpus_all_parse() {
+     let files = hy_files_under("tests/checker-corpus");
+ 
+-    assert_eq!(files.len(), 126, "expected exactly 124 corpus programs",);
++    assert_eq!(files.len(), 127, "expected exactly 127 corpus programs",);
+     // 61-string-escape-fail-closed.hy is the corpus's first PARSE-reject
+     // fixture (a malformed LX7 string escape must be named by the lexer,
+     // never silently accepted): it is excluded from the must-parse loop
+diff --git a/compiler/crates/hyb/tests/spec_n5_zero_maps.rs b/compiler/crates/hyb/tests/spec_n5_zero_maps.rs
+index 22a21882a..641d10e91 100644
+--- a/compiler/crates/hyb/tests/spec_n5_zero_maps.rs
++++ b/compiler/crates/hyb/tests/spec_n5_zero_maps.rs
+@@ -84,3 +84,8 @@ fn expected_output_reads_one_line_per_marker() {
+     let src = "// EXPECTED-VERDICT: ACCEPT\n// EXPECTED-OUTPUT: true\n// EXPECTED-OUTPUT: x 3\nfn main() {}\n";
+     assert_eq!(expected_output(src), "true\nx 3\n");
+ }
++
++#[test]
++fn n5_allocation_sites_corpus_program_output() {
++    corpus_output_is_byte_exact("n5-zero-map-allocation-sites.hy");
++}
+diff --git a/tests/checker-corpus/README.md b/tests/checker-corpus/README.md
+index dea0d48e7..724e30dc1 100644
+--- a/tests/checker-corpus/README.md
++++ b/tests/checker-corpus/README.md
+@@ -1,7 +1,7 @@
+ # tests/checker-corpus — adversarial programs with pre-registered verdicts
+ 
+-**Current registered corpus: 126 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+-**Current registered corpus: 126 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
++**Current registered corpus: 127 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
++**Current registered corpus: 127 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+ row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
+ written BEFORE the Phase-1 checker existed; that registration grew to 20
+ during the 2026-10-12 integration, and every case after it was added
+@@ -301,3 +301,18 @@ in `hy-check/tests/type_name_in_value_position.rs` (13 tests).
+ 
+ With this registration the corpus is **120 programs: ACCEPT 38 ·
+ ACCEPT-MANAGED 2 · REJECT 80** — main's 118 plus these two.
++
++### n5-zero-map-allocation-sites (2026-10-23, the #645 follow-up) — ACCEPT
++
++N5's first landing (#662) allocated zero maps where they are DECLARED: `var`,
++struct literals, `new(T)`. A zero value is also PRODUCED by every allocation —
++`make([]bag, n)` elements, the spare capacity of `make([]bag, 0, c)`, and `[N]bag`
++arrays in var / literal / const-length / partial-literal form — and each of those
++passed `hyb check`, built, and panicked `assignment to entry in nil map` at its
++first write. The fixture pins all of them in one program with a byte-exact
++`EXPECTED-OUTPUT` (the hyb test `spec_n5_zero_maps.rs` diffs it). Zero values
++produced by a READ (a missing map element, a closed-channel receive) have no
++allocation site and are deliberately NOT pinned here.
++
++With this registration the corpus is **127 programs: ACCEPT 39 ·
++ACCEPT-MANAGED 2 · REJECT 86** — main's 126 plus this one.
+diff --git a/tests/checker-corpus/VERDICTS.md b/tests/checker-corpus/VERDICTS.md
+index 6c8054447..44514466f 100644
+--- a/tests/checker-corpus/VERDICTS.md
++++ b/tests/checker-corpus/VERDICTS.md
+@@ -1074,4 +1074,13 @@ With this registration the corpus is **126 programs: ACCEPT 38 ·
+ ACCEPT-MANAGED 2 · REJECT 86** — main's 125 plus this one.
+ by the autonomous pipeline (bundles author-758 / author-827, landings
+ 0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
+-companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
+\ No newline at end of file
++companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
++
++-------------------------------------------------------------------------------
++
++### n5-zero-map-allocation-sites (the #645 follow-up) — ACCEPT
++
++`make([]T, n)` / `make([]T, n, c)` elements (and the spare capacity a reslice exposes), `make([]map[K]V, n)` elements, and `[N]T` arrays (var, literal, const length, partial literal) are N5 zero values: their maps allocate, so the first write works instead of panicking `assignment to entry in nil map`. No check-site; ACCEPT with a byte-exact EXPECTED-OUTPUT.
++
++With this registration the corpus is **127 programs: ACCEPT 39 ·
++ACCEPT-MANAGED 2 · REJECT 86** — main's 126 plus this one.
+diff --git a/tests/checker-corpus/n5-zero-map-allocation-sites.hy b/tests/checker-corpus/n5-zero-map-allocation-sites.hy
+new file mode 100644
+index 000000000..4e7006943
+--- /dev/null
++++ b/tests/checker-corpus/n5-zero-map-allocation-sites.hy
+@@ -0,0 +1,95 @@
++// ============================================================================
++// n5-zero-map-allocation-sites — Checker corpus (added WITH the fix for the
++// #645 follow-up: zero values produced at ALLOCATION sites).
++//
++// PURPOSE: pin N5 where the zero value is not declared but allocated —
++// `make([]T, n)` / `make([]T, n, c)` elements (and the spare capacity a
++// later reslice exposes), `make([]map[K]V, n)` elements, and `[N]T` arrays
++// in their `var`, literal, const-length, and partially keyed forms. Before
++// this fix every one of these programs passed `hyb check`, built, and died
++// at its first write with `panic: assignment to entry in nil map`: #662
++// allocated zero maps at `var` declarations, struct literals and `new(T)`
++// only, and recorded arrays and `make([]bag, n)` as not covered.
++//
++// RULE CITATION: SPEC-LANGUAGE N5 — "`var m map[k]v; m[k] = v` works (first
++//   write allocates), where Go panics on a nil map." N3's zero-value table
++//   gives maps "empty (`len` 0; first write allocates — N5)" and a struct
++//   "field-wise zero values"; `make([]T, n)` and `[N]T` produce exactly
++//   those zero values, n at a time. D11 (keep N5 vs Go-exact) is open; this
++//   fixture pins the spec as written, and a D11 reversal changes this
++//   verdict by logged amendment.
++//
++// NOT pinned here (no allocation site — a READ produces the zero value):
++//   a missing map element (`mm[k][k2] = v`, `b, ok := bags[k]`) and a
++//   receive from a closed channel. Those keep Go's nil today and are
++//   tracked separately.
++//
++// ---- Tier-0 rule set applied ----
++// Layer 1 (Go-side GC): `bags`, `maps`, `spare`, `arr`, `lit`, `shelves`,
++//   `part`, `boxed` — fresh locals written by one task; `fill` mutates its
++//   slice parameter's elements in the caller's task. No spawn or send site,
++//   so no sendability class applies.
++// Layer 2 (Rust-side owned): none.
++// Layer 3 (boundary handles): none.
++//
++// ---- Expected verdict (registered with the fix, 2026-10-23) ----
++// EXPECTED-VERDICT: ACCEPT
++//   ACCEPT — zero check-sites; each write is one N5 defines as valid.
++// EXPECTED-OUTPUT: 0 1 2 3 4 5 6 x 7 3
++//
++// ---- Annotations / managed ----
++// lifetime annotations: 0. `managed` blocks: 0.
++// ============================================================================
++
++import "fmt"
++
++struct bag {
++    label  string
++    counts map[string]int
++}
++
++struct shelf {
++    bags []bag
++}
++
++const n_shelves = 2
++
++fn fill(bs []bag) {
++    for i in 0..len(bs) {
++        bs[i].counts["k"] = i + 1
++    }
++}
++
++fn main() {
++    // make([]T, n): every element is a zero value, so its map allocates.
++    bags := make([]bag, 2)
++    bags[1].counts["a"] = 1
++
++    // make([]map[K]V, n): the elements are zero maps.
++    maps := make([]map[string]int, 1)
++    maps[0]["b"] = 2
++
++    // make([]T, n, c): the spare capacity holds zero values too, and a
++    // reslice within the capacity exposes them.
++    spare := make([]bag, 0, 4)
++    spare = spare[:1]
++    spare[0].counts["c"] = 3
++
++    // A zero array in its var, literal, const-length and partial forms.
++    var arr [2]bag
++    arr[0].counts["d"] = 4
++    lit := [2]bag{}
++    lit[1].counts["e"] = 5
++    var shelves [n_shelves]bag
++    shelves[1].counts["f"] = 6
++    part := [2]bag{bag{label: "x"}}
++    part[1].counts["g"] = 7
++
++    // make inside a struct literal; the elements reach a callee intact.
++    boxed := shelf{bags: make([]bag, 2)}
++    fill(boxed.bags)
++
++    // One stdout line so the differential loop's single-line
++    // EXPECTED-OUTPUT assertion can pin it byte-exact.
++    fmt.println(len(bags[0].counts), bags[1].counts["a"], maps[0]["b"], spare[0].counts["c"], arr[0].counts["d"], lit[1].counts["e"], shelves[1].counts["f"], "{part[0].label} {part[1].counts["g"]}", boxed.bags[0].counts["k"] + boxed.bags[1].counts["k"])
++}

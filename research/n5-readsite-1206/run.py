@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Bounded characterization; raw failures are data, not passing language behavior."""
-import hashlib, json, os, shutil, subprocess, tempfile, time
+import argparse, hashlib, json, os, shutil, subprocess, tempfile, time
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -16,6 +16,17 @@ def capture(argv, cwd, seconds):
 def git(*args):
     return subprocess.check_output(['git',*args],cwd=ROOT,text=True).strip()
 def main():
+    global OUT
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--case")
+    parser.add_argument("--output", default="results")
+    args = parser.parse_args()
+    assert Path(args.output).name == args.output, "output must be a directory name"
+    OUT = HERE / args.output
+    cases = json.loads((HERE / "cases.json").read_text())
+    if args.case:
+        cases = [c for c in cases if c["name"] == args.case]
+        assert cases, "unknown case"
     assert not os.environ.get('HYB_ALLOW_TOOLCHAIN_DRIFT'), 'toolchain drift bypass prohibited'
     assert git('rev-parse','HEAD:compiler') == git('rev-parse',BASE+':compiler'), 'compiler differs from base'
     assert not git('status','--porcelain','--','compiler'), 'dirty compiler'
@@ -28,7 +39,7 @@ def main():
     (OUT/'provenance.json').write_text(json.dumps(meta,indent=2)+'\n')
     rows=[]
     with tempfile.TemporaryDirectory(prefix='n5-readsite-') as tmp:
-        for case in json.loads((HERE/'cases.json').read_text()):
+        for case in cases:
             name=case['name']; work=Path(tmp)/name; work.mkdir()
             src=work/'main.hy'; shutil.copyfile(HERE/'fixtures'/f'{name}.hy',src)
             logs=OUT/name; logs.mkdir(exist_ok=True)
