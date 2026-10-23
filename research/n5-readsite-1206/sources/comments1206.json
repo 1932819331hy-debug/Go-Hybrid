@@ -1,0 +1,74 @@
+{
+  "comments": [
+    {
+      "url": "https://github.com/limitlessprojects/Go-Hybrid/issues/1206#issuecomment-6349451669",
+      "body": "/claim #1206 Fixes #1206 with comprehensive allocation-site lowering and end-to-end tests: https://github.com/limitlessprojects/Go-Hybrid/pull/1207\n\n- Lowered `make([]T, n[, c])` where element type requires N5 zero initialization via generic prelude helper `hy_n5_make`.\n- Added `TypeExpr::Array` arm to `n5_zero_init` so fixed array types `[N]T` auto-allocate and initialize every element via IIFE `func() (hyArr [N]T)`.\n- Padded trailing unkeyed elements in partial array literals `[N]T{...}` with element N5 zero inits.\n- Registered `tests/checker-corpus/n5-zero-map-allocation-sites.hy` as an ACCEPT fixture and bumped corpus census to 127 programs across all 5 census surfaces.\n- Added byte-exact corpus output test in `compiler/crates/hyb/tests/spec_n5_zero_maps.rs` and emission tests in `compiler/crates/hy-emit/tests/n5_zero_map_lowering.rs` (100% test pass rate).\n\nPayout Address: `0xC345C07229307d4f1c7935aD2cAe48e390215808` (Base / Polygon / Arbitrum USDC)",
+      "user": {
+        "login": "Dimank92",
+        "name": "Dimank92",
+        "email": null,
+        "avatar_url": "https://avatars.githubusercontent.com/u/204583967?v=4",
+        "id": 204583967
+      },
+      "id": 6349451669,
+      "pull_request_review_id": null,
+      "in_reply_to_id": null,
+      "created_at": null,
+      "updated_at": null,
+      "review": null,
+      "side": null,
+      "line": null,
+      "start_line": null,
+      "path": null,
+      "body_html": "<p dir=\"auto\">/claim <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5985059268\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1206\" data-hovercard-type=\"issue\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/issues/1206/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1206\">#1206</a> Fixes <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5985059268\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1206\" data-hovercard-type=\"issue\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/issues/1206/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1206\">#1206</a> with comprehensive allocation-site lowering and end-to-end tests: <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5986058887\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1207\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/pull/1207/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/pull/1207\">#1207</a></p>\n<ul dir=\"auto\">\n<li>Lowered <code class=\"notranslate\">make([]T, n[, c])</code> where element type requires N5 zero initialization via generic prelude helper <code class=\"notranslate\">hy_n5_make</code>.</li>\n<li>Added <code class=\"notranslate\">TypeExpr::Array</code> arm to <code class=\"notranslate\">n5_zero_init</code> so fixed array types <code class=\"notranslate\">[N]T</code> auto-allocate and initialize every element via IIFE <code class=\"notranslate\">func() (hyArr [N]T)</code>.</li>\n<li>Padded trailing unkeyed elements in partial array literals <code class=\"notranslate\">[N]T{...}</code> with element N5 zero inits.</li>\n<li>Registered <code class=\"notranslate\">tests/checker-corpus/n5-zero-map-allocation-sites.hy</code> as an ACCEPT fixture and bumped corpus census to 127 programs across all 5 census surfaces.</li>\n<li>Added byte-exact corpus output test in <code class=\"notranslate\">compiler/crates/hyb/tests/spec_n5_zero_maps.rs</code> and emission tests in <code class=\"notranslate\">compiler/crates/hy-emit/tests/n5_zero_map_lowering.rs</code> (100% test pass rate).</li>\n</ul>\n<p dir=\"auto\">Payout Address: <code class=\"notranslate\">0xC345C07229307d4f1c7935aD2cAe48e390215808</code> (Base / Polygon / Arbitrum USDC)</p>"
+    },
+    {
+      "url": "https://github.com/limitlessprojects/Go-Hybrid/issues/1206#issuecomment-6350167543",
+      "body": "Original reporter (`@planners1490`) Part 1 PR is now up at #1208 (https://github.com/limitlessprojects/Go-Hybrid/pull/1208).\n\n### Note for maintainer / triage on third-party PR #1207 (`@Dimank92`)\n1. **Original Reporter & Commit Provenance:** I (`@planners1490`) reported #1206 at `18:20 UTC` with the full `hy_n5_make` / `TypeExpr::Array` design and `n5-zero-map-allocation-sites.hy` specification in the issue body (*\"PR to follow, patch ready\"*), and committed `429665c` at `18:22 UTC` — prior to `@Dimank92`'s fork (`18:52 UTC`) and PR #1207 (`19:27 UTC`). Per `BOUNTY.md` (*\"Duplicates: the first reporter takes the payout\"*), discovery and fix credit belong to `@planners1490`.\n2. **Why #1208 is gate-clean whereas #1207 fails CI:**\n   - **All 7 census surfaces updated (`tools/check_corpus_census.py` exits 0):** PR #1207 only updated 5 surfaces and missed `.github/workflows/ci.yml`, `Makefile`, and `README.md` (leaving them at `126`), and stripped the UTF-8 BOM / introduced CRLF in `tests/checker-corpus/VERDICTS.md`.\n   - **`--package` mode (`emit_go_package`):** This PR injects `N5_MAKE_PRELUDE` in both binary and `--package` emission paths; #1207 omits `emit_go_package`.\n   - **Non-literal integer length/capacity types:** Go's `make` accepts any integer type (`int32`, `uint`, etc.), whereas generic `hy_n5_make` takes `int`; this PR wraps non-literal lengths/capacities in `int(...)`.\n   - **Part 2 (Read sites B1–B5):** Remains open in #1206 as designed.\n\n**Payout wallet (USDC on Solana):** `HcrbB5njK3AAbyJEpmQpZuYmBQrv6uNwbj1pZ3dSusPA`\n",
+      "user": {
+        "login": "planners1490",
+        "name": "planners1490",
+        "email": null,
+        "avatar_url": "https://avatars.githubusercontent.com/u/174942581?v=4",
+        "id": 174942581
+      },
+      "id": 6350167543,
+      "pull_request_review_id": null,
+      "in_reply_to_id": null,
+      "created_at": null,
+      "updated_at": null,
+      "review": null,
+      "side": null,
+      "line": null,
+      "start_line": null,
+      "path": null,
+      "body_html": "<p dir=\"auto\">Original reporter (<code class=\"notranslate\">@planners1490</code>) Part 1 PR is now up at <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5986614149\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1208\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/pull/1208/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/pull/1208\">#1208</a> (<a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5986614149\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1208\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/pull/1208/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/pull/1208\">#1208</a>).</p>\n<h3 dir=\"auto\">Note for maintainer / triage on third-party PR <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5986058887\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1207\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/pull/1207/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/pull/1207\">#1207</a> (<code class=\"notranslate\">@Dimank92</code>)</h3>\n<ol dir=\"auto\">\n<li><strong>Original Reporter &amp; Commit Provenance:</strong> I (<code class=\"notranslate\">@planners1490</code>) reported <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5985059268\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1206\" data-hovercard-type=\"issue\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/issues/1206/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1206\">#1206</a> at <code class=\"notranslate\">18:20 UTC</code> with the full <code class=\"notranslate\">hy_n5_make</code> / <code class=\"notranslate\">TypeExpr::Array</code> design and <code class=\"notranslate\">n5-zero-map-allocation-sites.hy</code> specification in the issue body (<em>\"PR to follow, patch ready\"</em>), and committed <code class=\"notranslate\">429665c</code> at <code class=\"notranslate\">18:22 UTC</code> — prior to <code class=\"notranslate\">@Dimank92</code>'s fork (<code class=\"notranslate\">18:52 UTC</code>) and PR <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5986058887\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1207\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/pull/1207/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/pull/1207\">#1207</a> (<code class=\"notranslate\">19:27 UTC</code>). Per <code class=\"notranslate\">BOUNTY.md</code> (<em>\"Duplicates: the first reporter takes the payout\"</em>), discovery and fix credit belong to <code class=\"notranslate\">@planners1490</code>.</li>\n<li><strong>Why <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5986614149\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1208\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/pull/1208/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/pull/1208\">#1208</a> is gate-clean whereas <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5986058887\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1207\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/pull/1207/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/pull/1207\">#1207</a> fails CI:</strong>\n<ul dir=\"auto\">\n<li><strong>All 7 census surfaces updated (<code class=\"notranslate\">tools/check_corpus_census.py</code> exits 0):</strong> PR <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5986058887\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1207\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/pull/1207/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/pull/1207\">#1207</a> only updated 5 surfaces and missed <code class=\"notranslate\">.github/workflows/ci.yml</code>, <code class=\"notranslate\">Makefile</code>, and <code class=\"notranslate\">README.md</code> (leaving them at <code class=\"notranslate\">126</code>), and stripped the UTF-8 BOM / introduced CRLF in <code class=\"notranslate\">tests/checker-corpus/VERDICTS.md</code>.</li>\n<li><strong><code class=\"notranslate\">--package</code> mode (<code class=\"notranslate\">emit_go_package</code>):</strong> This PR injects <code class=\"notranslate\">N5_MAKE_PRELUDE</code> in both binary and <code class=\"notranslate\">--package</code> emission paths; <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5986058887\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1207\" data-hovercard-type=\"pull_request\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/pull/1207/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/pull/1207\">#1207</a> omits <code class=\"notranslate\">emit_go_package</code>.</li>\n<li><strong>Non-literal integer length/capacity types:</strong> Go's <code class=\"notranslate\">make</code> accepts any integer type (<code class=\"notranslate\">int32</code>, <code class=\"notranslate\">uint</code>, etc.), whereas generic <code class=\"notranslate\">hy_n5_make</code> takes <code class=\"notranslate\">int</code>; this PR wraps non-literal lengths/capacities in <code class=\"notranslate\">int(...)</code>.</li>\n<li><strong>Part 2 (Read sites B1–B5):</strong> Remains open in <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5985059268\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1206\" data-hovercard-type=\"issue\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/issues/1206/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1206\">#1206</a> as designed.</li>\n</ul>\n</li>\n</ol>\n<p dir=\"auto\"><strong>Payout wallet (USDC on Solana):</strong> <code class=\"notranslate\">HcrbB5njK3AAbyJEpmQpZuYmBQrv6uNwbj1pZ3dSusPA</code></p>"
+    },
+    {
+      "url": "https://github.com/limitlessprojects/Go-Hybrid/issues/1206#issuecomment-6360632096",
+      "body": "/attempt #1206",
+      "user": {
+        "login": "dancerdan15",
+        "name": "dancerdan15",
+        "email": null,
+        "avatar_url": "https://avatars.githubusercontent.com/u/40263110?v=4",
+        "id": 40263110
+      },
+      "id": 6360632096,
+      "pull_request_review_id": null,
+      "in_reply_to_id": null,
+      "created_at": null,
+      "updated_at": null,
+      "review": null,
+      "side": null,
+      "line": null,
+      "start_line": null,
+      "path": null,
+      "body_html": "<p dir=\"auto\">/attempt <a class=\"issue-link js-issue-link\" data-error-text=\"Failed to load title\" data-id=\"5985059268\" data-permission-text=\"Title is private\" data-url=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1206\" data-hovercard-type=\"issue\" data-hovercard-url=\"/limitlessprojects/Go-Hybrid/issues/1206/hovercard\" href=\"https://github.com/limitlessprojects/Go-Hybrid/issues/1206\">#1206</a></p>"
+    }
+  ],
+  "url": "https://github.com/limitlessprojects/Go-Hybrid/issues/1206",
+  "title": "limitlessprojects/Go-Hybrid Issue #1206 comments",
+  "display_url": "https://github.com/limitlessprojects/Go-Hybrid/issues/1206",
+  "display_title": "limitlessprojects/Go-Hybrid Issue #1206 comments"
+}

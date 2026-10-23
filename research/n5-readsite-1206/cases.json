@@ -1,0 +1,67 @@
+[
+  {
+    "name": "B1_nested_missing",
+    "expected": "panic",
+    "stdout": ""
+  },
+  {
+    "name": "B2_extracted_missing",
+    "expected": "panic",
+    "stdout": ""
+  },
+  {
+    "name": "B3_struct_missing",
+    "expected": "panic",
+    "stdout": ""
+  },
+  {
+    "name": "B4_struct_comma_ok",
+    "expected": "panic",
+    "stdout": ""
+  },
+  {
+    "name": "B5_closed_channel",
+    "expected": "panic",
+    "stdout": ""
+  },
+  {
+    "name": "X1_closed_comma_ok",
+    "expected": "panic",
+    "stdout": ""
+  },
+  {
+    "name": "C1_declared",
+    "expected": "ok",
+    "stdout": "1 2 3\n"
+  },
+  {
+    "name": "C2_existing_alias",
+    "expected": "ok",
+    "stdout": "2 2 true 1\n"
+  },
+  {
+    "name": "C3_missing_readonly",
+    "expected": "ok",
+    "stdout": "false 0 0\n"
+  },
+  {
+    "name": "C4_existing_struct",
+    "expected": "ok",
+    "stdout": "4 true 1\n"
+  },
+  {
+    "name": "C5_closed_scalar",
+    "expected": "ok",
+    "stdout": "0 false\n"
+  },
+  {
+    "name": "C6_closed_map_readonly",
+    "expected": "ok",
+    "stdout": "false false 0 0\n"
+  },
+  {
+    "name": "C7_evaluation_once",
+    "expected": "ok",
+    "stdout": "1 1 5\n"
+  }
+]
