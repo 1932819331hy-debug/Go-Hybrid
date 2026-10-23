@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor: resolve relative HYB executable overrides from the caller directory before changing to workloads. Three baseline failures cover wrong compiler selection and spaced parent paths; all 13 workload tests pass after repair including absolute/PATH/default controls. Full battery and upstream CI remain delivery gates.
+
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
