@@ -5,6 +5,8 @@ import io
 import json
 import os
 import pathlib
+import select
+import tracemalloc
 import subprocess
 import sys
 import tempfile
@@ -236,6 +238,94 @@ class RunnerFailureTests(unittest.TestCase):
 
 
 class BoundedCaptureTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux subreaper fixture')
+    def test_inherited_stdout_does_not_block_exit_or_timeout(self):
+        # The helper adopts/reaps the real grandchild, which holds stdout open
+        # until this test explicitly releases stdin. No sleep guesses or orphans.
+        helper = r'''
+import ctypes, importlib.util, json, os, sys, threading
+assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
+spec = importlib.util.spec_from_file_location('runner', sys.argv[1])
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+command = r"""
+import os, signal, sys
+r, w = os.pipe()
+alive_r, alive_w = os.pipe()
+if os.fork() == 0:
+    os.close(alive_w)
+    os.close(r)
+    os.write(1, b'grandchild-progress\n')
+    os.write(w, b'R')
+    os.close(w)
+    if sys.argv[1] == 'drain':
+        os.read(alive_r, 1)  # EOF proves the direct parent has exited.
+        os.write(1, b'x' * 32000 + b'late-diagnostic\n')
+    else:
+        sys.stdin.buffer.read(1)
+    os._exit(0)
+os.close(alive_r)
+os.close(w)
+os.read(r, 1)
+os.close(r)
+if sys.argv[1] == 'timeout':
+    signal.pause()
+raise SystemExit(7)
+"""
+result = runner.run_cmd([sys.executable, '-c', command, sys.argv[2]], 0.5)
+print(json.dumps([result, len(threading.enumerate())]), flush=True)
+while True:
+    try:
+        os.waitpid(-1, 0)
+    except ChildProcessError:
+        break
+'''
+        for mode in ('exit', 'timeout', 'drain'):
+            with self.subTest(mode=mode):
+                with subprocess.Popen(
+                    [sys.executable, '-c', helper, runner.__file__, mode],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ) as proc:
+                    try:
+                        ready, _, _ = select.select([proc.stdout], [], [], 4)
+                        self.assertTrue(ready, 'run_cmd waited for inherited stdout EOF')
+                        result, threads = json.loads(proc.stdout.readline())
+                        code, duration, output = result
+                        self.assertEqual(code, 124 if mode == 'timeout' else 7)
+                        self.assertIn('late-diagnostic\n' if mode == 'drain'
+                                      else 'grandchild-progress\n', output)
+                        self.assertEqual(threads, 1, 'run_cmd leaked a reader thread')
+                        self.assertLess(duration, 3)
+                    finally:
+                        # Release and reap the fixture even when the old code hangs.
+                        _, errors = proc.communicate(input=b'R', timeout=5)
+                        self.assertEqual(proc.returncode, 0, errors.decode())
+
+    def test_closed_output_does_not_skip_process_exit_or_timeout(self):
+        for finish, expected in (('raise SystemExit(7)', 7),
+                                 ('import signal; signal.pause()', 124)):
+            with self.subTest(expected=expected):
+                code, _, output = runner.run_cmd(
+                    [sys.executable, '-c', 'import os; os.close(1); os.close(2); ' + finish],
+                    0.5)
+                self.assertEqual(code, expected)
+                self.assertEqual(output, '<<TIMEOUT after 0.5s>>' if expected == 124 else '')
+
+    def test_multibyte_and_invalid_utf8_tail_matches_full_decode(self):
+        for payload in (('prefix' + '\U0001f600' * 7000).encode(),
+                        b'prefix' + b'\xff\xe2\x82\xac' * 7000 + b'\xe2\x82'):
+            with self.subTest(size=len(payload)):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = pathlib.Path(directory) / 'bytes'
+                    path.write_bytes(payload)
+                    code, _, output = runner.run_cmd(
+                        [sys.executable, '-c',
+                         'import pathlib,sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())',
+                         str(path)], 10)
+                self.assertEqual(code, 0)
+                self.assertEqual(output, payload.decode('utf-8', 'replace')[-4000:])
+
     def test_large_stdout_and_stderr_keep_only_final_tail(self):
         # The old implementation collected every byte in subprocess.run()
         # before slicing to 4000 characters. These real subprocesses exercise
@@ -244,7 +334,13 @@ class BoundedCaptureTests(unittest.TestCase):
                    'sys.stdout.write("discard-me" + "x" * 8000000); '
                    'sys.stdout.flush(); '
                    'sys.stderr.write("last-error\\n"); sys.stderr.flush()')
-        code, _, output = runner.run_cmd([sys.executable, "-c", payload], 15)
+        tracemalloc.start()
+        try:
+            code, _, output = runner.run_cmd([sys.executable, "-c", payload], 15)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 1024 * 1024, "capture allocated more than 1 MiB")
         self.assertEqual(code, 0)
         self.assertLessEqual(len(output), 4000)
         self.assertTrue(output.endswith("last-error\n"))

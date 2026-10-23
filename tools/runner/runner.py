@@ -39,9 +39,9 @@ import json
 import os
 import platform
 import shutil
+import selectors
 import subprocess
 import sys
-import threading
 import time
 
 UTC = lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -53,7 +53,9 @@ def run_cmd(cmd, timeout, cwd=None, env=None):
     subprocess.run(capture_output=True) buffers the ENTIRE combined output
     before slicing it to 4,000 characters. A noisy build can exhaust the
     worker's RAM even though its summary retains only 1,500 characters.
-    Drain the child pipe concurrently into a small rolling byte buffer.
+    Drain the child pipe incrementally into a small rolling byte buffer.
+    After direct-child exit, allow at most one second for inherited stdout to
+    close. Timeout cleanup stops the direct child only (see separate PR #189).
     """
     start = time.monotonic()
     # Four-byte UTF-8 code points need at most 4 * 4000 bytes for the final
@@ -61,41 +63,68 @@ def run_cmd(cmd, timeout, cwd=None, env=None):
     capacity = 4 * 4000 + 4
     tail_bytes = bytearray()
 
-    def drain(stream):
-        try:
-            while True:
-                chunk = stream.read(8192)
-                if not chunk:
-                    break
-                tail_bytes.extend(chunk)
-                if len(tail_bytes) > capacity:
-                    del tail_bytes[:-capacity]
-        except (OSError, ValueError):
-            # A descendant can hold the pipe after the direct child exits;
-            # closing the stream after a bounded join must not crash the runner.
-            pass
-
     try:
+        deadline = None if timeout is None else start + timeout
         with subprocess.Popen(
             cmd if isinstance(cmd, list) else ["/bin/sh", "-c", cmd],
             cwd=cwd, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
         ) as proc:
-            reader = threading.Thread(target=drain, args=(proc.stdout,), daemon=True)
-            reader.start()
             try:
-                code = proc.wait(timeout=timeout)
-                timed_out = False
-            except subprocess.TimeoutExpired:
-                try:
-                    proc.kill()  # Existing contract: stop the direct child only.
-                except ProcessLookupError:
-                    pass
+                # A buffered reader thread cannot be stopped by closing its
+                # stream: close() waits for the lock held by a blocking read.
+                # Poll a nonblocking pipe in this thread instead, including
+                # while the direct child is still running and producing logs.
+                os.set_blocking(proc.stdout.fileno(), False)
+                with selectors.DefaultSelector() as selector:
+                    selector.register(proc.stdout, selectors.EVENT_READ)
+                    timed_out = False
+                    drain_deadline = None
+                    while True:
+                        now = time.monotonic()
+                        code = proc.poll()
+                        if code is None and deadline is not None and now >= deadline:
+                            proc.kill()  # Process-group cleanup remains separate (#189).
+                            proc.wait()
+                            timed_out = True
+                            code = proc.returncode
+                        if code is not None:
+                            if drain_deadline is None:
+                                drain_deadline = now + 1
+                            # Descendants may retain stdout. Give buffered logs
+                            # a bounded grace period without waiting for EOF.
+                            if not selector.get_map() or now >= drain_deadline:
+                                break
+                        elif not selector.get_map():
+                            # stdout can close before the command has finished.
+                            try:
+                                code = proc.wait(timeout=None if deadline is None
+                                                 else max(0, deadline - now))
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                                proc.wait()
+                                timed_out = True
+                            break
+                        limit = drain_deadline if code is not None else deadline
+                        wait = 0.05 if limit is None else min(0.05, max(0, limit - now))
+                        for key, _ in selector.select(wait):
+                            try:
+                                chunk = os.read(key.fd, 8192)
+                            except BlockingIOError:
+                                continue
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                                continue
+                            tail_bytes.extend(chunk)
+                            if len(tail_bytes) > capacity:
+                                del tail_bytes[:-capacity]
+                code = 124 if timed_out else proc.returncode
+            except BaseException:
+                # Reap the direct child even if pipe setup/draining fails.
+                if proc.poll() is None:
+                    proc.kill()
                 proc.wait()
-                code, timed_out = 124, True
-            # Reap buffered output without indefinitely waiting on a
-            # descendant that inherited the stdout file descriptor.
-            reader.join(timeout=1)
+                raise
             out = bytes(tail_bytes).decode("utf-8", "replace")
             if timed_out:
                 out += ("" if not out or out.endswith("\n") else "\n")
