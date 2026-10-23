@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor validation (2026-10-20): default `unittest discover` uses `test*.py`; the registration guard now mirrors this when `-p` is omitted and consumes value options once, refusing missing values. Restores behavior present in closed PR #705 but omitted from integrated main. Fresh `ec3fe0b` failed the real-discovery oracle and regression tests; 41 guard tests and all 446 Python tooling/runner/fuzz tests pass locally. Independent review exposed help-only and attached-short-option false registration in the first candidate; added real-CLI controls now cover both plus unknown options. Pinned compiler/runtime checks and upstream CI remain required.
+
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
@@ -263,3 +265,5 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 ## Contributor validation: submit revision lookup (2026-10-16)
 - Base 00610f7: resolve_head ignores failed git rev-parse, allowing an invalid revision/error message into a Kaggle upload and submitted.json. Abort before touching worker files or invoking Kaggle when HEAD lookup fails.
 - Three new offline tests: original two failures/one pass; patched all 11 job-test methods pass. Real temporary Git repositories cover unborn and committed HEAD; a mocked upload boundary verifies no push, payload mutation or submission record after lookup failure. git diff --check passes. No real Kaggle submission or compiler/Rust/Go suite run; maintainer CI remains required, including repair of existing workflow conflict markers (#339).
+
+- Integration validation (2026-10-23, main `7d63d5f`): default-discovery behavior and filtered/invalid-command exclusions survive the merge; 45 focused, 400 tooling, 29 runner and 21 fuzz tests pass. The focused suite fails on main in 28 subcases. Live registration, census, version declarations, conflict-marker, shell-syntax and whitespace checks pass. Compiler/runtime/corpus execution and upstream CI remain pending.

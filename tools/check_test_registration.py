@@ -11,10 +11,10 @@ since meant less than it looked.
 This guard resolves each test file the way the workflow would have to
 reference it, and fails closed on any file no reference reaches:
 
-  tools/**/test_*.py  run by `python3 -m unittest discover -s DIR -p PATTERN`
+  tools/**/test_*.py  run by `python3 -m unittest discover -s DIR [-p PATTERN]`
                       -> the file must lie inside DIR, be reachable through
                          package directories, and match PATTERN (a glob such
-                         as `test_job*.py` covers a family)
+                         as `test_job*.py` covers a family; default `test*.py`)
   tests/**/test_*.py  run directly, e.g. `python3 tests/test_install_runtime.py`
                       -> the path must be the invoked Python entry point
 
@@ -96,29 +96,48 @@ def registered_discoveries(workflow_text):
 
     Like the original guard, this reads explicit one-line commands run from
     the repository root; it is not a general shell/YAML or load_tests
-    interpreter.
+    interpreter. Method-filtered (-k) discovery cannot establish full-file
+    registration; a separate unfiltered invocation must reach the file.
     """
     discoveries = []
     for arguments in python_commands(workflow_text):
         if arguments[:3] != ["-m", "unittest", "discover"]:
             continue
-        start, pattern = ".", None
-        for index, argument in enumerate(arguments[3:], 3):
-            if argument in ("-s", "--start-directory") and index + 1 < len(arguments):
-                start = arguments[index + 1]
-            elif argument in ("-p", "--pattern") and index + 1 < len(arguments):
-                pattern = arguments[index + 1]
-            elif argument.startswith("--start-directory="):
-                start = argument.split("=", 1)[1]
-            elif argument.startswith("--pattern="):
-                pattern = argument.split("=", 1)[1]
+        start, pattern = ".", "test*.py"
+        options = iter(arguments[3:])
+        for argument in options:
+            if argument in ("--verbose", "--quiet", "--failfast", "--catch",
+                            "--buffer", "--locals") or re.fullmatch(r"-[vqfcb]+", argument):
+                continue
+            option, attached, value = argument.partition("=")
+            if argument[:2] in ("-s", "-p", "-t") and len(argument) > 2:
+                option, attached, value = argument[:2], True, argument[2:]
+                if value.startswith("="):
+                    value = value[1:]
+            if option not in ("-s", "--start-directory", "-p", "--pattern",
+                              "-t", "--top-level-directory"):
+                # Help exits before discovery; unknown or unsupported syntax
+                # cannot establish that any test runs.
+                pattern = None
+                break
+            if not attached:
+                value = next(options, None)
+                if value is None or value.startswith("-"):
+                    pattern = None
+                    break
+            # Consume each value once; attached forms and repeated options
+            # have the same last-value-wins behavior as unittest.
+            if option in ("-s", "--start-directory"):
+                start = value
+            elif option in ("-p", "--pattern"):
+                pattern = value
         if pattern is not None:
             discoveries.append((start, pattern))
     return discoveries
 
 
 def registered_patterns(workflow_text):
-    """Every `-p` pattern the workflow passes to `unittest discover`."""
+    """Every explicit or default pattern used by `unittest discover`."""
     return [pattern for _, pattern in registered_discoveries(workflow_text)]
 
 
@@ -128,9 +147,10 @@ def is_registered_discover(name, patterns):
 
 def is_reached_discover(root, relpath, start, pattern):
     """Mirror discovery's directory boundary without importing test code."""
-    target = (Path(root) / relpath).resolve()
-    start_dir = (Path(root) / start).resolve()
-    if not start_dir.is_dir() or not target.is_relative_to(start_dir):
+    root_dir = Path(root).resolve()
+    target = (root_dir / relpath).resolve()
+    start_dir = (root_dir / start).resolve()
+    if not start_dir.is_dir() or not start_dir.is_relative_to(root_dir) or not target.is_relative_to(start_dir):
         return False
     if not is_registered_discover(target.name, [pattern]):
         return False
