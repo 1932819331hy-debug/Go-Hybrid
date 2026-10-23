@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor validation (2026-10-23): release packaging preserves `HYB_CC` through both Cargo builds and linux/arm64 smoke builds, including spaces and literal glob characters. Base `7d63d5f` fails four new offline cases; native/plain controls pass. Eight packaging tests pass after the fix, and pinned Go 1.26.9 cgo probes confirm whitespace/single-quote/double-quote paths. This is argument handling, not a new cross-platform bridge validation; full delivery checks remain with the lead.
+
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
