@@ -14,7 +14,7 @@ The first WASM build failed because its standard-library target was not installe
 
 ## Current request-path measurements
 
-Linux/amd64, Go 1.26.9, Wazero 1.9.0; five visible CPUs, GOMAXPROCS=2. This is one batch, one representative reject fixture, 25 copied files and 100 sequential fixed-width edits, with 10 warmups. The timer starts after each write and checks only the edited file. Each of the 100 records contains native, public and experimental guest timings; native/public order alternates. Cold initialization is separate. Nearest-rank medians were independently recomputed from the preserved samples.
+Linux/amd64, Go 1.26.9, Wazero 1.9.0; five visible CPUs, GOMAXPROCS=2. This is one batch, one representative reject fixture, 25 copied files and 100 sequential fixed-width edits, with 10 warmups. The timer starts after each write and checks only the edited file. Each of the 100 records contains native, public and experimental guest timings; the execution order cyclically rotates all three modes. Cold initialization is separate. Nearest-rank medians were independently recomputed from the preserved samples.
 
 | Request path | p50 ms | p95 ms | p99 ms |
 | --- | ---: | ---: | ---: |
