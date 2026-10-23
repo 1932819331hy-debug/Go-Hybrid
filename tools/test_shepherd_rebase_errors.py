@@ -91,6 +91,15 @@ class RebaseErrors(unittest.TestCase):
     def test_forbidden_is_not_a_merge_conflict(self):
         self.assert_non_conflict_failure(403)
 
+    def test_exhausted_secondary_rate_limit_is_not_a_merge_conflict(self):
+        calls, logs, sleeps = self.run_rebase(403, "secondary rate limit exceeded")
+        self.assertEqual(3, sleeps)
+        self.assertEqual(4, sum(c[0] == "PUT" for c in calls))
+        self.assertIn("#12 FAILED:", logs)
+        self.assertIn("-> 403", logs)
+        self.assertNotIn("CAS ok", logs)
+        self.assertEqual([], [c for c in calls if c[0] == "POST"])
+
     def test_exhausted_rate_limit_is_not_a_merge_conflict(self):
         self.assert_non_conflict_failure(429)
 
