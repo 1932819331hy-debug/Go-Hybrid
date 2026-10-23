@@ -1,7 +1,5 @@
 # Hybrid Language: Development Plan
 
-- Contributor validation (2026-10-22, related to #979): duplicate classification now requires complete text patches, the same merge base and an identical result tree. The public #608/#786 path-only false cluster is reproduced before the fix and separated after it. 38 offline collection-to-classification tests passed locally, including malformed-range, EOF-marker, response-shape and strict snapshot-total controls from independent review. Payout attribution and primary selection are unchanged; compiler/corpus/differential and remote CI were not run for this tooling-only change.
-
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
@@ -265,3 +263,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 ## Contributor validation: submit revision lookup (2026-10-16)
 - Base 00610f7: resolve_head ignores failed git rev-parse, allowing an invalid revision/error message into a Kaggle upload and submitted.json. Abort before touching worker files or invoking Kaggle when HEAD lookup fails.
 - Three new offline tests: original two failures/one pass; patched all 11 job-test methods pass. Real temporary Git repositories cover unborn and committed HEAD; a mocked upload boundary verifies no push, payload mutation or submission record after lookup failure. git diff --check passes. No real Kaggle submission or compiler/Rust/Go suite run; maintainer CI remains required, including repair of existing workflow conflict markers (#339).
+
+## PR #1164 merge validation — 2026-10-23
+
+Merged main `7d63d5fc25ceb525c2d0f6ec89a4ad608a6a5011` into the existing PR branch and retained its complete status history. Exact duplicate classification still requires complete textual patches, a verified common merge base and the same result tree. The shared HTTP client retains main's secondary-rate-limit retry handling; duplicate selection and payout policy are unchanged. Local `python3 -m unittest discover -s tools -p 'test_*.py' -v` passed all 425 tests, including 38 focused checks. Test-registration, conflict-marker and corpus-census guards, plus the net PR whitespace check against main, passed. The first broad run was blocked only by three localhost socket permission errors; the unchanged suite passed with sandbox network permission. Compiler/runtime gates and upstream CI for this new head remain pending; no live approval, branch-update, label or comment API calls were made.
