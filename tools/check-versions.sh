@@ -94,7 +94,12 @@ has_pin_declaration() {
                 }
             }
             if (quoted) clean = clean "\n"
-            if (!collecting && index(clean, "const" name ":") == 1) {
+            # Visibility changes remain unsupported, but still count as
+            # target declarations so a cfg-disabled private pin cannot mask
+            # an active stale public one.
+            declaration_start = clean
+            sub(/^pub(\([^)]*\))?/, "", declaration_start)
+            if (!collecting && index(declaration_start, "const" name ":") == 1) {
                 collecting = 1
                 declaration = ""
                 count++

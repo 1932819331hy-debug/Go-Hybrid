@@ -245,6 +245,31 @@ class CheckVersionsTests(unittest.TestCase):
                 self.assertDrift(
                     "hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
 
+    def test_visible_compiler_pin_cannot_hide_behind_disabled_supported_pin(self):
+        path = self.root / "compiler/crates/hyb/src/main.rs"
+        original = path.read_text(encoding="utf-8")
+        declaration = ('const PINNED_GO: &str = match option_env!("HYB_PINNED_GO") {\n'
+                       '    Some(v) => v,\n    None => "go1.26.9",\n};')
+        self.assertIn(declaration, original)
+        for visibility in ("pub ", "pub(crate) ", "pub(self) ", "pub(in crate) "):
+            with self.subTest(visibility=visibility):
+                replacement = ("#[cfg(any())]\n" + declaration + "\n"
+                               + visibility + declaration.replace("go1.26.9", "go1.26.8"))
+                path.write_text(original.replace(declaration, replacement), encoding="utf-8")
+                self.assertDrift(
+                    "hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
+
+    def test_visible_build_pin_cannot_hide_behind_disabled_supported_pin(self):
+        path = self.root / "compiler/crates/hyb/build.rs"
+        original = path.read_text(encoding="utf-8")
+        declaration = 'const DEFAULT_PIN: &str = "1.99.0";'
+        for visibility in ("pub ", "pub(crate) "):
+            with self.subTest(visibility=visibility):
+                path.write_text(original.replace(
+                    declaration, "#[cfg(any())]\n" + declaration + "\n"
+                    + visibility + declaration.replace("1.99.0", "1.98.0")), encoding="utf-8")
+                self.assertDrift("hyb build.rs DEFAULT_PIN != rust 1.99.0")
+
     def test_multiple_build_pin_declarations_fail_closed(self):
         path = self.root / "compiler/crates/hyb/build.rs"
         original = path.read_text(encoding="utf-8")
