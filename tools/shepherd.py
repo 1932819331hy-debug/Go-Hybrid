@@ -33,6 +33,7 @@ Every bot action leaves a comment or a label; the log is the audit trail.
 
 import argparse
 import base64
+import binascii
 import json
 import os
 import re
@@ -586,10 +587,25 @@ def cmd_log(args):
 
         def read_log():
             s, cur = gh.req("GET", "/repos/%s/contents/%s?ref=%s" % (gh.repo, path, branch))
-            if s == 404 or cur is None:
+            if s == 404:
                 return None, ""
-            content = base64.b64decode(cur.get("content") or "").decode(
-                "utf-8", errors="replace")
+            # A metadata-only response is not an empty file. Never append
+            # without the complete contents and SHA from the same snapshot.
+            if (s != 200 or not isinstance(cur, dict) or
+                    cur.get("type") != "file" or cur.get("encoding") != "base64" or
+                    not isinstance(cur.get("sha"), str) or not cur["sha"] or
+                    not isinstance(cur.get("content"), str) or
+                    type(cur.get("size")) is not int or cur["size"] < 0):
+                raise RuntimeError("log snapshot has no complete inline file content")
+            try:
+                # GitHub wraps base64 with newlines; reject other corruption.
+                encoded = cur["content"].replace("\r", "").replace("\n", "").encode("ascii")
+                raw = base64.b64decode(encoded, validate=True)
+                content = raw.decode("utf-8")
+            except (binascii.Error, UnicodeError) as e:
+                raise RuntimeError("log snapshot has invalid encoded content") from e
+            if len(raw) != cur["size"]:
+                raise RuntimeError("log snapshot content size does not match metadata")
             return cur["sha"], content
 
         for attempt in range(3):

@@ -126,7 +126,8 @@ class ProbeParser(unittest.TestCase):
 class ContentsAPI:
     """In-memory CAS store behind the real triage_bot.Gh HTTP client."""
 
-    def __init__(self, content, concurrent=(), fail_read=None, low_quota=False):
+    def __init__(self, content, concurrent=(), fail_read=None, low_quota=False,
+                 snapshots=None):
         self.content = content
         self.version = 1
         self.concurrent = list(concurrent)
@@ -134,6 +135,7 @@ class ContentsAPI:
         self.low_quota = low_quota
         self.puts = []
         self.reads = 0
+        self.snapshots = snapshots or {}
 
     def urlopen(self, request, timeout):
         method, url = request.get_method(), request.full_url
@@ -146,8 +148,11 @@ class ContentsAPI:
                 raise HTTPError(url, 403, "forbidden", {}, io.BytesIO(b"read failed"))
             if self.content is None:
                 raise HTTPError(url, 404, "missing", {}, io.BytesIO(b""))
-            status, data = 200, {"sha": str(self.version), "content":
-                base64.b64encode(self.content.encode()).decode()}
+            status, data = 200, {"type": "file", "sha": str(self.version),
+                "encoding": "base64", "size": len(self.content.encode()),
+                "content": base64.b64encode(self.content.encode()).decode()}
+            if self.reads in self.snapshots:
+                data = self.snapshots[self.reads]
         elif method == "PUT" and "/contents/" in url:
             payload = json.loads(request.data)
             self.puts.append(payload)
@@ -274,6 +279,68 @@ class LogAppend(unittest.TestCase):
         self.assertEqual(len(api.puts), 1)
         self.assertTrue(any("rate limit low" in m for m in messages))
         self.assertFalse(any(m.startswith("logged:") for m in messages))
+
+    def test_unavailable_inline_content_cannot_replace_existing_large_log(self):
+        original = self.EXISTING * 60000
+        snapshot = {"type": "file", "sha": "1", "encoding": "none",
+                    "content": "", "size": len(original.encode())}
+        api = ContentsAPI(original, snapshots={1: snapshot})
+        messages = self.run_log(api)
+        self.assertEqual(api.content, original)
+        self.assertEqual(api.puts, [])
+        self.assertEqual(api.reads, 1)
+        self.assertTrue(any("LOG-WRITE-FAILED (non-fatal" in m for m in messages))
+        self.assertFalse(any(m.startswith("logged:") for m in messages))
+
+    def test_invalid_snapshots_fail_nonfatally_without_overwriting_log(self):
+        valid = {"type": "file", "sha": "1", "encoding": "base64",
+                 "content": base64.b64encode(self.EXISTING.encode()).decode(),
+                 "size": len(self.EXISTING.encode())}
+        invalid = [None, [], {},
+                   {**valid, "type": "symlink"},
+                   {**valid, "sha": ""}, {**valid, "sha": 1},
+                   {**valid, "encoding": None},
+                   {**valid, "content": None},
+                   {**valid, "content": "a"},
+                   {**valid, "content": "!!!!"},
+                   {**valid, "content": "é"},
+                   {**valid, "content": "/w==", "size": 1},
+                   {**valid, "size": len(self.EXISTING.encode()) + 1},
+                   {**valid, "size": "20"}]
+        for snapshot in invalid:
+            with self.subTest(snapshot=snapshot):
+                api = ContentsAPI(self.EXISTING, snapshots={1: snapshot})
+                messages = self.run_log(api)
+                self.assertEqual(api.content, self.EXISTING)
+                self.assertEqual(api.puts, [])
+                self.assertEqual(api.reads, 1)
+                self.assertTrue(any("LOG-WRITE-FAILED (non-fatal" in m
+                                    for m in messages))
+                self.assertFalse(any(m.startswith("logged:") for m in messages))
+
+    def test_invalid_fresh_snapshot_stops_after_concurrent_append(self):
+        latest = self.EXISTING + self.OTHER
+        snapshot = {"type": "file", "sha": "2", "encoding": "none",
+                    "content": "", "size": len(latest.encode())}
+        api = ContentsAPI(self.EXISTING, [latest], snapshots={2: snapshot})
+        messages = self.run_log(api)
+        self.assertEqual(api.content, latest)
+        self.assertEqual(len(api.puts), 1)
+        self.assertEqual(api.reads, 2)
+        self.assertTrue(any("LOG-WRITE-FAILED (non-fatal" in m for m in messages))
+        self.assertFalse(any(m.startswith("logged:") for m in messages))
+
+    def test_wrapped_base64_preserves_unicode_content(self):
+        original = '{"note":"café"}\n'
+        encoded = base64.b64encode(original.encode()).decode()
+        snapshot = {"type": "file", "sha": "1", "encoding": "base64",
+                    "content": encoded[:8] + "\r\n" + encoded[8:] + "\n",
+                    "size": len(original.encode())}
+        api = ContentsAPI(original, snapshots={1: snapshot})
+        messages = self.run_log(api)
+        self.assert_appended(api, original)
+        self.assertEqual(len(api.puts), 1)
+        self.assertTrue(any(m.startswith("logged:") for m in messages))
 
 
 if __name__ == "__main__":
