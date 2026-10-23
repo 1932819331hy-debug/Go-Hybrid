@@ -31,3 +31,4 @@
 
 - PR #1179 integration (2026-10-23): main 7d63d5f merged without rewriting either history; 21 existing regression groups preserved. Light hygiene/registration/census pass; heavy current-head checks and hosted CI pending publication. Reporter umpireboulianne-design and overlapping #1175 attribution preserved.
 - PR #1179 verified source (2026-10-23, tested4034033): focused21/workspace1791/corpus126 and native joined+negative controls pass. Local differential remains38/40+86/86 due to unchanged VCS128 bridge failures; full fmt retains upstream drift. Final docs-only checkpoint preserves tested source; exact-head hosted CI and root publication remain delivery gates.
+- PR #1179 environment follow-up (2026-10-23): unchanged differential command passes40/40+86/86 outside filesystem sandbox on b05cdfb9 with the same compiler SHA256c082ddff; original VCS128 failure log retained. No source/buildvcs changes; hosted final-head CI remains required.
