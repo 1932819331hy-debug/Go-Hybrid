@@ -133,19 +133,22 @@ class LatestReleaseTests(unittest.TestCase):
 
     def test_unparseable_redirect_uses_complete_api_tag(self):
         tag = "v1.2.3+build.5"
-        for suffix in ("v1.2.3%2Bbuild.5", "v1.2.3/extra", "v1.2.3?extra"):
+        for suffix in ("v1.2.3%2Bbuild.5", "v1.2.3/extra", "v1.2.3?extra",
+                       "v9.0.0/tag/v1.2.3"):
             with self.subTest(suffix=suffix):
                 result = self.run_installer(tag, f"location: {RELEASES}/tag/{suffix}\n", api_tag=tag)
                 self.assert_installed(result, tag, api=True)
 
     def test_unparseable_redirect_and_failed_api_abort_before_download(self):
-        result = self.run_installer("v1.2.3", f"location: {RELEASES}/tag/v1.2.3%2Bbuild.5\n")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("could not resolve the latest release", result.stderr)
-        requests = [json.loads(line) for line in self.requests.read_text().splitlines()]
-        self.assertEqual(len(requests), 2)
-        self.assertEqual(requests[1][:2], ["-fsSL", API])
-        self.assertFalse(self.install.exists())
+        for suffix in ("v1.2.3%2Bbuild.5", "v9.0.0/tag/v1.2.3"):
+            with self.subTest(suffix=suffix):
+                result = self.run_installer("v1.2.3", f"location: {RELEASES}/tag/{suffix}\n")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("could not resolve the latest release", result.stderr)
+                requests = [json.loads(line) for line in self.requests.read_text().splitlines()]
+                self.assertEqual(len(requests), 2)
+                self.assertEqual(requests[1][:2], ["-fsSL", API])
+                self.assertFalse(self.install.exists())
 
     def test_pinned_build_metadata_bypasses_latest_resolution(self):
         tag = "v1.2.3+build.5"

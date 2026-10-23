@@ -30,3 +30,5 @@
 - OLD-NEXT (round 7): author-stage round 2 — the template/LLM boundary: try the closure/loan families (16 issues) with a BLOCK-expectation, seed Ghost-Fork P1 predictions BEFORE authoring (round-1 miss, recorded); Ornith-1.0/1.5-9B Kaggle arms on the residual (AUTHOR-STAGE.md §5); landing queue #801 #930 #985 #984 (bounty (T,error)-tail) #935 #904 #906 #815 #774 #991 #800 #923 #751 #931 #937 #972 #780 #818 #766 #824 #828; wildcard verdicts post 2026-11-01 to #365 (22 slots ready); W4 Phase-B ~2026-10-27 (do NOT hand-flip labels)
 
 - Contributor installer repair (2026-10-23): preserve complete latest-release tags including `+build` metadata; unsupported redirect suffixes use API fallback. Base `7d63d5f` reproduced wrong-prefix download/installation; 29 offline installer tests pass after the fix. Compiler/runtime build checks pending coordinated host validation.
+
+- Installer review follow-up (2026-10-23): anchor the known release URL so nested `/tag/` suffixes use API fallback; two added subcases fail on `e75d8cf` and pass with the repair. All 29 offline installer tests pass.
