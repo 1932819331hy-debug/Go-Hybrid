@@ -54,3 +54,7 @@ The [2026-10-19 archive](validation-2026-10-19/README.md) contains the byte-iden
 
 These preserved measurements precede the EOF diagnostic-position fix. They are not a rebenchmark or correctness evidence for a later source revision. The EOF fix changes token-table mapping, not the checker input or the public Engine.Check request boundary; its correctness is verified separately by the analyzer regressions.
 
+
+## Current-main local checkpoint — 2026-10-23
+
+[Source `0dfd117` and preserved raw samples](validation-2026-10-23/README.md) rerun the same 25-file/100-edit after-write proxy on actual main `7d63d5f` plus this spike. Native p50/p95/p99: **1.742706 / 2.570464 / 3.706351 ms**; public `Engine.Check`: **2.766830 / 3.893633 / 6.005418 ms**; experimental sequential guest: **1.810732 / 2.389948 / 2.718908 ms**. The public path remains slower on this host. Two subsequent processes sharing the opt-in compilation cache measured **573.906706 → 18.447271 ms** cold initialization. These are new local samples, not replacements for the byte-preserved hosted archives or an editor/whole-workspace/production-memory claim. The current correctness gate covers all 126 registered fixtures, with fresh same-checkout artifacts.
