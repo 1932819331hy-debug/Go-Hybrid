@@ -1,5 +1,6 @@
 # Hybrid Language: Development Plan
 
+- Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
 
@@ -271,3 +272,10 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 ## Contributor validation: submit revision lookup (2026-10-16)
 - Base 00610f7: resolve_head ignores failed git rev-parse, allowing an invalid revision/error message into a Kaggle upload and submitted.json. Abort before touching worker files or invoking Kaggle when HEAD lookup fails.
 - Three new offline tests: original two failures/one pass; patched all 11 job-test methods pass. Real temporary Git repositories cover unborn and committed HEAD; a mocked upload boundary verifies no push, payload mutation or submission record after lookup failure. git diff --check passes. No real Kaggle submission or compiler/Rust/Go suite run; maintainer CI remains required, including repair of existing workflow conflict markers (#339).
+
+## W-012 main integration — 2026-10-23
+
+- Merge actual main `7d63d5fc25ceb525c2d0f6ec89a4ad608a6a5011` into original PR head `8a9e1d5`; preserve history and main STATUS verbatim, append scoped progress. M1 remains pending November 1.
+- Qualify the old 18.7× reused-guest result at its source and benchmark summary. Public `Engine.Check` uses a fresh guest per call; historical public/native 2.143/1.204 ms and 2.096/1.150 ms comparisons favor native. No current-head speed claim.
+- W012 hygiene check previously omitted three unformatted analyzer test files; format those files and enforce module-wide gofmt. No checker semantics or runtime-lifetime changes.
+- Publish checkpoint before heavy jobs. Required next: same-checkout locked native/WASM release builds, full-envelope parity, full Go race/vet and Go-only consumer, 25-file/100-edit benchmark with raw hashes/samples, hosted quick/compiler and W012 validation. Results and exact SHA to follow; historical green workflows are not current evidence.

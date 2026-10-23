@@ -470,11 +470,11 @@ func main() {
 	speedupMean := subprocStats.Mean / sEWarm.Mean
 
 	fmt.Println("================================================================================")
-	fmt.Printf("COMPILE-ONLY BREAK-EVEN ESTIMATES (%d ITERATIONS; excludes instantiation/startup):\n", iterations)
+	fmt.Printf("EXPERIMENTAL REUSED-GUEST COMPILE-ONLY BREAK-EVEN (%d ITERATIONS; excludes instantiation/startup; NOT public Engine.Check):\n", iterations)
 	fmt.Printf(" [Primary: p50-based Metrics]\n")
 	fmt.Printf("  • Native CLI Subprocess p50:                 %.3f ms\n", subprocStats.P50)
 	fmt.Printf("  • Validated Reused-Instance WASM p50:             %.3f ms\n", sEWarm.P50)
-	fmt.Printf("  • Representative Steady-State Speedup (p50): %.1fx\n", speedupP50)
+	fmt.Printf("  • Native / Experimental Reused-Guest Ratio (p50): %.1fx\n", speedupP50)
 	fmt.Printf("  • Latency Advantage per Check (delta_T p50): %.3f ms\n", savingsP50)
 	fmt.Printf("  • Cold Compile Overhead (T_compile_cold p50):%.3f ms\n", sACompile.P50)
 	fmt.Printf("  -> Break-Even (Cold / No Cache, p50):        %s\n", compileBreakEven(sACompile.P50, savingsP50))
@@ -488,7 +488,7 @@ func main() {
 	fmt.Println("\n [Secondary: Outlier-Sensitive Mean Metrics]")
 	fmt.Printf("  • Native CLI Subprocess Mean:                %.3f ms\n", subprocStats.Mean)
 	fmt.Printf("  • Validated Reused-Instance WASM Mean:            %.3f ms\n", sEWarm.Mean)
-	fmt.Printf("  • Ratio of Means (Mean Speedup):             %.1fx\n", speedupMean)
+	fmt.Printf("  • Native / Experimental Reused-Guest Mean Ratio:             %.1fx\n", speedupMean)
 	fmt.Printf("  -> Break-Even (Cold / No Cache, Mean):       %s\n", compileBreakEven(sACompile.Mean, savingsMean))
 	if len(caseDCompile) > 0 {
 		sDComp := calcStats(caseDCompile)

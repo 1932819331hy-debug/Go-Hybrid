@@ -1,11 +1,11 @@
-> Historical spike record. For the current corrected Go-wrapper checks and freshly measured latency, use [validation-2026-10-18](validation-2026-10-18/README.md). The old speedup figures below do not describe the current analyzer path.
+> Historical spike record. The 18.7× ratio below belongs only to an already-instantiated experimental guest on the original host. It is not a confirmed speedup of public `Engine.Check`, whose separate 2026-10-18 snapshot measured 2.143 ms p50 versus native 1.204 ms. See [that historical snapshot](validation-2026-10-18/README.md), the [preserved 100-edit samples](validation-2026-10-19/README.md), and the [current M1 decision brief](../../W012_M1_REVIEW.md) for path and source boundaries. Current integrated-head validation is separate.
 
 # Confirmatory Replication Protocol & Results Ledger: W-012 In-Process Analyzer Spike
 
 ## 0. Preregistration Notice & Protocol Status
 > [!IMPORTANT]
 > **Exploratory measurements were already observed before this preregistration.**
-> 
+>
 > In accordance with Go-Hybrid spike measurement protocol, this document registers a formal **confirmatory replication**. The hypotheses, targets, sample counts, and execution commands below were locked in at commit `58ad41ae78f240680525a634aad8309fc9ad7281` prior to executing the 100-iteration confirmatory benchmark and test ledger.
 
 - **Baseline Upstream Commit**: `e2a5f7d5eb90becb210df274765adfa50c99b21b` (`upstream/main`)
@@ -22,7 +22,7 @@
 |---|---|---|---|---|
 | **Target 1** | Corpus Parity | 55/55 fixtures match native CLI as normalized parsed JSON envelopes (input filenames normalized only) | 100.0% parity (0 diffs) | **CONFIRMED (55/55, 100.0%)** |
 | **Target 2** | Native CLI Subprocess | Original 15–40 ms assumption overstated; p50 < 8 ms | Documented baseline | **FALSIFIED / OVERSTATED** (p50: 5.038 ms) |
-| **Target 3** | Steady-State WASM Speedup | Warm in-process check p50 < 1.0 ms; speedup $\ge 10\times$ | p50 ratio $\ge 10\times$ | **CONFIRMED** (p50: 0.269 ms, **18.7x speedup**) |
+| **Target 3** | Steady-State WASM Speedup | Warm in-process check p50 < 1.0 ms; speedup $\ge 10\times$ | p50 ratio $\ge 10\times$ | **HISTORICAL REUSED-GUEST ONLY** (p50: 0.269 ms, 18.7x); public-path target unproven |
 | **Target 4** | Filesystem Cache Break-Even | FS cache reduces compile by $>90\%$; break-even $\le 5$ checks | $N_{\text{break-even}} \le 5$ | **CONFIRMED** (Compile: 12.919 ms, **3 checks**) |
 | **Target 5** | Failure-Domain Separation | Failures fail closed to `AnalysisFailure`, disjoint from Reject | 100% pass on 5 fault injections | **CONFIRMED** (5/5 injected faults caught) |
 | **Target 6** | On-Disk Analyzer & Position | On-disk discovery works via `os.ReadDir`; exact positions via `Fset.AddFile` | Exact `line:col` in `go vet` | **CONFIRMED** (`sibling.hy:7:13`) |

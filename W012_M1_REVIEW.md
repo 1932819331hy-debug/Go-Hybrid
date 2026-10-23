@@ -1,6 +1,22 @@
 # W012 M1 evidence: current validation and historical snapshots
 
-## Reviewer decision brief (2026-10-19 JST)
+## Current delivery checkpoint (2026-10-23 UTC)
+
+PR #556 originally pointed to `8a9e1d5546d96d6734ff4a8dc3213f81eca91280`. This repair merges actual main `7d63d5fc25ceb525c2d0f6ec89a4ad608a6a5011`, retaining the original history and every main STATUS line. Only STATUS conflicted. Current-head correctness and performance checks must be rerun; the completed runs below validate their historical trees, not this integration. M1 review remains scheduled for November 1; acceptance, merge and award remain maintainer decisions.
+
+### Request-path interpretation
+
+| Evidence | Timed boundary | What the result supports |
+| --- | --- | --- |
+| Original 0.269 ms / 18.7× prototype | Already instantiated guest versus native subprocess; earlier host and harness | Historical experimental result only; no current public-path speedup |
+| 2026-10-18 raw 100-sample snapshot | Public `Engine.Check` 2.143 ms p50 versus native subprocess plus strict JSON decoding 1.204 ms; reused guest 1.097 ms | Public path was about 1.78× the native latency on that host |
+| Archived 2026-10-19 25-file/100-edit proxy | Public 2.096 ms p50 versus native 1.150 ms; reused guest 1.451 ms; timer starts after writing, only the changed file checked | Public path was slower; no whole-workspace or editor latency conclusion |
+
+The current implementation compiles WASM once, then `Engine.Check` installs a 30-second context and `WasmEngine.CheckSource` instantiates and closes a disposable guest for every request. The separate sequential reused-guest control omits that lifetime cost. Compilation caches affect cold module compilation, not guest-per-request lifetime. Source changes, different hosts, cancellation support and changed validation prevent interpreting the snapshots as a controlled regression trend. New measurements must retain native/WASM hashes and raw samples; neither a faster control nor old CI can substitute for testing this exact integrated source.
+
+The archived JSON files are unchanged. The earlier warning-policy caveat in the PR description and 2026-10-18 snapshot is historical: the current vet adapter preserves structured warnings in `Engine.Check` but reports only errors through `analysis.Diagnostic`, so accepted warning-only source does not fail vet.
+
+## Historical reviewer decision brief (2026-10-19 JST)
 
 **Status: W-012 is scheduled for the 2026-11-01 M1 review. It is not yet M1-awarded or merged.** This is an executable feasibility and falsification record for embedding the existing Rust checker, not a production toolchain replacement or completed IDE integration.
 
@@ -427,4 +443,3 @@ go vet -vettool=/tmp/hybvet ./testpkg
 ```
 
 Benchmark provenance: all canonical 100-run timing figures above are the recorded snapshot at `b3d73c2c3f211f69e856abd089adc4cad9a21f50`, before this closeout added envelope validation. They were not rerun or relabeled as measurements of the changed wrapper. The added validation cost and end-to-end editor latency remain unmeasured. The parity script's per-file timings are separate and are not the canonical benchmark. Long-duration memory behavior remains unproven. Stock-gopls plugins, unsaved `.hy` buffers, and a completed standalone LSP are not demonstrated.
-

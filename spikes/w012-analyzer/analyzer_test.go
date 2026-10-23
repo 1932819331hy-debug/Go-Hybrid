@@ -126,9 +126,9 @@ func TestContextLogConcurrentAccess(t *testing.T) {
 
 func TestContextLogSnapshotDoesNotAliasCallerOrStoredSlices(t *testing.T) {
 	original := PassContextLog{
-		PkgPath: "example.org/test",
-		GoFiles: []string{"main.go"},
-		OtherFiles: []string{"other.hy"},
+		PkgPath:      "example.org/test",
+		GoFiles:      []string{"main.go"},
+		OtherFiles:   []string{"other.hy"},
 		IgnoredFiles: []string{"ignored.hy"},
 		FoundHyFiles: []string{"DirScan:other.hy"},
 	}
@@ -264,7 +264,7 @@ func TestDeclaredAndScannedHybridPathsAreCanonicalAndReportedOnce(t *testing.T) 
 				Files:      []*ast.File{goFile},
 				OtherFiles: []string{relative, hyPath},
 				ReadFile:   tc.readFile,
-				Report: func(d analysis.Diagnostic) { reported = append(reported, d) },
+				Report:     func(d analysis.Diagnostic) { reported = append(reported, d) },
 			}
 			if _, err := run(pass); err != nil {
 				t.Fatal(err)

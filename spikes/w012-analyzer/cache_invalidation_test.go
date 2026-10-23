@@ -180,11 +180,11 @@ func TestHybridSnapshotRejectsChangedFileAtAnalysisRead(t *testing.T) {
 			}
 			pass := &analysis.Pass{
 				Analyzer: Analyzer,
-				Pkg: types.NewPackage("sample", "sample"),
-				Fset: fset,
-				Files: []*ast.File{anchor},
+				Pkg:      types.NewPackage("sample", "sample"),
+				Fset:     fset,
+				Files:    []*ast.File{anchor},
 				ReadFile: os.ReadFile,
-				Report: func(analysis.Diagnostic) { t.Fatal("changed input must not emit stale diagnostics") },
+				Report:   func(analysis.Diagnostic) { t.Fatal("changed input must not emit stale diagnostics") },
 			}
 			if declared {
 				pass.OtherFiles = []string{file}

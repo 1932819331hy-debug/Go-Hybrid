@@ -31,9 +31,9 @@ func TestScannedSiblingDoesNotViolateReadFileContract(t *testing.T) {
 	count := 0
 	pass := &analysis.Pass{
 		Analyzer: Analyzer,
-		Pkg: types.NewPackage("sample", "sample"),
-		Fset: fset,
-		Files: []*ast.File{goFile},
+		Pkg:      types.NewPackage("sample", "sample"),
+		Fset:     fset,
+		Files:    []*ast.File{goFile},
 		ReadFile: func(name string) ([]byte, error) {
 			t.Errorf("undeclared Hybrid sibling %q must not be passed to ReadFile", name)
 			return nil, errors.New("file is not declared to analyzer")

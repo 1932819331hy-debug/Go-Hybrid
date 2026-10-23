@@ -76,11 +76,11 @@ jobs:
           set -euo pipefail
           go test -race -count=1 ./...
           go vet ./...
-      - name: Enforce gofmt for W-012 experiment and cache tests
+      - name: Enforce gofmt for the W-012 analyzer module
         working-directory: spikes/w012-analyzer
         run: |
           set -euo pipefail
-          unformatted="$(gofmt -l cmd/editbench/main.go cmd/editbench/main_test.go cmd/editbench/reused.go compilation_cache_test.go)"
+          unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then
             printf 'Unformatted Go files:\n%s\n' "$unformatted"
             exit 1
@@ -180,4 +180,3 @@ jobs:
           cp ../../tests/checker-corpus/09-a3-map-slot-valid.hy ./testpkg/sibling.hy
           "$RUNNER_TEMP/hybvet" vet ./testpkg
           echo "Go+prebuilt WASM check PASS; cargo/rustc not invoked."
-
