@@ -631,6 +631,35 @@ impl<'a> Collector<'a> {
     // -- declarations --------------------------------------------------------
 
     fn fn_decl(&mut self, f: &FnDecl) {
+        if f.receiver.is_none() {
+            if f.name == "main" && (!f.params.is_empty() || !f.type_params.is_empty()) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        f.span,
+                        "`fn main` must have no parameters — Go requires `func main` to have no arguments and no return values (HYB-E1002)".to_string(),
+                    )
+                    .with_notes(vec![
+                        "remove parameters from `fn main()`, or read CLI arguments via `os.args()`".to_string(),
+                    ]),
+                );
+            } else if f.name == "init"
+                && (!f.params.is_empty() || !f.results.is_empty() || !f.type_params.is_empty())
+            {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        f.span,
+                        "`fn init` must have no parameters and no return values — Go requires `func init` to have no arguments and no return values (HYB-E1002)".to_string(),
+                    )
+                    .with_notes(vec![
+                        "declare `fn init() { ... }` without parameters or return types".to_string(),
+                    ]),
+                );
+            }
+        }
         if let Some(r) = &f.receiver {
             self.ty(&r.ty);
         }
