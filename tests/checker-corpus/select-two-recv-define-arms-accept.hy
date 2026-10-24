@@ -16,6 +16,7 @@
 // int literals into buffered channels before any task exists.
 // ---- Expected verdict: ACCEPT (and must PARSE — the pre-fix parser
 // rejected this shape outright). ----
+// EXPECTED-VERDICT: ACCEPT
 
 fn main() {
     a := make(chan int, 1)

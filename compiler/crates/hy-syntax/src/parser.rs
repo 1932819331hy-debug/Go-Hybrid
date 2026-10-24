@@ -1539,8 +1539,12 @@ impl Parser {
             Tok::Punct("<-") => true,
             Tok::Ident(_) => match self.nth(1) {
                 Tok::Punct("<-") => true, // send arm: ch <- v:
-                // recv-define arm: v := <-ch:
-                Tok::Punct(":=") => matches!(self.nth(2), Tok::Punct("<-")),
+                // recv-define arm: v := <-ch: — a `:`/`=>` must terminate the
+                // channel expression, otherwise this is an arm-BODY statement
+                // (`v := <-m` inside a bare-recv arm's body, recv_target.rs).
+                Tok::Punct(":=") => {
+                    matches!(self.nth(2), Tok::Punct("<-")) && self.recv_arm_terminator_after(2)
+                }
                 Tok::Punct(",") => {
                     // recv-define arm: a, b := <-ch:
                     let mut k = 1;
@@ -1553,11 +1557,70 @@ impl Parser {
                     // after the walk k lands on `:=` (the last name was at k-1)
                     matches!(self.nth(k), Tok::Punct(":="))
                         && matches!(self.nth(k + 1), Tok::Punct("<-"))
+                        && self.recv_arm_terminator_after(k + 1)
                 }
                 _ => false,
             },
             _ => false,
         }
+    }
+
+    /// Lookahead from the `<-` at offset `arrow_at`: skip the channel
+    /// expression (identifier with postfix selector/index/paren chains) and
+    /// require the select-arm terminator `:` or `=>`. Body statements like
+    /// `v := <-m` end in anything else (next statement's token), so they are
+    /// not arm heads.
+    fn recv_arm_terminator_after(&self, arrow_at: usize) -> bool {
+        let mut k = arrow_at + 1;
+        // channel expression head
+        match self.nth(k) {
+            Tok::Ident(_) => k += 1,
+            _ => return false,
+        }
+        // postfix chains: .name, [expr], (args)
+        loop {
+            match self.nth(k) {
+                Tok::Punct(".") if matches!(self.nth(k + 1), Tok::Ident(_)) => k += 2,
+                Tok::Punct("[") => {
+                    let mut depth = 0i32;
+                    loop {
+                        match self.nth(k) {
+                            Tok::Punct("[") => depth += 1,
+                            Tok::Punct("]") => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    k += 1;
+                                    break;
+                                }
+                            }
+                            Tok::Eof => return false,
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                }
+                Tok::Punct("(") => {
+                    let mut depth = 0i32;
+                    loop {
+                        match self.nth(k) {
+                            Tok::Punct("(") => depth += 1,
+                            Tok::Punct(")") => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    k += 1;
+                                    break;
+                                }
+                            }
+                            Tok::Eof => return false,
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                }
+                _ => break,
+            }
+        }
+        matches!(self.nth(k), Tok::Punct(":" | "=>"))
     }
 
     fn place_of(&mut self, e: Expr) -> PResult<Place> {
