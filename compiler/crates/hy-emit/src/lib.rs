@@ -135,6 +135,15 @@ impl EmitError {
         }
     }
 
+    pub fn export_name_collision(name1: &str, name2: &str, go_name: &str) -> Self {
+        EmitError {
+            message: format!(
+                "exported function name collision: `{}` and `{}` both normalize to `{}` in package mode",
+                name1, name2, go_name
+            ),
+        }
+    }
+
     /// The honest unshipped-crate error (the adoption-audit follow-up): the
     /// checker's foreign table knows the crate's type shapes, but the
     /// runtime ships no binding for it — the program cannot build or run.
@@ -164,6 +173,20 @@ pub fn emit_go_package(
     pkg_name: &str,
     binding_prefix: &str,
 ) -> Result<String, EmitError> {
+    // Detect public function export name collisions in package mode (issue #1421)
+    let mut exported_fns: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for decl in &file.decls {
+        if let hy_syntax::Decl::Fn(f) = decl {
+            if f.is_pub && f.receiver.is_none() && !f.name.contains('.') {
+                let go_name = to_go_name(&f.name);
+                if let Some(prev) = exported_fns.get(&go_name) {
+                    return Err(EmitError::export_name_collision(prev, &f.name, &go_name));
+                }
+                exported_fns.insert(go_name, f.name.clone());
+            }
+        }
+    }
+
     let mut em = Emitter::new();
     em.package_name = pkg_name.to_string();
     em.binding_prefix = binding_prefix.to_string();
