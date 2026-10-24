@@ -722,6 +722,18 @@ fn render_build_error(e: &BuildError) -> String {
 }
 
 fn cmd_build(args: &[String]) -> ExitCode {
+    // An option cannot supply another option's value. Use ./--name for a
+    // literal path beginning with --; other single-dash paths remain valid.
+    for pair in args.windows(2) {
+        if matches!(
+            pair[0].as_str(),
+            "-o" | "--package" | "--out-dir" | "--binding-prefix"
+        ) && (pair[1].starts_with("--") || pair[1] == "-o")
+        {
+            eprintln!("option {} requires an argument\nusage: hyb build <file.hy> -o <bin-path> [--emit-go] | --package <name> --out-dir <dir> [--binding-prefix <path>]", pair[0]);
+            return ExitCode::from(2);
+        }
+    }
     // The .hy file: the first arg ending in .hy (flag values never do).
     let file = args.iter().find(|a| a.ends_with(".hy")).cloned();
     let Some(file) = file else {
