@@ -1394,15 +1394,8 @@ impl Emitter {
                 }
             }
             2 => {
-                let mut parts: Vec<String> = Vec::new();
-                for r in &f.results {
-                    let ty = self.type_text(&r.ty);
-                    match &r.name {
-                        Some(n) => parts.push(format!("{} {}", n, ty)),
-                        None => parts.push(ty),
-                    }
-                }
-                self.push_raw(&format!(" ({}) {{\n", parts.join(", ")));
+                let results = self.result_list_text(&f.results);
+                self.push_raw(&format!(" ({}) {{\n", results));
             }
             n => {
                 return Err(EmitError::unsupported(format!(
@@ -1421,6 +1414,40 @@ impl Emitter {
         }
         self.push("}");
         Ok(())
+    }
+
+    /// Render a result list without mixing named and unnamed Go parameters.
+    /// Besides rejecting `(code int, string)`, Go parses `(int, text string)`
+    /// as two named string results, so preserving a mixed Hybrid list verbatim
+    /// can change its types. Name every result only when the list is mixed;
+    /// fully named and fully unnamed lists retain their existing emission.
+    fn result_list_text(&mut self, results: &[FnResult]) -> String {
+        let mixed = results.iter().any(|r| r.name.is_some())
+            && results.iter().any(|r| r.name.is_none());
+        let mut used: BTreeSet<String> = results
+            .iter()
+            .filter_map(|r| r.name.clone())
+            .collect();
+        let mut parts = Vec::with_capacity(results.len());
+        for (i, r) in results.iter().enumerate() {
+            let ty = self.type_text(&r.ty);
+            match &r.name {
+                Some(n) => parts.push(format!("{} {}", n, ty)),
+                None if mixed => {
+                    let base = format!("hyR{}", i);
+                    let mut name = base.clone();
+                    let mut suffix = 0;
+                    while used.contains(&name) {
+                        suffix += 1;
+                        name = format!("{}_{}", base, suffix);
+                    }
+                    used.insert(name.clone());
+                    parts.push(format!("{} {}", name, ty));
+                }
+                None => parts.push(ty),
+            }
+        }
+        parts.join(", ")
     }
 
     fn main_ret_vars(&self, f: &FnDecl) -> String {
