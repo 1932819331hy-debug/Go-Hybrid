@@ -20,7 +20,10 @@
 use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
 use crate::walk::{self, Use};
 use hy_diag::{Diagnostic, FixIt, Span};
-use hy_syntax::{AssignOp, Expr, ForKind, InterpPart, LocalDecl, Place, PlaceKind, SelectArmKind, Stmt};
+use hy_syntax::{
+    AssignOp, Expr, ForKind, InterpPart, LocalDecl, LocalKind, Place, PlaceKind, SelectArmKind,
+    Stmt,
+};
 
 fn is_slot_loan_expr(e: &Expr) -> bool {
     if walk::addr_of_index_base_path(e).is_some() {
@@ -34,9 +37,13 @@ fn is_slot_loan_expr(e: &Expr) -> bool {
 
 impl<'a> Checker<'a> {
     /// After `process_local`: flag every name bound to `&m[k]` (including
-    /// parenthesized `(&m[k])` and `&(m[k])`).
+    /// parenthesized `(&m[k])` and `&(m[k])`). Only runs for define/let bindings
+    /// without explicit type ascriptions where hy-emit actually lowers the loan.
     pub(crate) fn mark_slot_loans_local(&self, st: &mut FnState, l: &LocalDecl) {
-        if l.names.len() != l.values.len() {
+        if !matches!(l.kind, LocalKind::Define | LocalKind::Let)
+            || l.ty.is_some()
+            || l.names.len() != l.values.len()
+        {
             return;
         }
         for (name, val) in l.names.iter().zip(l.values.iter()) {
@@ -51,7 +58,8 @@ impl<'a> Checker<'a> {
     /// After `process_assign`: `x = &m[k]` makes `x` a slot loan; a whole-value
     /// update (`x = T{...}`) to an already-active slot loan preserves `slot_loan`
     /// because the emitter keeps the O8 store-back active for `x` until its
-    /// last use or a shadowing declaration.
+    /// last use or a shadowing declaration. Loan marking only applies when all
+    /// assignment targets are identifiers matching values.
     pub(crate) fn mark_slot_loans_assign(
         &self,
         st: &mut FnState,
@@ -59,7 +67,10 @@ impl<'a> Checker<'a> {
         op: AssignOp,
         values: &[hy_syntax::Expr],
     ) {
-        if op != AssignOp::Assign || targets.len() != values.len() {
+        if op != AssignOp::Assign
+            || targets.len() != values.len()
+            || !targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)))
+        {
             return;
         }
         for (t, v) in targets.iter().zip(values.iter()) {
@@ -179,20 +190,29 @@ impl<'a> Checker<'a> {
     ) {
         match stmt {
             Stmt::Local(l) => {
+                let allow_slot_loan = matches!(l.kind, LocalKind::Define | LocalKind::Let)
+                    && l.ty.is_none()
+                    && l.names.len() == l.values.len();
                 for v in &l.values {
                     // `x := &m[k]` is the O8 slot-loan initializer: legal.
-                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, true);
+                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, allow_slot_loan);
                 }
             }
             Stmt::Assign {
-                targets, values, ..
+                targets,
+                op,
+                values,
+                ..
             } => {
                 for t in targets {
                     self.check_place_addr_of_loan_projections(st, t, include_direct_ident);
                 }
+                let allow_slot_loan = *op == AssignOp::Assign
+                    && targets.len() == values.len()
+                    && targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)));
                 for v in values {
                     // `x = &m[k]` is the slot-loan re-binding: legal.
-                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, true);
+                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, allow_slot_loan);
                 }
             }
             Stmt::Expr { expr, .. } => {
@@ -402,11 +422,6 @@ impl<'a> Checker<'a> {
             }
             Expr::StructLit { fields, .. } => {
                 for f in fields {
-                    // A6 (`holder{p: &m[k]}`) is already HYB-E3103 —
-                    // borrow-in-field; recurse for nested borrows only.
-                    if self.map_slot_borrow_span(st, &f.value).is_some() {
-                        continue;
-                    }
                     self.check_expr_addr_of_loan_projections(st, &f.value, include_direct_ident);
                 }
             }
