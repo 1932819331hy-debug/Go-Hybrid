@@ -519,6 +519,41 @@ fn named_results_on_plain_fn() {
 }
 
 #[test]
+fn mixed_results_on_plain_fn_are_uniformly_named() {
+    let go = emit("fn f() (code int, string) {\n    return 3, \"ok\"\n}\n");
+    assert!(
+        go.contains("func f() (code int, hyR1 string) {"),
+        "named-then-unnamed results must remain buildable:\n{}",
+        go
+    );
+
+    let go = emit("fn f() (int, text string) {\n    return 3, \"ok\"\n}\n");
+    assert!(
+        go.contains("func f() (hyR0 int, text string) {"),
+        "unnamed-then-named results must retain their types:\n{}",
+        go
+    );
+}
+
+#[test]
+fn mixed_results_on_fn_literal_are_uniformly_named() {
+    let go = emit(
+        "fn main() {\n    f := fn() (code int, string) {\n        return 3, \"ok\"\n    }\n}\n",
+    );
+    assert!(
+        go.contains("func() (code int, hyR1 string) {"),
+        "function literals use the same Go result-list rules:\n{}",
+        go
+    );
+}
+
+#[test]
+fn fully_unnamed_results_keep_their_compact_emission() {
+    let go = emit("fn f() (int, string) {\n    return 3, \"ok\"\n}\n");
+    assert!(go.contains("func f() (int, string) {"), ":\n{}", go);
+}
+
+#[test]
 fn method_receiver_and_struct_methods() {
     let go = emit("struct g {\n    n int\n}\n\nfn (p *g) add(x int) {\n    p.n += x\n}\n");
     assert!(go.contains("func (p *g) add(x int) {"), ":\n{}", go);
