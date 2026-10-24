@@ -1539,6 +1539,8 @@ impl Parser {
             Tok::Punct("<-") => true,
             Tok::Ident(_) => match self.nth(1) {
                 Tok::Punct("<-") => true, // send arm: ch <- v:
+                // recv-define arm: v := <-ch:
+                Tok::Punct(":=") => matches!(self.nth(2), Tok::Punct("<-")),
                 Tok::Punct(",") => {
                     // recv-define arm: a, b := <-ch:
                     let mut k = 1;
@@ -1548,9 +1550,9 @@ impl Parser {
                             _ => break,
                         }
                     }
-                    matches!(self.nth(k), Tok::Ident(_))
-                        && matches!(self.nth(k + 1), Tok::Punct(":="))
-                        && matches!(self.nth(k + 2), Tok::Punct("<-"))
+                    // after the walk k lands on `:=` (the last name was at k-1)
+                    matches!(self.nth(k), Tok::Punct(":="))
+                        && matches!(self.nth(k + 1), Tok::Punct("<-"))
                 }
                 _ => false,
             },
@@ -3638,6 +3640,65 @@ fn main() {
 ";
         if let Err(diags) = parse_file("t.hy", src) {
             panic!("default arm must parse: {:?}", diags);
+        }
+    }
+
+    #[test]
+    fn second_recv_define_select_arm_parses() {
+        // The arm-body terminator `looks_like_select_arm_head` recognized
+        // send arms (`ch <- v:`), bare recv arms (`<-ch:`), comma-ok
+        // recv-define arms (`v, ok := <-ch:` — and even that one with an
+        // off-by-one that made the final token check look for an Ident on
+        // `:=`), but NOT the single-name recv-define arm (`v := <-ch:`).
+        // Consequence: any select whose SECOND or later arm was a named
+        // recv-define died with "expected expression, found `:`" — the
+        // body loop swallowed the arm head as a local decl and choked on
+        // the trailing colon. Corpus 24 only ever paired one named arm
+        // with a bare arm, so the gap had zero coverage.
+        let two_named = "\
+fn main() {
+    a := make(chan int, 1)
+    b := make(chan int, 1)
+    select {
+        v := <-a:
+            fmt.println(v)
+        w := <-b:
+            fmt.println(w)
+    }
+}
+";
+        if let Err(diags) = parse_file("t.hy", two_named) {
+            panic!("two recv-define arms must parse: {:?}", diags);
+        }
+        let two_comma_ok = "\
+fn main() {
+    a := make(chan int, 1)
+    b := make(chan int, 1)
+    select {
+        v, ok := <-a:
+            fmt.println(v, ok)
+        w, ok2 := <-b:
+            fmt.println(w, ok2)
+    }
+}
+";
+        if let Err(diags) = parse_file("t.hy", two_comma_ok) {
+            panic!("two comma-ok recv-define arms must parse: {:?}", diags);
+        }
+        let named_then_comma_ok = "\
+fn main() {
+    a := make(chan int, 1)
+    b := make(chan int, 1)
+    select {
+        v := <-a:
+            fmt.println(v)
+        w, ok := <-b:
+            fmt.println(w, ok)
+    }
+}
+";
+        if let Err(diags) = parse_file("t.hy", named_then_comma_ok) {
+            panic!("named + comma-ok recv-define arms must parse: {:?}", diags);
         }
     }
 
