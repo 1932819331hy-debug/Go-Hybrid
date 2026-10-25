@@ -95,3 +95,76 @@ fn main() {
     );
     assert!(go.contains("b := box[int]{}"), ":\n{go}");
 }
+
+#[test]
+fn n5_parenthesized_map_operands_allocate() {
+    let go = emit_src(
+        "type counts = map[string]int\ntype chain = counts\n\
+         fn alias() *counts { return new((counts)) }\n\
+         fn nested() *chain { return new((((chain)))) }\n\
+         fn direct() *map[string]int { return new((map[string]int{})) }\n\
+         fn ordinary() *counts { return new(counts) }\n",
+    );
+    for want in [
+        "return &counts{}",
+        "return &chain{}",
+        "return &map[string]int{}",
+    ] {
+        assert!(go.contains(want), "missing {want:?} in:\n{go}");
+    }
+    assert!(
+        !go.contains("new(counts)"),
+        "map alias left unallocated:\n{go}"
+    );
+    assert!(
+        !go.contains("new(chain)"),
+        "alias chain left unallocated:\n{go}"
+    );
+}
+
+#[test]
+fn n5_parenthesized_map_names_respect_value_and_type_parameter_scopes() {
+    let go = emit_src(
+        "type counts = map[string]int\ntype t = map[string]int\n\
+         struct box[t any] { value t }\n\
+         fn generic[counts any]() *counts { return new((counts)) }\n\
+         fn (b *box[t]) allocate() *t { return new((t)) }\n\
+         fn local() *int {\n counts := 7\n _ = counts\n return new((counts))\n }\n\
+         fn shadowed_new() int {\n new := fn(n int) int { return n + 1 }\n counts := 7\n _ = counts\n return new((counts))\n }\n",
+    );
+    assert!(
+        go.contains("return new(counts)"),
+        "shadowed alias changed:\n{go}"
+    );
+    assert!(
+        go.contains("return new(t)"),
+        "receiver type parameter changed:\n{go}"
+    );
+    assert!(
+        !go.contains("&counts{"),
+        "scope resolved as package alias:\n{go}"
+    );
+    assert!(
+        !go.contains("&t{"),
+        "receiver scope resolved as package alias:\n{go}"
+    );
+}
+
+#[test]
+fn n5_parenthesized_non_maps_and_non_type_arguments_keep_existing_lowering() {
+    let go = emit_src(
+        "type counts = map[string]int\nstruct bag { items map[string]int }\nstruct plain { n int }\n\
+         fn main() {\n\
+         a := new(bag)\n b := new((plain))\n c := new((int))\n\
+         d := new(value=(counts))\n e := new((counts)...)\n\
+         fmt.println(a, b, c, d, e)\n }\n",
+    );
+    // Ordinary map-bearing structs and map-free parenthesized types are unchanged.
+    assert!(go.contains("a := &bag{items: map[string]int{}}"), ":\n{go}");
+    assert!(go.contains("b := new(plain)"), ":\n{go}");
+    assert!(go.contains("c := new(int)"), ":\n{go}");
+    assert!(
+        !go.contains("&counts{"),
+        "named/spread argument rewritten:\n{go}"
+    );
+}

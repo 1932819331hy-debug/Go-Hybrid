@@ -546,6 +546,8 @@ pub struct Emitter {
     /// and user type alias → its target, for zero values that allocate.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
     n5_aliases: BTreeMap<String, TypeExpr>,
+    /// Function/receiver type parameters shadow package aliases in `new(T)`.
+    n5_type_params: BTreeSet<String>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -592,6 +594,7 @@ impl Emitter {
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+            n5_type_params: BTreeSet::new(),
         }
     }
 
@@ -798,7 +801,25 @@ impl Emitter {
                     let ty = self.type_text(&t.ty);
                     self.push(&format!("type {} = {}", t.name, ty));
                 }
-                Decl::Fn(f) => self.emit_fn(f)?,
+                Decl::Fn(f) => {
+                    self.n5_type_params = f.type_params.iter().map(|p| p.name.clone()).collect();
+                    if let Some(recv) = &f.receiver {
+                        // Receiver type arguments bind names too (`box[t]`).
+                        if let TypeExpr::Named { name, .. } = &recv.ty {
+                            if let Some((_, args)) = name.split_once('[') {
+                                if let Some(args) = args.strip_suffix(']') {
+                                    self.n5_type_params.extend(
+                                        Self::split_top_level_type_args(args)
+                                            .into_iter()
+                                            .map(str::to_owned),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    self.emit_fn(f)?;
+                    self.n5_type_params.clear();
+                }
             }
         }
 

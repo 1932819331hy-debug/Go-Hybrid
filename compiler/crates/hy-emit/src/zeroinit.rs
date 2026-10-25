@@ -94,10 +94,14 @@ impl Emitter {
 
     /// `new(T)` where T's zero value needs N5 allocation → `&T{…}`. The
     /// parser encodes the type argument as a bare identifier (`new(bag)`)
-    /// or as an empty type-as-value literal (`new(map[string]int)`).
+    /// or as an empty type-as-value literal (`new(map[string]int{})`).
     pub(crate) fn n5_new(&mut self, args: &[CallArg]) -> Option<String> {
         let [arg] = args else { return None };
-        let ty = match &arg.value {
+        if arg.name.is_some() || arg.spread {
+            return None;
+        }
+        let parenthesized = matches!(arg.value, Expr::Paren { .. });
+        let ty = match Self::peel_parens(&arg.value) {
             Expr::Ident { name, span } => TypeExpr::Named {
                 name: name.clone(),
                 span: *span,
@@ -120,10 +124,16 @@ impl Emitter {
             _ => return None,
         };
         if let TypeExpr::Named { name, .. } = &ty {
-            // A local value named like a type is not a type argument.
-            if self.local_vars.contains(name) {
+            // Values and type parameters must not resolve as package aliases.
+            if self.local_vars.contains(name) || self.n5_type_params.contains(name) {
                 return None;
             }
+        }
+        // Extend the parenthesized path only for maps (including aliases).
+        // Non-map operands retain the fallback lowering. Go permits taking
+        // the address of a map literal.
+        if parenthesized && !matches!(self.n5_resolve_alias(&ty), TypeExpr::Map { .. }) {
+            return None;
         }
         self.n5_zero_init(&ty).map(|init| format!("&{}", init))
     }

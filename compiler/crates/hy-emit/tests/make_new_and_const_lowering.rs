@@ -26,7 +26,8 @@ fn emit_new_slice_chan_and_spec_primitive() {
     .expect("must emit");
     assert!(go.contains("new([]int)"), "got:\n{}", go);
     assert!(!go.contains("new([]int{})"), "got:\n{}", go);
-    assert!(go.contains("new(str_map)"), "got:\n{}", go);
+    // N5 initializes the map even when the type operand is parenthesized.
+    assert!(go.contains("pm := &str_map{}"), "got:\n{}", go);
     assert!(go.contains("new(chan int)"), "got:\n{}", go);
     assert!(go.contains("new(uint8)"), "got:\n{}", go);
 }
