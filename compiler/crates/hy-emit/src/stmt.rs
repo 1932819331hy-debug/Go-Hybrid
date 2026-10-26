@@ -352,7 +352,7 @@ impl Emitter {
 
         // `x := f()?` — the try desugar. Values.len() == 1, a Try node.
         if l.values.len() == 1 {
-            if let Expr::Try { operand, .. } = &l.values[0] {
+            if let Expr::Try { operand, .. } = Self::peel_parens(&l.values[0]) {
                 return self.emit_try_define(l, operand);
             }
         }
@@ -890,17 +890,17 @@ impl Emitter {
             callee,
             args,
             span: _,
-        } = call
+        } = Self::peel_parens(call)
         {
             if let Expr::Field {
                 base,
                 name,
                 span: _,
-            } = callee.as_ref()
+            } = Self::peel_parens(callee)
             {
-                if let Expr::Ident { name: pkg, .. } = base.as_ref() {
-                    if *pkg == "httptest" && (*name == "get" || *name == "post") {
-                        return self.emit_httptest_get(l, args, name);
+                if let Expr::Ident { name: pkg, .. } = Self::peel_parens(base) {
+                    if self.is_unshadowed_pkg_root(pkg) && *pkg == "httptest" && (*name == "get" || *name == "post") {
+                        self.hoist_tries_call(callee, args)?; return self.emit_httptest_get(l, args, name);
                     }
                 }
             }
