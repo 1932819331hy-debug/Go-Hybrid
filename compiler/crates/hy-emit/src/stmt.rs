@@ -180,6 +180,8 @@ impl Emitter {
                 // Go select, 1:1 — Hybrid's arm spelling
                 // (`v, ok := <-sq:` / `<-deadline:` / `ch <- v:`) lowers to
                 // Go's case clauses.
+                let hdrs: Vec<&Expr> = arms.iter().flat_map(|a| match &a.kind { SelectArmKind::Recv { chan, .. } => vec![chan], SelectArmKind::Send { chan, value, .. } => vec![chan, value], SelectArmKind::Default => vec![] }).collect();
+                for (i, e) in hdrs.iter().enumerate() { if hdrs[i + 1..].iter().any(|r| Self::expr_has_hoistable_try(r)) { self.hoist_order_before_try(e)?; } else { self.hoist_tries_expr(e)?; } }
                 self.push("select {");
                 self.indent += 1;
                 for arm in arms {
