@@ -7135,7 +7135,9 @@ impl<'a> Checker<'a> {
             | Expr::Try { operand: inner, .. }
             | Expr::Unary { operand: inner, .. }
             | Expr::AddrOf { operand: inner, .. } => {
-                self.expr_fnlit_mutates_const_param(inner, aliases, depth)
+                (matches!(as_addr_of(e).map(unwrap_parens), Some(Expr::Index { .. } | Expr::Field { .. }))
+                    && Self::expr_reaches_const_aliases(e, aliases))
+                    || self.expr_fnlit_mutates_const_param(inner, aliases, depth)
             }
             Expr::Call { callee, args, .. } => {
                 self.expr_fnlit_mutates_const_param(callee, aliases, depth)
