@@ -865,6 +865,9 @@ pub(crate) fn place_field_store_slot(place: &Place) -> Option<(String, Option<St
 }
 
 fn lit_index_key(index: &Expr) -> Option<String> {
+    if let Some(v) = crate::const_overflow::const_int_value(index) {
+        return Some(v.to_string());
+    }
     match crate::model::unwrap_parens(index) {
         e @ Expr::Lit { .. } => Some(e.render()),
         _ => None,
