@@ -19,7 +19,7 @@
 //!     hatch is explicit and auditable: `managed` (HYB-E8001, counted by
 //!     --report-managed).
 
-use crate::model::{as_addr_of, unwrap_parens, Binding, Checker, FnState, MoveKind, TypeShape};
+use crate::model::{as_addr_of, unwrap_parens, unwrap_parens_and_move, Binding, Checker, FnState, MoveKind, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{Expr, LitKind, TypeExpr};
 
@@ -1890,7 +1890,11 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::SliceLit { elem, items, .. } => {
-                if let Some(elem_ty) = elem {
+                let elem_ty = expr
+                    .as_array_lit()
+                    .map(|(_, inner_elem, _)| inner_elem)
+                    .or(elem.as_deref());
+                if let Some(elem_ty) = elem_ty {
                     for i in items {
                         self.check_expr_against_ty(i, elem_ty, env);
                     }
@@ -2031,7 +2035,7 @@ impl<'a> Checker<'a> {
         if let Some(got_ty) = self.dir_ty_of_expr(expr, env) {
             self.check_chan_dir_coercion(&got_ty, want_ty, expr.span(), &expr.render());
         }
-        match unwrap_parens(expr) {
+        match unwrap_parens_and_move(expr) {
             Expr::StructLit {
                 ty: None, fields, ..
             } => {
