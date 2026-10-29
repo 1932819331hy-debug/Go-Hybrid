@@ -983,6 +983,14 @@ impl<'a> Collector<'a> {
                 span,
             } => {
                 for t in targets {
+                    // #2199: a store whose target is a TYPE NAME cannot build.
+                    // The annotated-store spelling `n T = v` parses as the
+                    // expression statement `n` followed by a store to `T`, and
+                    // Go refuses the second line (`T (type) is not an
+                    // expression`). Same class as #778, one position over.
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        self.check_type_name_in_value_position(name, t.span);
+                    }
                     self.place(t, *op);
                 }
                 for v in values {
