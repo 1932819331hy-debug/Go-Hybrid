@@ -2613,6 +2613,7 @@ impl Emitter {
 
     /// Leading identifier of a rendered loan place (`m["a"]` -> `m`, `h.m[k]` -> `h`).
     fn place_root(place: &str) -> &str {
+        let place = place.trim_start_matches('(');
         let end = place
             .find(|c: char| !(c.is_alphanumeric() || c == '_'))
             .unwrap_or(place.len());
