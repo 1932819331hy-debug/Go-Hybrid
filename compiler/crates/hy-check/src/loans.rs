@@ -851,7 +851,7 @@ impl<'a> Checker<'a> {
             match stmt {
                 Stmt::Assign { targets, values, .. } => {
                     for t in targets {
-                        if matches!(t.kind, PlaceKind::Index { .. }) && alias_stack.last().unwrap().contains(t.root()) {
+                        if (matches!(t.kind, PlaceKind::Index { .. }) || walk::place_field_store_slot(t).is_some()) && alias_stack.last().unwrap().contains(t.root()) {
                             return true;
                         }
                     }
@@ -928,6 +928,7 @@ impl<'a> Checker<'a> {
     /// captures it (a body declaring its own `param` shadows it — those
     /// references are the closure's fresh binding, not the caller's map).
     fn expr_fnlit_mutates_param(&self, e: &Expr, param: &str, depth: usize) -> bool {
+        if walk::addr_of_index_base_path(e).is_some_and(|p| path_root(&p) == param) { return true; }
         match e {
             Expr::FnLit {
                 params,
@@ -1258,7 +1259,7 @@ impl<'a> Checker<'a> {
             // index-assign targets
             if let Stmt::Assign { targets, .. } = stmt {
                 for t in targets {
-                    if matches!(t.kind, PlaceKind::Index { .. }) {
+                    if matches!(t.kind, PlaceKind::Index { .. }) || walk::place_field_store_slot(t).is_some() {
                         let raw = t.root().to_string();
                         if let Some(r) = resolve(&raw, current_aliases, current_shadows) {
                             out.insert(r);
@@ -1275,6 +1276,7 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
             for v in fnlit_values {
+                if let Some(r) = walk::addr_of_index_base_path(v).and_then(|p| resolve(path_root(&p), &pre_aliases, &pre_shadows)) { out.insert(r); }
                 if let Expr::FnLit {
                     params: fp,
                     results: fr,
