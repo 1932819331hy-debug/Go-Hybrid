@@ -1,5 +1,6 @@
 # Hybrid Language: Development Plan
 
+- Contributor amendment (2026-10-29, #2199): a store target that is a TYPE NAME (`n string = "str"`, `q.n int = 5`) is now rejected as HYB-E1002. The annotated-store spelling parses as the expression statement `n` followed by a store to `T`, and Go refuses the second line (`T (type) is not an expression`) — the #778 class one position over, so the existing type-name-in-value-position check is also applied to assignment targets. The annotation stays legal in a declaration (`var n int = 5`) and plain stores (`n = 5`, `q.n = 2`) are untouched. Test pin in `compiler/crates/hy-check/tests/type_name_in_value_position.rs`.
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
