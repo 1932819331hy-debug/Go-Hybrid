@@ -806,6 +806,16 @@ pub(crate) fn unwrap_parens(mut e: &Expr) -> &Expr {
     e
 }
 
+/// Strip enclosing parentheses and move-expressions.
+pub(crate) fn unwrap_parens_and_move(mut e: &Expr) -> &Expr {
+    loop {
+        match e {
+            Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => e = inner,
+            _ => return e,
+        }
+    }
+}
+
 /// The direct operand of a `move x` (or `move (x)`) when it is a plain binding.
 pub(crate) fn move_operand_ident(e: &Expr) -> Option<String> {
     match unwrap_parens(e) {

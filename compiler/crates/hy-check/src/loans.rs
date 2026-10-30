@@ -851,7 +851,7 @@ impl<'a> Checker<'a> {
             match stmt {
                 Stmt::Assign { targets, values, .. } => {
                     for t in targets {
-                        if matches!(t.kind, PlaceKind::Index { .. }) && alias_stack.last().unwrap().contains(t.root()) {
+                        if (matches!(t.kind, PlaceKind::Index { .. }) || walk::place_field_store_slot(t).is_some()) && alias_stack.last().unwrap().contains(t.root()) {
                             return true;
                         }
                     }
@@ -928,6 +928,7 @@ impl<'a> Checker<'a> {
     /// captures it (a body declaring its own `param` shadows it — those
     /// references are the closure's fresh binding, not the caller's map).
     fn expr_fnlit_mutates_param(&self, e: &Expr, param: &str, depth: usize) -> bool {
+        if walk::addr_of_index_base_path(e).is_some_and(|p| path_root(&p) == param) { return true; }
         match e {
             Expr::FnLit {
                 params,
@@ -1038,7 +1039,7 @@ impl<'a> Checker<'a> {
                     .collect();
                 let typed_results: Vec<(String, Option<hy_syntax::TypeExpr>)> = results
                     .iter()
-                    .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
+                    .map(|r| (r.name.clone().unwrap_or_default(), Some(r.ty.clone())))
                     .collect();
                 st.closure_fnlits.insert(
                     name.to_string(),
@@ -1258,7 +1259,7 @@ impl<'a> Checker<'a> {
             // index-assign targets
             if let Stmt::Assign { targets, .. } = stmt {
                 for t in targets {
-                    if matches!(t.kind, PlaceKind::Index { .. }) {
+                    if matches!(t.kind, PlaceKind::Index { .. }) || walk::place_field_store_slot(t).is_some() {
                         let raw = t.root().to_string();
                         if let Some(r) = resolve(&raw, current_aliases, current_shadows) {
                             out.insert(r);
@@ -1275,6 +1276,7 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
             for v in fnlit_values {
+                if let Some(r) = walk::addr_of_index_base_path(v).and_then(|p| resolve(path_root(&p), &pre_aliases, &pre_shadows)) { out.insert(r); }
                 if let Expr::FnLit {
                     params: fp,
                     results: fr,
@@ -2655,7 +2657,7 @@ impl<'a> Checker<'a> {
         collect_ref_roots(&src.value, &mut src_roots);
         for d in &dst_roots {
             for s in &src_roots {
-                if d != s && self.binding_may_share(st, d) && self.binding_may_share(st, s) {
+                if d != s && self.binding_may_share(st, d) && (self.binding_may_share(st, s) || self.expr_slices_addressable_array(st, &src.value, s)) {
                     st.share_edge(d, s);
                 }
             }
@@ -2754,7 +2756,7 @@ impl<'a> Checker<'a> {
                 for s in &src_roots {
                     if d != s
                         && (self.binding_may_share(st, s)
-                            || self.lookup_binding(st, s).is_some_and(|b| b.immutable))
+                            || self.lookup_binding(st, s).is_some_and(|b| b.immutable) || matches!(src_src, CalleeSlotSource::Arg(e) if self.expr_slices_addressable_array(st, e, s)))
                     {
                         st.share_edge(d, s);
                     }
@@ -4179,7 +4181,7 @@ impl<'a> Checker<'a> {
                 let results = decl
                     .results
                     .iter()
-                    .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
+                    .map(|r| (r.name.clone().unwrap_or_default(), Some(r.ty.clone())))
                     .collect();
                 Some((params, results, body))
             }
@@ -4238,7 +4240,7 @@ impl<'a> Checker<'a> {
                 let results = decl
                     .results
                     .iter()
-                    .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
+                    .map(|r| (r.name.clone().unwrap_or_default(), Some(r.ty.clone())))
                     .collect();
                 Some((params, results, body))
             }
@@ -4254,7 +4256,7 @@ impl<'a> Checker<'a> {
                     .collect();
                 let r = results
                     .iter()
-                    .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
+                    .map(|r| (r.name.clone().unwrap_or_default(), Some(r.ty.clone())))
                     .collect();
                 Some((p, r, body))
             }
@@ -4318,7 +4320,11 @@ impl<'a> Checker<'a> {
                 };
                 let mut shadowed: HashSet<String> =
                     typed_params.iter().map(|(n, _)| n.clone()).collect();
-                shadowed.extend(typed_results.iter().map(|(n, _)| n.clone()));
+                shadowed.extend(
+                    typed_results
+                        .iter()
+                        .filter_map(|(n, _)| if !n.is_empty() { Some(n.clone()) } else { None }),
+                );
                 let mut aliases: HashMap<String, HashSet<String>> = HashMap::new();
                 for (cname, cb) in &self.consts {
                     if self.shape_may_share(&cb.shape) && !shadowed.contains(cname) {
@@ -4444,6 +4450,9 @@ impl<'a> Checker<'a> {
                         Stmt::Return { values, .. } => {
                             if values.is_empty() {
                                 for (nr, _) in &typed_results {
+                                    if nr.is_empty() {
+                                        continue;
+                                    }
                                     if let Some(cs) = aliases.get(nr) {
                                         for c in cs {
                                             if !out.contains(c) {
@@ -4583,7 +4592,7 @@ impl<'a> Checker<'a> {
             }
         }
         for (nr, rty) in &typed_results {
-            if nr == "_" {
+            if nr == "_" || nr.is_empty() {
                 continue;
             }
             let shape = rty
@@ -4864,7 +4873,13 @@ impl<'a> Checker<'a> {
                         }
                         typed_results
                             .iter()
-                            .map(|(nr, _)| origins.get(nr).cloned().unwrap_or_default())
+                            .map(|(nr, _)| {
+                                if nr.is_empty() || nr == "_" {
+                                    HashSet::new()
+                                } else {
+                                    origins.get(nr).cloned().unwrap_or_default()
+                                }
+                            })
                             .collect()
                     } else {
                         if values.len() < 2 {
@@ -7135,7 +7150,9 @@ impl<'a> Checker<'a> {
             | Expr::Try { operand: inner, .. }
             | Expr::Unary { operand: inner, .. }
             | Expr::AddrOf { operand: inner, .. } => {
-                self.expr_fnlit_mutates_const_param(inner, aliases, depth)
+                (matches!(as_addr_of(e).map(unwrap_parens), Some(Expr::Index { .. } | Expr::Field { .. }))
+                    && Self::expr_reaches_const_aliases(e, aliases))
+                    || self.expr_fnlit_mutates_const_param(inner, aliases, depth)
             }
             Expr::Call { callee, args, .. } => {
                 self.expr_fnlit_mutates_const_param(callee, aliases, depth)
